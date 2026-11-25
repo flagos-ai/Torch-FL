@@ -67,46 +67,82 @@ def run_on_wheel(request, pytestconfig):
 def _check_strided_transfer():
     views = {
         "transpose": lambda x: x.transpose(0, 2),
+        "dense_offset": lambda x: x[1:],
         "offset_slice": lambda x: x[..., 1::2].transpose(0, 2),
+        "strided_axes": lambda x: x[::2, ::2, 1::2],
         "expand": lambda x: x[:, :1, :].expand_as(x),
-        "empty": lambda x: x[:, :0, :],
+        "scalar": lambda x: x[1, 1, 1],
+        "strided_vector": lambda x: x[1, 1, 1::2],
+        "empty": lambda x: x[:, :0, :].transpose(0, 2),
     }
+    dtypes = (
+        torch.float32,
+        torch.float16,
+        torch.bfloat16,
+        torch.int8,
+        torch.uint8,
+        torch.int64,
+        torch.bool,
+    )
+    values = torch.arange(-30, 30).reshape(3, 4, 5)
     with torch.no_grad():
-        for dtype in (torch.float32, torch.bfloat16):
-            cpu = torch.arange(60, dtype=torch.float32).reshape(3, 4, 5).to(dtype)
+        for dtype in dtypes:
+            cpu = (values % 2 == 0) if dtype == torch.bool else values.to(dtype)
             device = cpu.to(DEVICE)
             for layout, view in views.items():
                 source, reference = view(device), view(cpu)
-                assert source.stride() == reference.stride(), layout
-                assert source.storage_offset() == reference.storage_offset(), layout
+                case = f"{layout}, {dtype}"
+                assert source.stride() == reference.stride(), case
+                assert source.storage_offset() == reference.storage_offset(), case
+                compare = partial(
+                    torch.testing.assert_close,
+                    atol=0,
+                    rtol=0,
+                    msg=lambda message: f"{case}: {message}",
+                )
+
+                packed, expected_packed = source.contiguous(), reference.contiguous()
+                assert packed.device == source.device, case
+                assert packed.stride() == expected_packed.stride(), case
+                compare(packed.cpu(), expected_packed)
                 for memory_format in (torch.preserve_format, torch.contiguous_format):
-                    cloned = source.clone(memory_format=memory_format)
+                    cloned = (
+                        source.clone()
+                        if memory_format == torch.preserve_format
+                        else source.clone(memory_format=memory_format)
+                    )
                     expected = reference.clone(memory_format=memory_format)
-                    assert cloned.device == source.device, layout
-                    assert cloned.stride() == expected.stride(), layout
+                    assert cloned.device == source.device, case
+                    assert cloned.stride() == expected.stride(), case
                     if source.numel():
-                        assert cloned.data_ptr() != source.data_ptr(), layout
-                    torch.testing.assert_close(cloned.cpu(), expected, atol=0, rtol=0)
-                    torch.testing.assert_close(
+                        assert cloned.data_ptr() != source.data_ptr(), case
+                    compare(cloned.cpu(), expected)
+                    compare(
                         source.cpu(memory_format=memory_format),
                         reference.to("cpu", copy=True, memory_format=memory_format),
-                        atol=0,
-                        rtol=0,
                         check_stride=True,
                     )
 
-                target = torch.full_like(cpu, -1)
-                target_device = target.to(DEVICE)
-                # An expanded source is valid, while the destination must be
-                # writable without overlapping elements.
-                target_view = (
-                    target_device if layout == "expand" else view(target_device)
-                )
-                reference_view = target if layout == "expand" else view(target)
-                assert target_view.copy_(source) is target_view, layout
-                reference_view.copy_(reference)
-                assert target_view.stride() == reference_view.stride(), layout
-                torch.testing.assert_close(target_device.cpu(), target, atol=0, rtol=0)
+                dense = torch.empty(source.shape, device=source.device, dtype=dtype)
+                assert dense.copy_(source) is dense, case
+                compare(dense.cpu(), reference)
+
+                # Use separate storage for each copy so missed writes and
+                # writes outside a non-overlapping destination view are visible.
+                for copy_source, expected_source in (
+                    (source, reference),
+                    (packed, expected_packed),
+                ):
+                    target = torch.zeros_like(cpu)
+                    target_device = target.to(DEVICE)
+                    target_view = (
+                        target_device if layout == "expand" else view(target_device)
+                    )
+                    reference_view = target if layout == "expand" else view(target)
+                    assert target_view.copy_(copy_source) is target_view, case
+                    reference_view.copy_(expected_source)
+                    assert target_view.stride() == reference_view.stride(), case
+                    compare(target_device.cpu(), target)
 
 
 def _check_copy_stream_order():

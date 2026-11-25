@@ -167,9 +167,9 @@ against the CPU reference in `tests/integration/ops/test_mps_unary.py`,
 `test_mps_index_select.py`, `test_mps_take.py`, `test_mps_gather.py`,
 `test_mps_layer_norm.py`, `test_mps_cat.py`, `test_mps_where.py` and
 `test_mps_batch_norm.py`, and `test_mps_masked_fill.py` for both out-of-place
-`masked_fill` spellings, plus `test_mps_contiguous.py` for the native copy
-paths these operators use, and a case their
-kernels decline takes the CPU round-trip rather than a wrong answer. The
+`masked_fill` spellings. The shared `tests/integration/common/test_transfer.py`
+exercises the copy paths these operators use on every hardware lane. A case the
+operator kernels decline takes the CPU round-trip. The
 `gemm` kernels serve `nn.Linear` by keeping `weight.t()` in the graph rather
 than copying it: a transposed last two axes over dense memory is recognised and
 handed to MPSGraph's transpose node, which measured free next to the copy it
