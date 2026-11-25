@@ -5,6 +5,11 @@
 # Below is the original copyright:
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
+from __future__ import annotations
+
+from collections.abc import Iterable
+import sys
+
 import torch
 
 from .. import _C  # type: ignore[import-untyped]
@@ -14,47 +19,78 @@ from . import _lazy_init, current_device, device_count
 
 __all__ = [
     "get_rng_state",
+    "get_rng_state_all",
     "set_rng_state",
+    "set_rng_state_all",
     "manual_seed",
     "manual_seed_all",
+    "seed",
+    "seed_all",
     "initial_seed",
     "_is_in_bad_fork",
 ]
 
 
-def get_rng_state(device="flagos"):
+def _resolve_device_index(device: int | str | torch.device) -> int:
+    if isinstance(device, int) and not isinstance(device, bool):
+        if device < 0:
+            raise RuntimeError(f"Device index must not be negative, got {device}")
+        return device
     if isinstance(device, str):
         device = torch.device(device)
-    elif isinstance(device, int):
+    elif not isinstance(device, torch.device):
         device = torch.device("flagos", device)
-    idx = device.index
-    if idx is None:
-        idx = current_device()
+    if device.type not in ("flagos", "privateuseone"):
+        raise ValueError(f"Expected a 'flagos' device, but got {device}")
+    if device.index is None:
+        return current_device()
+    return device.index
+
+
+def get_rng_state(device: int | str | torch.device = "flagos") -> torch.Tensor:
+    idx = _resolve_device_index(device)
     default_generator = _C._get_default_generator(idx)
     return default_generator.get_state()
 
 
-def set_rng_state(new_state, device="flagos"):
-    if isinstance(device, str):
-        device = torch.device(device)
-    elif isinstance(device, int):
-        device = torch.device("flagos", device)
-    idx = device.index
-    if idx is None:
-        idx = current_device()
+def get_rng_state_all() -> list[torch.Tensor]:
+    flagos_mod = sys.modules.get(__package__)
+    getter = getattr(flagos_mod, "get_rng_state", get_rng_state)
+    return [getter(idx) for idx in range(device_count())]
+
+
+def set_rng_state(
+    new_state: torch.Tensor, device: int | str | torch.device = "flagos"
+) -> None:
+    idx = _resolve_device_index(device)
     default_generator = _C._get_default_generator(idx)
     default_generator.set_state(new_state)
 
 
+def set_rng_state_all(new_states: Iterable[torch.Tensor]) -> None:
+    flagos_mod = sys.modules.get(__package__)
+    setter = getattr(flagos_mod, "set_rng_state", set_rng_state)
+    for idx, state in enumerate(new_states):
+        setter(state, idx)
+
+
 def initial_seed() -> int:
-    _lazy_init()
+    if device_count() > 0:
+        _lazy_init()
     idx = current_device()
     default_generator = _C._get_default_generator(idx)
     return default_generator.initial_seed()
 
 
 def manual_seed(seed: int) -> None:
+    r"""Set the seed for generating random numbers for the current FlagOS device.
+
+    It is safe to call this function if no FlagOS device is available; in that
+    case, it is silently ignored.
+    """
     seed = int(seed)
+    if device_count() == 0:
+        return
 
     idx = current_device()
     default_generator = _C._get_default_generator(idx)
@@ -62,11 +98,62 @@ def manual_seed(seed: int) -> None:
 
 
 def manual_seed_all(seed: int) -> None:
-    seed = int(seed)
+    r"""Set the seed for generating random numbers on all FlagOS devices.
 
+    It is safe to call this function if no FlagOS device is available; in that
+    case, it is silently ignored.
+    """
+    seed = int(seed)
     for idx in range(device_count()):
         default_generator = _C._get_default_generator(idx)
         default_generator.manual_seed(seed)
+
+
+def seed() -> None:
+    r"""Set the seed for generating random numbers to a random number on the current FlagOS device.
+
+    It is safe to call this function if no FlagOS device is available; in that
+    case, it is silently ignored.
+    """
+    if device_count() == 0:
+        return
+
+    idx = current_device()
+    default_generator = _C._get_default_generator(idx)
+    random_seed = default_generator.seed()
+    flagos_mod = sys.modules.get(__package__)
+    if (
+        flagos_mod is not None
+        and getattr(flagos_mod, "manual_seed", None) is not manual_seed
+    ):
+        flagos_mod.manual_seed(random_seed)
+
+
+def seed_all() -> None:
+    r"""Set the seed for generating random numbers to a random number on all FlagOS devices.
+
+    It is safe to call this function if no FlagOS device is available; in that
+    case, it is silently ignored.
+    """
+    count = device_count()
+    if count == 0:
+        return
+
+    random_seed = 0
+    seeded = False
+    for idx in range(count):
+        default_generator = _C._get_default_generator(idx)
+        if not seeded:
+            random_seed = default_generator.seed()
+            seeded = True
+        else:
+            default_generator.manual_seed(random_seed)
+    flagos_mod = sys.modules.get(__package__)
+    if (
+        flagos_mod is not None
+        and getattr(flagos_mod, "manual_seed_all", None) is not manual_seed_all
+    ):
+        flagos_mod.manual_seed_all(random_seed)
 
 
 def _is_in_bad_fork() -> bool:

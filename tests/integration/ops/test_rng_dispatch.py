@@ -354,6 +354,79 @@ class TestRngSeedSource:
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
+    def test_flagos_manual_seed_reproducible_across_reseeds(self):
+        torch.flagos.manual_seed(SEED)
+        first = torch.randn(64, device=DEVICE).cpu()
+        torch.flagos.manual_seed(OTHER_SEED)
+        other = torch.randn(64, device=DEVICE).cpu()
+        torch.flagos.manual_seed(SEED)
+        second = torch.randn(64, device=DEVICE).cpu()
+        assert torch.equal(first, second)
+        assert not torch.equal(first, other)
+
+    @pytest.mark.anyplatform
+    @pytest.mark.main_ops
+    def test_default_generator_bounds_raise_clean_error(self):
+        count = torch.flagos.device_count()
+        for bad_idx in (count, count + 3, -2):
+            with pytest.raises(RuntimeError):
+                torch_fl._C._get_default_generator(bad_idx)
+        with pytest.raises((RuntimeError, IndexError)):
+            torch.flagos.get_rng_state(count)
+
+    @pytest.mark.anyplatform
+    @pytest.mark.main_ops
+    def test_zero_visible_devices_manual_seed_subprocess(self):
+        import os
+        import subprocess
+        import sys
+
+        env = os.environ.copy()
+        for var in (
+            "ROCR_VISIBLE_DEVICES",
+            "HIP_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+            "ASCEND_RT_VISIBLE_DEVICES",
+            "MUSA_VISIBLE_DEVICES",
+            "XPURT_VISIBLE_DEVICES",
+            "ZE_AFFINITY_MASK",
+        ):
+            env[var] = ""
+        env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+        probe = (
+            "import resource; resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+            "import torch_fl, torch\n"
+            "if torch.flagos.device_count() != 0:\n"
+            "    print('SKIP'); raise SystemExit(0)\n"
+            "torch.flagos.manual_seed(1)\n"
+            "torch.flagos.manual_seed_all(1)\n"
+            "torch.flagos.seed()\n"
+            "torch.flagos.seed_all()\n"
+            "torch.manual_seed(1)\n"
+            "for idx in (0, -1):\n"
+            "    try:\n"
+            "        torch_fl._C._get_default_generator(idx)\n"
+            "    except RuntimeError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError(f'expected RuntimeError for {idx}')\n"
+            "print('OK')\n"
+        )
+        res = subprocess.run(
+            [sys.executable, "-c", probe],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        assert res.returncode == 0, res.stdout + res.stderr
+        if res.stdout.strip() == "SKIP":
+            pytest.skip("visibility masks do not hide devices on this runtime")
+        assert res.stdout.strip().endswith("OK")
+
+    @pytest.mark.anyplatform
+    @pytest.mark.main_ops
     def test_manual_seed_emits_no_ineffective_warning(self):
         import warnings
 
