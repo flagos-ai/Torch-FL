@@ -238,8 +238,9 @@ class BlockingCopyGuard {
     // op and was wrong in 40 of 40 rounds without the barrier.
     topsStreamSynchronize(at::native::flagos::gcu::GetCurrentTopsStream());
 #elif defined(USE_KUNLUNXIN)
-    // xpu_wait(nullptr) only waits for the legacy default queue. Native hosts
-    // submit producers to the stream tracked by the FlagOS runtime.
+    // Vendor calls can submit to the legacy default queue. Native hosts also
+    // submit to the active FlagOS queue, which can finish independently.
+    ::DeviceSynchronize();
     int device = 0;
     TORCH_CHECK(::GetDevice(&device) == Success,
                 "flagos: could not resolve the device for a blocking copy");
