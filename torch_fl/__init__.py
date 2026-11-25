@@ -290,6 +290,7 @@ _OPTIONAL_INTEGRATIONS = (
     "parallel_comm",
     "dataparallel",
     "data_parallel",
+    "dcp",
     "compile",
     "flex_attention",
     "bpu",
@@ -301,6 +302,12 @@ def _install_apex_compat() -> bool:
     from torch_fl.compat.apex import install_apex_compat
 
     return install_apex_compat()
+
+
+def _install_dcp_compat() -> bool:
+    from torch_fl.compat.dcp import install_dcp_compat
+
+    return install_dcp_compat()
 
 
 def _install_flex_attention_compat() -> bool:
@@ -338,6 +345,7 @@ def activate_optional_integrations(*names: str, strict: bool = True) -> dict:
     installers = {
         "apex": _install_apex_compat,
         "ddp": parallel.install_ddp,
+        "dcp": _install_dcp_compat,
         "parallel_comm": parallel.install_comm,
         "dataparallel": parallel.install_dataparallel,
         "data_parallel": parallel.install_data_parallel,
@@ -588,6 +596,7 @@ def _phase_ecosystem() -> None:
     if _STARTUP_PROFILE == "full":
         activate_optional_integrations(
             "ddp",
+            "dcp",
             "parallel_comm",
             "dataparallel",
             "data_parallel",

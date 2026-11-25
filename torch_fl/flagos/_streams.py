@@ -30,7 +30,9 @@ class _StreamHandle:
         return torch.device("flagos", self.device_index)
 
     def synchronize(self):
-        pass
+        from . import synchronize
+
+        synchronize(self.device_index)
 
     def query(self):
         return True

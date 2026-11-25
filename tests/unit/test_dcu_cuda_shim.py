@@ -48,10 +48,13 @@ _PATCHED_ATTRS = (
     "_maybe_exchange_device",
     "current_stream",
     "default_stream",
+    "set_stream",
+    "_set_stream_by_id",
     "manual_seed",
     "manual_seed_all",
     "default_generators",
     "Event",
+    "Stream",
     "memory_allocated",
     "memory_reserved",
     "memory_stats",
@@ -147,6 +150,7 @@ def _restore_sdpa_state(state):
 def shim(monkeypatch):
     """Reset shim state and restore everything ``torch.cuda`` it overwrites."""
     saved = {name: getattr(torch.cuda, name, _SENTINEL) for name in _PATCHED_ATTRS}
+    saved_device_init = torch.cuda.device.__init__
     saved_raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", _SENTINEL)
     saved_queued = list(getattr(torch.cuda, "_queued_calls", []))
     saved_sdpa = _sdpa_state()
@@ -186,6 +190,7 @@ def shim(monkeypatch):
         )
     finally:
         _restore_sdpa_state(saved_sdpa)
+        torch.cuda.device.__init__ = saved_device_init
         for name, value in saved.items():
             if value is _SENTINEL:
                 if hasattr(torch.cuda, name):
@@ -308,6 +313,87 @@ def test_native_stream_views_follow_the_device_registry(shim):
     assert torch.cuda.current_stream(1).cuda_stream == 19
     assert torch._C._cuda_getCurrentRawStream(1) == 19
     assert torch.cuda.default_stream(1).cuda_stream == 11
+
+
+def test_stream_shim_supports_cuda_stream_context_and_restores_stream(shim):
+    """``with torch.cuda.stream(s):`` requires ``.device`` and ``set_stream``."""
+    selected = {0: 101, 1: 201}
+
+    class _FakeGuardStream:
+        def __init__(self, stream_id, device_index):
+            self.stream_id = stream_id
+            self.cuda_stream = stream_id
+            self.device_index = device_index
+            self.device_type = 20
+
+        @property
+        def device(self):
+            return torch.device("cpu", self.device_index)
+
+    def _set_by_id(stream_id, device_index, device_type):
+        assert device_type == 20
+        selected[device_index] = stream_id
+
+    shim.flagos._C = types.SimpleNamespace(
+        _get_native_current_raw_stream=lambda index: selected[index],
+        _get_native_default_raw_stream=lambda index: 100 + index * 100,
+    )
+    shim.flagos._streams = types.SimpleNamespace(
+        current_stream=lambda index=0: _FakeGuardStream(selected[index], index),
+        set_stream=lambda s: selected.__setitem__(s.device_index, s.stream_id),
+        set_stream_by_id=_set_by_id,
+    )
+    _dcu_compat.patch_torch_cuda_for_dcu()
+
+    s0 = torch.cuda.current_stream(0)
+    assert s0.device == torch.device("cuda", 0)
+    assert s0.stream_id == 101
+    assert s0.handle == 101
+    assert s0.device_type == 1
+
+    target = _dcu_compat._DcuStreamShim(0, 555)
+    with torch.cuda.stream(target):
+        assert selected[0] == 555
+        assert torch.cuda.current_stream(0).cuda_stream == 555
+    assert selected[0] == 101
+    assert torch.cuda.current_stream(0).cuda_stream == 101
+
+
+def test_stream_shim_event_and_driver_sync_methods(shim, monkeypatch):
+    synced_handles = []
+    queried_handles = []
+
+    class _Hip:
+        def hipStreamSynchronize(self, handle):
+            synced_handles.append(handle.value)
+            return 0
+
+        def hipStreamQuery(self, handle):
+            queried_handles.append(handle.value)
+            return 600  # hipErrorNotReady
+
+    recorded = []
+
+    class _RecordingEvent:
+        def record(self, stream=None):
+            recorded.append(("record", stream.cuda_stream))
+
+        def wait(self, stream=None):
+            recorded.append(("wait", stream.cuda_stream))
+
+    shim.flagos.Event = _RecordingEvent
+    monkeypatch.setattr(_dcu_compat, "_load_hip", lambda: _Hip())
+    _dcu_compat.patch_torch_cuda_for_dcu()
+
+    s_a = _dcu_compat._DcuStreamShim(0, 0x1234)
+    s_b = _dcu_compat._DcuStreamShim(0, 0x5678)
+    s_a.synchronize()
+    assert synced_handles == [0x1234]
+    assert s_a.query() is False
+    assert queried_handles == [0x1234]
+
+    s_a.wait_stream(s_b)
+    assert recorded == [("record", 0x5678), ("wait", 0x1234)]
 
 
 def test_event_is_constructible_for_the_triton_autotuner(shim):
