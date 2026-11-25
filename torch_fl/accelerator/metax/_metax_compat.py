@@ -588,6 +588,54 @@ def patch_torch_cuda_for_metax():
     except Exception:
         pass
 
+    def _is_current_stream_capturing() -> bool:
+        if _flagos is not None:
+            is_init = getattr(_flagos, "is_initialized", None)
+            if callable(is_init) and not is_init():
+                return False
+        raw = _current_raw_stream(_current_device())
+        status = ctypes.c_int(0)
+        if _mcruntime is not None:
+            try:
+                if (
+                    _mcruntime.mcStreamIsCapturing(
+                        ctypes.c_void_p(raw), ctypes.byref(status)
+                    )
+                    == 0
+                ):
+                    return status.value != 0
+            except (AttributeError, OSError):
+                pass
+        cudart = _get_cudart()
+        if cudart is not None:
+            try:
+                if (
+                    cudart.cudaStreamIsCapturing(
+                        ctypes.c_void_p(raw), ctypes.byref(status)
+                    )
+                    == 0
+                ):
+                    return status.value != 0
+            except (AttributeError, OSError):
+                pass
+        return False
+
+    if not hasattr(torch._C, "_CudaStreamBase"):
+        torch.cuda.is_current_stream_capturing = _is_current_stream_capturing
+        graphs_mod = getattr(torch.cuda, "graphs", None)
+        if graphs_mod is not None:
+            graphs_mod.is_current_stream_capturing = _is_current_stream_capturing
+            if isinstance(
+                getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None), type
+            ):
+                graphs_mod._cuda_isCurrentStreamCapturing = _is_current_stream_capturing
+        try:
+            torch._C._cuda_isCurrentStreamCapturing = _is_current_stream_capturing
+        except Exception:
+            pass
+        if _flagos is not None:
+            _flagos.is_current_stream_capturing = _is_current_stream_capturing
+
     # Seeding: with is_available()=True, torch.manual_seed() calls
     # torch.cuda.manual_seed_all(), which walks torch.cuda.default_generators
     # -- an empty tuple on the CPU wheel -> IndexError. Install per-device CUDA

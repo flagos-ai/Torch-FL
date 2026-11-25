@@ -300,6 +300,23 @@ def install_alias(flagos) -> None:
     # stock one goes through torch.cuda._lazy_init -> "Torch not compiled with
     # CUDA enabled". Point it at the flagos properties instead.
     torch.cuda.get_device_properties = flagos.get_device_properties
+    capture_query = getattr(flagos, "is_current_stream_capturing", lambda: False)
+    torch.cuda.is_current_stream_capturing = capture_query
+    graphs_mod = getattr(torch.cuda, "graphs", None)
+    if graphs_mod is not None:
+        graphs_mod.is_current_stream_capturing = capture_query
+        if isinstance(
+            getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None), type
+        ):
+            graphs_mod._cuda_isCurrentStreamCapturing = capture_query
+    if isinstance(
+        getattr(torch._C, "_cuda_isCurrentStreamCapturing", None),
+        (type, type(None)),
+    ):
+        try:
+            torch._C._cuda_isCurrentStreamCapturing = capture_query
+        except Exception:
+            pass
 
 
 def is_active() -> bool:

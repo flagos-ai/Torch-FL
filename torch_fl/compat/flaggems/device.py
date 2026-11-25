@@ -88,6 +88,9 @@ def _install_musa_flaggems_compat(flagos) -> None:
         "set_rng_state",
     ):
         setattr(musa, name, getattr(flagos, name))
+    musa.is_current_stream_capturing = getattr(
+        flagos, "is_current_stream_capturing", lambda: False
+    )
 
     def _get_device_capability(device=None):
         if device is None:
@@ -288,6 +291,7 @@ def _install_tsingmicro_flaggems_compat(flagos) -> None:
         "stream",
         "Stream",
         "Event",
+        "is_current_stream_capturing",
         "default_generators",
         "empty_cache",
         "mem_get_info",
@@ -402,6 +406,15 @@ def install_gcu_device_probes(flagos) -> None:
     torch.cuda.get_device_properties = flagos.get_device_properties
     torch.cuda.get_device_capability = device_capability
     torch.cuda._lazy_init = lambda: None
+    capture_query = getattr(flagos, "is_current_stream_capturing", lambda: False)
+    torch.cuda.is_current_stream_capturing = capture_query
+    graphs_mod = getattr(torch.cuda, "graphs", None)
+    if graphs_mod is not None:
+        graphs_mod.is_current_stream_capturing = capture_query
+        if isinstance(
+            getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None), type
+        ):
+            graphs_mod._cuda_isCurrentStreamCapturing = capture_query
 
 
 def install_metax_cuda_shim() -> None:

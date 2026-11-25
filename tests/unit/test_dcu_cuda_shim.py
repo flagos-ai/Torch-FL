@@ -60,6 +60,7 @@ _PATCHED_ATTRS = (
     "empty_cache",
     "reset_peak_memory_stats",
     "reset_max_memory_allocated",
+    "is_current_stream_capturing",
 )
 
 _SENTINEL = object()
@@ -148,6 +149,18 @@ def shim(monkeypatch):
     """Reset shim state and restore everything ``torch.cuda`` it overwrites."""
     saved = {name: getattr(torch.cuda, name, _SENTINEL) for name in _PATCHED_ATTRS}
     saved_raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", _SENTINEL)
+    saved_c_capturing = getattr(torch._C, "_cuda_isCurrentStreamCapturing", _SENTINEL)
+    graphs_mod = getattr(torch.cuda, "graphs", None)
+    saved_graphs_capturing = (
+        getattr(graphs_mod, "is_current_stream_capturing", _SENTINEL)
+        if graphs_mod is not None
+        else _SENTINEL
+    )
+    saved_graphs_c_capturing = (
+        getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", _SENTINEL)
+        if graphs_mod is not None
+        else _SENTINEL
+    )
     saved_queued = list(getattr(torch.cuda, "_queued_calls", []))
     saved_sdpa = _sdpa_state()
     # The SDPA switch is opt-out by environment variable, so an ambient value
@@ -197,6 +210,16 @@ def shim(monkeypatch):
                 del torch._C._cuda_getCurrentRawStream
         else:
             torch._C._cuda_getCurrentRawStream = saved_raw_stream
+        if saved_c_capturing is _SENTINEL:
+            if hasattr(torch._C, "_cuda_isCurrentStreamCapturing"):
+                del torch._C._cuda_isCurrentStreamCapturing
+        else:
+            torch._C._cuda_isCurrentStreamCapturing = saved_c_capturing
+        if graphs_mod is not None:
+            if saved_graphs_capturing is not _SENTINEL:
+                graphs_mod.is_current_stream_capturing = saved_graphs_capturing
+            if saved_graphs_c_capturing is not _SENTINEL:
+                graphs_mod._cuda_isCurrentStreamCapturing = saved_graphs_c_capturing
         if hasattr(torch.cuda, "_queued_calls"):
             torch.cuda._queued_calls[:] = saved_queued
 
@@ -667,3 +690,45 @@ def test_sdpa_switch_does_not_take_the_whole_shim_down(shim, monkeypatch):
 
 # install_dcu_rng_bridge() is covered by tests/unit/test_dcu_rng_bridge.py, which
 # imports the real torch_fl package (the bridge needs torch_fl.flagos).
+
+
+def test_is_current_stream_capturing_queries_hip_and_handles_uninitialized_state(
+    shim, monkeypatch
+):
+    """Issue #661: CPU wheel's dummy _cuda_isCurrentStreamCapturing must never run."""
+    import torch.cuda.graphs
+
+    capture_status = [0]
+    seen_streams = []
+
+    class _Hip:
+        def hipStreamIsCapturing(self, stream_ptr, out_status):
+            seen_streams.append(stream_ptr.value)
+            ctypes.cast(out_status, ctypes.POINTER(ctypes.c_int))[0] = capture_status[0]
+            return 0
+
+    initialized = [False]
+    shim.flagos.is_initialized = lambda: initialized[0]
+    shim.flagos._C = types.SimpleNamespace(
+        _get_native_current_raw_stream=lambda index: 0xABCD0 + index,
+        _get_native_default_raw_stream=lambda index: 0,
+    )
+    monkeypatch.setattr(_dcu_compat, "_load_hip", lambda: _Hip())
+    _dcu_compat.patch_torch_cuda_for_dcu()
+
+    # Before context init: returns False without touching the HIP driver.
+    assert torch.cuda.is_current_stream_capturing() is False
+    assert torch.cuda.graphs.is_current_stream_capturing() is False
+    assert shim.flagos.is_current_stream_capturing() is False
+    assert seen_streams == []
+
+    # After context init: queries hipStreamIsCapturing on the current stream.
+    initialized[0] = True
+    torch.cuda.set_device(2)
+    assert torch.cuda.is_current_stream_capturing() is False
+    assert seen_streams == [0xABCD2]
+
+    capture_status[0] = 1  # hipStreamCaptureStatusActive
+    assert torch.cuda.is_current_stream_capturing() is True
+    assert torch.cuda.graphs.is_current_stream_capturing() is True
+    assert torch._C._cuda_isCurrentStreamCapturing() is True

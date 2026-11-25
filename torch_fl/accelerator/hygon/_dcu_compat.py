@@ -158,6 +158,47 @@ def _hip_total_memory(hip, device_index):
     return total.value
 
 
+def _hip_is_stream_capturing(hip, raw_stream: int) -> bool:
+    """Query ``hipStreamIsCapturing`` on ``raw_stream`` without raising.
+
+    ``hipStreamCaptureStatusNone`` is 0; ``Active`` (1) and ``Invalidated`` (2)
+    report an active capture sequence. Returns ``False`` when no driver is
+    loaded or when the stream is not capturing.
+    """
+    if hip is None:
+        return False
+    status = ctypes.c_int(0)
+    try:
+        if (
+            hip.hipStreamIsCapturing(ctypes.c_void_p(raw_stream), ctypes.byref(status))
+            != 0
+        ):
+            return False
+    except (AttributeError, OSError):
+        return False
+    return status.value != 0
+
+
+def _bind_cuda_stream_capture_query(torch_mod, query_fn) -> None:
+    """Install ``query_fn`` across ``torch.cuda``, ``torch.cuda.graphs``, and ``torch._C``."""
+    torch_mod.cuda.is_current_stream_capturing = query_fn
+    graphs_mod = getattr(torch_mod.cuda, "graphs", None)
+    if graphs_mod is not None:
+        graphs_mod.is_current_stream_capturing = query_fn
+        if isinstance(
+            getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None), type
+        ):
+            graphs_mod._cuda_isCurrentStreamCapturing = query_fn
+    if isinstance(
+        getattr(torch_mod._C, "_cuda_isCurrentStreamCapturing", None),
+        (type, type(None)),
+    ):
+        try:
+            torch_mod._C._cuda_isCurrentStreamCapturing = query_fn
+        except Exception:
+            pass
+
+
 @dataclass
 class _DcuDeviceProperties:
     """torch.cuda._CudaDeviceProperties stand-in, filled from the HIP driver.
@@ -560,6 +601,28 @@ def patch_torch_cuda_for_dcu() -> bool:
         torch._C._cuda_getCurrentRawStream = lambda idx=0: current_stream(idx)
     except Exception:
         pass
+
+    # Stream-capture query (issue #661). On the +cpu wheel,
+    # torch.cuda.is_current_stream_capturing() calls the dummy base class
+    # _cuda_isCurrentStreamCapturing and raises RuntimeError inside callers such
+    # as SyncBatchNorm.forward. Answer from hipStreamIsCapturing when the flagos
+    # runtime has initialized a context, and False before any context exists.
+    flagos_capture_mod = getattr(torch, "flagos", None)
+
+    def _is_current_stream_capturing() -> bool:
+        if flagos_capture_mod is not None:
+            is_init = getattr(flagos_capture_mod, "is_initialized", None)
+            if callable(is_init) and not is_init():
+                return False
+        try:
+            raw = current_stream(_current_device())
+        except Exception:
+            return False
+        return _hip_is_stream_capturing(_load_hip(), raw)
+
+    _bind_cuda_stream_capture_query(torch, _is_current_stream_capturing)
+    if flagos_capture_mod is not None:
+        flagos_capture_mod.is_current_stream_capturing = _is_current_stream_capturing
 
     # Memory queries. Every torch.cuda.memory_* entry point, plus empty_cache and
     # the peak resets, reaches torch._C._cuda_*/_cuda_memoryStats, none of which

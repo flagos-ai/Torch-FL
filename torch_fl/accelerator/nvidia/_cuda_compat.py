@@ -740,6 +740,53 @@ def patch_torch_cuda_for_flagos():
     except Exception:
         pass
 
+    def _is_current_stream_capturing() -> bool:
+        if _flagos is not None:
+            is_init = getattr(_flagos, "is_initialized", None)
+            if callable(is_init) and not is_init():
+                return False
+        raw = _current_raw_stream(_current_device())
+        status = ctypes.c_int(0)
+        cudart = _load_cudart()
+        if cudart is not None:
+            try:
+                if (
+                    cudart.cudaStreamIsCapturing(
+                        ctypes.c_void_p(raw), ctypes.byref(status)
+                    )
+                    == 0
+                ):
+                    return status.value != 0
+            except (AttributeError, OSError):
+                pass
+        cuda = _load_libcuda()
+        if cuda is not None:
+            try:
+                if (
+                    cuda.cuStreamIsCapturing(ctypes.c_void_p(raw), ctypes.byref(status))
+                    == 0
+                ):
+                    return status.value != 0
+            except (AttributeError, OSError):
+                pass
+        return False
+
+    if not hasattr(torch._C, "_CudaStreamBase"):
+        torch.cuda.is_current_stream_capturing = _is_current_stream_capturing
+        graphs_mod = getattr(torch.cuda, "graphs", None)
+        if graphs_mod is not None:
+            graphs_mod.is_current_stream_capturing = _is_current_stream_capturing
+            if isinstance(
+                getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None), type
+            ):
+                graphs_mod._cuda_isCurrentStreamCapturing = _is_current_stream_capturing
+        try:
+            torch._C._cuda_isCurrentStreamCapturing = _is_current_stream_capturing
+        except Exception:
+            pass
+        if _flagos is not None:
+            _flagos.is_current_stream_capturing = _is_current_stream_capturing
+
     # Seeding / RNG source: the CPU-torch wheel ships an EMPTY
     # torch.cuda.default_generators, and torch.manual_seed() -> [nothing on
     # cuda], so flag_gems' generator-less RNG ops (rand/randn/uniform_/...) had
