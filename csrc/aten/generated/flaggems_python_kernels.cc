@@ -3155,6 +3155,9 @@ at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef 
   at::Tensor native_mean;
   if (self.dim() > 0 && (self.size(-1) == 128 || self.size(-1) == 1024) && at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) { return native_mean; }
 #endif
+  if (self.numel() == 0) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::mean_dim>::call(self, dim, keepdim, dtype);
+  }
 #if defined(USE_DCU)
   const auto output_dtype = dtype.value_or(self.scalar_type());
   TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");
@@ -4046,6 +4049,9 @@ at::Tensor & ScatterInplaceSrcKernelPython(at::Tensor & self, int64_t dim, const
 
 static TypedSourceSlot ScatterAddFnSource("aten::scatter_add", "flag_gems.scatter_add", "279ddf38208195221ada1e161952cd97d8927faf1d2b8c517c697b028c9fabaf", "{\"abi\": \"279ddf38208195221ada1e161952cd97d8927faf1d2b8c517c697b028c9fabaf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.scatter_add\", \"op\": \"aten::scatter_add\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ScatterAddKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
+  if (index.dim() == 2 && !index.is_contiguous()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::scatter_add>::call(self, dim, index, src);
+  }
   auto result = ScatterAddFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter_add", {self, dim, index, src}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src));
   UnboxToFlagos(result);
   return result;
@@ -4053,6 +4059,9 @@ at::Tensor ScatterAddKernelPython(const at::Tensor & self, int64_t dim, const at
 
 static TypedSourceSlot ScatterAddInplaceFnSource("aten::scatter_add_", "flag_gems.scatter_add_", "577b4d62d45b26437fbf27c5f461a528c2f93240ba68e804a3e90bb69ae47dd1", "{\"abi\": \"577b4d62d45b26437fbf27c5f461a528c2f93240ba68e804a3e90bb69ae47dd1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.scatter_add_\", \"op\": \"aten::scatter_add_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ScatterAddInplaceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
+  if (index.dim() == 2 && !index.is_contiguous()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::scatter_add_>::call(self, dim, index, src);
+  }
   auto result = ScatterAddInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter_add_", {self, dim, index, src}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src));
   self.copy_(result);
   return self;

@@ -1372,11 +1372,22 @@ def gen_flaggems_python_kernel(
                 "#endif\n"
             )
         elif op == "mean.dim":
+            # FlagGems reduces by dividing by the outer extent, which may be zero.
             prelude += (
+                "  if (self.numel() == 0) {\n"
+                "    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::mean_dim>::call(self, dim, keepdim, dtype);\n"
+                "  }\n"
                 "#if defined(USE_DCU)\n"
                 "  const auto output_dtype = dtype.value_or(self.scalar_type());\n"
                 '  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
                 "#endif\n"
+            )
+        elif op in ("scatter_add", "scatter_add_"):
+            # The FlagGems 2-D kernel reads indices linearly, even when strided.
+            prelude += (
+                "  if (index.dim() == 2 && !index.is_contiguous()) {\n"
+                f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{op}>::call(self, dim, index, src);\n"
+                "  }\n"
             )
         elif typed and op == "pow.Tensor_Scalar":
             # Match the existing floating-square decomposition while keeping
@@ -1799,6 +1810,8 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
     for op, category, keywords in (
         ("add.Tensor", "functional_pure", {"alpha"}),
         ("mean.dim", "functional_pure", {"dtype"}),
+        ("scatter_add", "functional_pure", set()),
+        ("scatter_add_", "inplace", set()),
         ("cat", "tensorlist_dim", set()),
         ("pow.Tensor_Scalar", "functional_pure", set()),
         *((op, "functional_pure", set()) for op in FLAGGEMS_HCU_METADATA_ADAPTERS),
@@ -1823,6 +1836,8 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
             + {
                 "add.Tensor": "add",
                 "mean.dim": "mean_dim",
+                "scatter_add": "scatter_add",
+                "scatter_add_": "scatter_add_",
                 "cat": "cat",
                 "pow.Tensor_Scalar": "pow_tensor_scalar",
                 "_unsafe_view": "_unsafe_view",
