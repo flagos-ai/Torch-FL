@@ -464,8 +464,9 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     "FLAGOS_COSMOS_CUDA_COMPAT": (
         SCOPE_RUNTIME,
         "0 (off)",
-        "Run Cosmos attention on CUDA views in a dedicated NVIDIA CUDA PyTorch "
-        "inference process, with legacy Tensor.cuda() transfers to FlagOS",
+        "Run Cosmos packed, SDPA, and FlexAttention on CUDA views in a dedicated "
+        "NVIDIA CUDA PyTorch inference process, with legacy Tensor.cuda() "
+        "transfers to FlagOS",
     ),
     "FLAGOS_METAX_CUDART_SHIM": (
         SCOPE_RUNTIME,
