@@ -7,8 +7,11 @@
 #include "contiguous_ops.h"
 #include "copy_ops.h"
 
+#include <ATen/ExpandUtils.h>
+#include <ATen/NamedTensorUtils.h>
 #include <ATen/native/Resize.h>
 #include <ATen/ops/copy_native.h>
+#include <c10/core/DeviceGuard.h>
 #include <flagos.h>
 #include "device_boxing.h"
 // ascend_copy.h and gcu_copy.h are included unconditionally: each supplies an
@@ -91,16 +94,7 @@ at::Tensor materialize_math_bits_impl(
   return result;
 }
 
-// Copy the strided flagos tensor `self` into `result` -- an already-allocated
-// flagos tensor with `self`'s sizes, laid out as `memory_format` -- through host
-// memory: D2H the source's whole storage, rebuild its strides as a CPU view, let
-// the host copy kernel produce the contiguous result, then H2D it.
-//
-// This is the de-boxed strided gather: the only implementation the de-boxed
-// backends have, and what the CUDA platform uses when it has no native CUDA copy
-// kernel to dispatch to (see FLAGOS_CONTIGUOUS_CUDA_BOXING above, which is the
-// predicate for whether the DeviceBoxingGuard arms below exist).
-//
+// Copy into a fresh dense allocation with the requested result strides.
 // Both legs go through BlockingMemcpy, which binds the device of the tensor each
 // transfer touches and drains that device's queue first: a bare Memcpy is only
 // ordered against whichever device happens to be current when it is issued, so
@@ -110,8 +104,7 @@ at::Tensor materialize_math_bits_impl(
 #if !FLAGOS_CONTIGUOUS_CUDA_BOXING
 void copy_strided_via_host(
     const at::Tensor& self,
-    const at::Tensor& result,
-    c10::MemoryFormat memory_format) {
+    const at::Tensor& result) {
   if (TryGemsDeviceCopy(self, result)) return;
   TORCH_CHECK(CpuFallbackAllowed(),
               "native FlagGems hosts do not permit CPU fallback: device contiguous/clone");
@@ -135,16 +128,15 @@ void copy_strided_via_host(
       self.sizes(),
       self.strides());
 
-  auto cpu_contig = at::empty(
-      self.sizes(),
-      self.options().device(at::kCPU).memory_format(memory_format));
-  cpu_contig.copy_(cpu_view);
+  auto cpu_result = at::empty_strided(
+      result.sizes(), result.strides(), result.options().device(at::kCPU));
+  cpu_result.copy_(cpu_view);
 
-  size_t nbytes = cpu_contig.numel() * cpu_contig.element_size();
+  size_t nbytes = cpu_result.numel() * cpu_result.element_size();
   if (nbytes > 0) {
     BlockingMemcpy(
         result.data_ptr(),
-        cpu_contig.data_ptr(),
+        cpu_result.data_ptr(),
         nbytes,
         MemcpyHostToDevice,
         result);
@@ -153,38 +145,6 @@ void copy_strided_via_host(
 #endif
 
 } // namespace
-
-#if defined(USE_MPS)
-namespace {
-
-// Clone's contiguous fast path needs an allocation without dispatching the
-// like-factory, which has no PrivateUse1 kernel on MPS. Keeping this helper
-// on the device preserves the semantics of clone: a fresh dense allocation.
-at::Tensor empty_like_dense(const at::Tensor& self) {
-  const auto sizes = self.sizes().vec();
-  const auto strides = self.strides().vec();
-  return at::empty_strided(sizes, strides, self.options());
-}
-
-void finish_strided_copy(
-    const at::Tensor& self,
-    const at::Tensor& result,
-    c10::MemoryFormat memory_format,
-    bool copied_on_device) {
-  if (!copied_on_device && self.numel() > 0) {
-    copy_strided_via_host(self, result, memory_format);
-  }
-}
-
-bool copy_strided_to_contiguous(
-    const at::Tensor& self,
-    const at::Tensor& result,
-    c10::MemoryFormat memory_format) {
-  return mps::CopyStridedToDense(self, result);
-}
-
-} // namespace
-#endif
 
 at::Tensor materialize_math_bits(
     const at::Tensor& self,
@@ -230,13 +190,12 @@ at::Tensor contiguous(
       // No native CUDA copy kernel in this wheel's torch: gather through host
       // memory. The vendor arms below do the same when their on-device path
       // declines.
-      copy_strided_via_host(self, result, memory_format);
+      copy_strided_via_host(self, result);
 #endif
 #elif defined(USE_MPS)
-      const bool copied_on_device =
-          copy_strided_to_contiguous(self, result, memory_format);
-      finish_strided_copy(
-          self, result, memory_format, copied_on_device);
+      if (!mps::CopyStridedToDense(self, result)) {
+        copy_strided_via_host(self, result);
+      }
 #else
       // Ascend copies the strided source into the contiguous result on-device
       // via aclnnInplaceCopy, GCU via topsatenCopy, Kunlunxin via the XPU
@@ -257,7 +216,7 @@ at::Tensor contiguous(
       const bool copied_on_device = ascend::StridedCopy(result, self);
 #endif
       if (!copied_on_device) {
-        copy_strided_via_host(self, result, memory_format);
+        copy_strided_via_host(self, result);
       }
 #endif
     }
@@ -269,99 +228,102 @@ at::Tensor contiguous(
   return result;
 }
 
+at::Tensor empty_for_copy(
+    const at::Tensor& self,
+    const at::TensorOptions& options,
+    c10::MemoryFormat memory_format) {
+  at::Tensor result;
+  if (memory_format != c10::MemoryFormat::Preserve) {
+    result = at::empty(self.sizes(), options.memory_format(memory_format));
+  } else if (self.is_non_overlapping_and_dense()) {
+    result = at::empty_strided(self.sizes(), self.strides(), options);
+  } else {
+    result = at::empty_strided(
+        self.sizes(), at::infer_dense_strides(self.sizes(), self.strides()), options);
+  }
+  at::namedinference::propagate_names(result, self);
+  return result;
+}
+
 at::Tensor clone(
     const at::Tensor& self,
     std::optional<c10::MemoryFormat> memory_format_opt) {
-  auto memory_format = memory_format_opt.value_or(c10::MemoryFormat::Preserve);
+  const auto memory_format = memory_format_opt.value_or(c10::MemoryFormat::Preserve);
   if (self.is_conj() || self.is_neg()) {
     return materialize_math_bits_impl(self, memory_format);
   }
 
-  if (memory_format == c10::MemoryFormat::Preserve) {
-    if (self.is_contiguous()) {
-#if defined(USE_MPS)
-      auto result = empty_like_dense(self);
-#else
-      auto result = at::empty_like(self);
-#endif
-      size_t nbytes = self.numel() * self.element_size();
-      if (nbytes > 0 && self.is_privateuseone()) {
-        // Blocking, and against `self`'s device rather than whichever device is
-        // ambient: a bare Memcpy only orders against the current device, so
-        // cloning a flagos:1 tensor while flagos:0 is current copies the buffer
-        // as it was before that device's kernels ran (issue #281, MUSA; the
-        // same read-after-write hazard copy_ops guards against).
-        BlockingMemcpy(
-            result.data_ptr(),
-            self.data_ptr(),
-            nbytes,
-            MemcpyDeviceToDevice,
-            self);
-      } else if (nbytes > 0) {
-        result.copy_(self);
-      }
-      return result;
-    }
-    // For non-contiguous with Preserve, fall through to create contiguous copy.
-    // NOTE: Do NOT call contiguous() here to avoid infinite recursion when
-    // contiguous is unregistered from PrivateUse1 (CompositeImplicitAutograd
-    // contiguous calls clone, which would call contiguous again).
-    memory_format = c10::MemoryFormat::Contiguous;
+  auto result = empty_for_copy(self, self.options(), memory_format);
+  if (self._is_zerotensor()) {
+    return result.zero_();
   }
-
-  // Non-contiguous clone.
-  if (self.is_privateuseone()) {
-    auto result = at::empty(
-        self.sizes(), self.options().memory_format(memory_format));
-#if defined(USE_MPS)
-    const bool copied_on_device =
-        copy_strided_to_contiguous(self, result, memory_format);
-    finish_strided_copy(self, result, memory_format, copied_on_device);
+  if (self.numel() == 0) {
+    return result;
+  }
+  if (!self.is_privateuseone()) {
+    return result.copy_(self);
+  }
+  if (self.is_non_overlapping_and_dense() && self.strides().equals(result.strides())) {
+    const size_t nbytes = self.numel() * self.element_size();
+#if defined(USE_DCU)
+    // Order the HIP transfer with both the producer and the consumer.
+    const c10::DeviceGuard guard(self.device());
+    const auto stream = GetCurrentStreamForDevice(self.device().index());
+    TORCH_CHECK(
+        MemcpyAsync(result.data_ptr(), self.data_ptr(), nbytes,
+                    MemcpyDeviceToDevice, stream) == Success,
+        "flagos clone: device-to-device copy failed");
 #else
-#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON)
-    // Use DeviceBoxingGuard to leverage CUDA's native strided copy kernel
-    // instead of an expensive CPU round-trip -- but only in a wheel whose torch
-    // actually ships that kernel. See the note above
-    // FLAGOS_CONTIGUOUS_CUDA_BOXING: the guard only rewrites device metadata,
-    // the kernel behind it is a CUDA DispatchStub.
-#if FLAGOS_CONTIGUOUS_CUDA_BOXING
-    DeviceBoxingGuard guard(self, result);
-    at::native::copy_(result, self, false);
-#else
-    copy_strided_via_host(self, result, memory_format);
-#endif
-#else
-    // MUSA joins the non-boxing group: copy_ reaches _copy_from, which
-    // torch_musa implements for strided/dtype-casting copies on device.
-    // On-device strided copy -- aclnnInplaceCopy on Ascend, topsatenCopy on
-    // GCU, the XPU runtime's own copy on Kunlunxin -- instead of
-    // result.copy_(self), which would bounce through a CPU round-trip. This is
-    // the Qwen3 GQA repeat_kv hotspot (~59% of inference time before this
-    // change), and on GCU it is the `.expand(...).clone()` / `.contiguous()`
-    // pattern in Qwen-Image's attention: 975.6 ms per call at the
-    // (1, 24, 4114, 4114) fp32 shape against 4.6 ms for the vendor call.
-#if defined(USE_GCU)
-    const bool copied_on_device = gcu::StridedCopy(result, self);
-#elif defined(USE_KUNLUNXIN)
-    const bool copied_on_device = kunlunxin::StridedCopy(result, self);
-#elif defined(USE_CAMBRICON)
-    // No CNNL strided-copy kernel yet; the `copy_` fallback just below serves it.
-    const bool copied_on_device = false;
-#else
-    const bool copied_on_device = ascend::StridedCopy(result, self);
-#endif
-    if (!copied_on_device) {
-      result.copy_(self);
-    }
-#endif
+    BlockingMemcpy(
+        result.data_ptr(), self.data_ptr(), nbytes, MemcpyDeviceToDevice, self);
 #endif
     return result;
   }
 
-  auto result = at::empty(self.sizes(), self.options().memory_format(memory_format));
-  result.copy_(self);
+#if defined(USE_MPS)
+  if (!mps::CopyStridedToDense(self, result)) {
+    copy_strided_via_host(self, result);
+  }
+#else
+#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
+    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON)
+  // Use DeviceBoxingGuard to leverage CUDA's native strided copy kernel
+  // instead of an expensive CPU round-trip -- but only in a wheel whose torch
+  // actually ships that kernel. See the note above
+  // FLAGOS_CONTIGUOUS_CUDA_BOXING: the guard only rewrites device metadata,
+  // the kernel behind it is a CUDA DispatchStub.
+#if FLAGOS_CONTIGUOUS_CUDA_BOXING
+  DeviceBoxingGuard guard(self, result);
+  at::native::copy_(result, self, false);
+#else
+  copy_strided_via_host(self, result);
+#endif
+#else
+  // MUSA joins the non-boxing group: copy_ reaches _copy_from, which
+  // torch_musa implements for strided/dtype-casting copies on device.
+  // On-device strided copy -- aclnnInplaceCopy on Ascend, topsatenCopy on
+  // GCU, the XPU runtime's own copy on Kunlunxin -- instead of
+  // result.copy_(self), which would bounce through a CPU round-trip. This is
+  // the Qwen3 GQA repeat_kv hotspot (~59% of inference time before this
+  // change), and on GCU it is the `.expand(...).clone()` / `.contiguous()`
+  // pattern in Qwen-Image's attention: 975.6 ms per call at the
+  // (1, 24, 4114, 4114) fp32 shape against 4.6 ms for the vendor call.
+#if defined(USE_GCU)
+  const bool copied_on_device = gcu::StridedCopy(result, self);
+#elif defined(USE_KUNLUNXIN)
+  const bool copied_on_device = kunlunxin::StridedCopy(result, self);
+#elif defined(USE_CAMBRICON)
+  // No CNNL strided-copy kernel yet; the `copy_` fallback just below serves it.
+  const bool copied_on_device = false;
+#else
+  const bool copied_on_device = ascend::StridedCopy(result, self);
+#endif
+  if (!copied_on_device) {
+    result.copy_(self);
+  }
+#endif
+#endif
   return result;
 }
 

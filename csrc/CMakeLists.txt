@@ -336,8 +336,8 @@ else()
   message(STATUS "fast plan replay: stubbed (not a CUDA build)")
 endif()
 
-# The published FlagGems copy host also supports HCU storage and streams.
-if(FLAGOS_BUILD_FLAGGEMS AND (_flagos_is_cuda OR _flagos_is_dcu))
+# Native hosts use the generated copy bridge when a runtime has no strided copy.
+if(FLAGOS_BUILD_FLAGGEMS AND (_flagos_is_cuda OR _flagos_is_dcu OR FLAGOS_NATIVE_HOSTS))
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_GEMS_DEVICE_COPY=1)
 endif()
 
