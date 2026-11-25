@@ -41,7 +41,7 @@ def _device_view(host: torch.Tensor) -> torch.Tensor:
 def _assert_same(out: torch.Tensor, host: torch.Tensor) -> None:
     assert out.device.type == "flagos"
     assert out.shape == host.shape
-    assert out.is_contiguous()
+    assert out.is_contiguous() == host.is_contiguous()
     assert out.dtype == host.dtype
     assert torch.equal(out.cpu(), host)
 
@@ -102,16 +102,19 @@ VIEWS = [
 def test_contiguous_matches_cpu(shape, make_view, dtype):
     host = torch.arange(math.prod(shape)).reshape(shape)
     host = host % 2 == 0 if dtype == torch.bool else host.to(dtype)
-    host_view = make_view(host).contiguous()
+    host_view = make_view(host)
     device_view = make_view(host.to(DEVICE))
     assert not device_view.is_contiguous()
 
-    for out in (device_view.contiguous(), device_view.clone()):
-        _assert_same(out, host_view)
+    dense_host = host_view.contiguous()
+    _assert_same(device_view.contiguous(), dense_host)
+    cloned, expected = device_view.clone(), host_view.clone()
+    _assert_same(cloned, expected)
+    assert cloned.stride() == expected.stride()
 
-    in_place = host_view.to(DEVICE)
+    in_place = dense_host.to(DEVICE)
     in_place.copy_(device_view)
-    _assert_same(in_place, host_view)
+    _assert_same(in_place, dense_host)
 
     dense = torch.empty(
         host_view.shape,
@@ -119,7 +122,7 @@ def test_contiguous_matches_cpu(shape, make_view, dtype):
         device=DEVICE,
     )
     dense.copy_(device_view)
-    _assert_same(dense, host_view)
+    _assert_same(dense, dense_host)
 
 
 @pytest.mark.parametrize(
@@ -149,8 +152,8 @@ def test_rank_zero_bool_and_empty_views():
     vector_host = torch.arange(9).reshape(9)
     singleton_host = vector_host[1:8:3]
     singleton = vector_host.to(DEVICE)[1:8:3]
-    _assert_same(singleton.contiguous(), singleton_host)
-    _assert_same(singleton.clone(), singleton_host)
+    _assert_same(singleton.contiguous(), singleton_host.contiguous())
+    _assert_same(singleton.clone(), singleton_host.clone())
     target = singleton_host.to(DEVICE)
     target.copy_(singleton)
     assert torch.equal(target.cpu(), singleton_host)
@@ -184,7 +187,7 @@ def test_dense_views_read_their_own_storage_and_offset(storage_recipe):
     view = storage_recipe(host)
     source = storage_recipe(host.to(DEVICE))
     assert source.stride() == view.stride()
-    _assert_same(source.clone(), view)
+    _assert_same(source.clone(), view.clone())
 
 
 @pytest.mark.parametrize(
