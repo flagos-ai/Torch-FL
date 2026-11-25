@@ -22,18 +22,9 @@ namespace at::native::flagos::mps {
 // stream. Both tensors belong to this runtime's flagos device; their layouts
 // may differ, but their shapes, dtype and element count must be equal.
 //
-// The source's coordinates are built in an MPSGraph and gathered from its
-// storage; a negative-axis coordinate is adjusted to start at that axis' last
-// element. The whole storage is described to the graph, so the view's offset is
-// applied without reading bytes outside it. A scalar copy is a Metal blit.
-// Neither path moves tensor bytes through host memory.
-//
-// False for an empty tensor, a dtype without an MPSGraph representation, or
-// memory outside the runtime's Metal allocations. The caller takes its existing
-// fallback.
-//
-// MPSGraph scatter has not provided a reliable general write into a strided
-// destination, so this header deliberately exposes only the gather direction.
+// Uses PyTorch's Metal gather on the storage bits so it also handles
+// subword and non-numerical dtypes without a value conversion. Returns false
+// for layouts the shader cannot index or memory outside the Metal runtime.
 bool CopyStridedToDense(const at::Tensor& src, const at::Tensor& dst);
 
 } // namespace at::native::flagos::mps

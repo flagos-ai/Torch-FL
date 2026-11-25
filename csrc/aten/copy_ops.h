@@ -39,6 +39,9 @@ void BlockingMemcpy(
     MemcpyKind kind,
     const at::Tensor& on_device);
 
+// Copy matching dense layouts on the same accelerator device.
+void CopySameDevice(const at::Tensor& src, const at::Tensor& dst);
+
 at::Scalar _local_scalar_dense(const at::Tensor& self);
 
 at::Tensor _to_copy(

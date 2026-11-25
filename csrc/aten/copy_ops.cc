@@ -79,9 +79,6 @@
 #endif
 
 
-#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX) && !defined(FLAGOS_GEMS_DEVICE_COPY)
-#define FLAGOS_GEMS_DEVICE_COPY 1
-#endif
 #if defined(FLAGOS_GEMS_DEVICE_COPY)
 #include "generated/flaggems_source_bridges.h"
 #endif
@@ -105,25 +102,25 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
       src.is_alias_of(dst)) return false;
   const auto src_type = src.scalar_type();
   const auto dst_type = dst.scalar_type();
+  auto storage_type = src_type;
+  if (src_type == dst_type) {
+    // A same-dtype copy can use a supported view of identical-width storage.
+    if (src_type == at::kChar) storage_type = at::kByte;
 #if defined(USE_DCU) && defined(FLAGOS_NATIVE_HOSTS)
-  const bool copy_double_bits = src_type == at::kDouble && dst_type == at::kDouble;
-#else
-  constexpr bool copy_double_bits = false;
+    if (src_type == at::kDouble) storage_type = at::kLong;
 #endif
-  if (!copy_double_bits && (!GemsCopyType(src_type) || !GemsCopyType(dst_type))) {
-    return false;
   }
+  if (storage_type == src_type &&
+      (!GemsCopyType(src_type) || !GemsCopyType(dst_type))) return false;
   at::assert_no_internal_overlap(dst);
   struct Scope {
     bool& active;
     explicit Scope(bool& value) : active(value) { active = true; }
     ~Scope() { active = false; }
   } scope(active);
-  if (copy_double_bits) {
-    // The HCU copy host can move FP64 storage through its INT64 kernel.
-    // Same-width views preserve sizes, strides, storage offsets, and all bits.
+  if (storage_type != src_type) {
     CopyInplaceSourceHost(
-        dst.view(at::kLong), src.view(at::kLong), /*non_blocking=*/false);
+        dst.view(storage_type), src.view(storage_type), /*non_blocking=*/false);
     return true;
   }
 #if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
@@ -241,13 +238,14 @@ class BlockingCopyGuard {
     // op and was wrong in 40 of 40 rounds without the barrier.
     topsStreamSynchronize(at::native::flagos::gcu::GetCurrentTopsStream());
 #elif defined(USE_KUNLUNXIN)
-    // Same shape as the DCU arm and for the same reason: no c10::cuda to ask
-    // which stream is current (see the guard above). The XPU SDK exports no
-    // stream query at all -- xpu_wait(nullptr) is its only synchronisation
-    // primitive -- and the runtime layer's DeviceSynchronize wraps that, so
-    // this is a device-wide drain: a superset of the per-stream wait, and so
-    // still correct, just coarser. Only reached on the blocking-copy paths.
+    // Vendor calls can submit to the legacy default queue. Native hosts also
+    // submit to the active FlagOS queue, which can finish independently.
     ::DeviceSynchronize();
+    int device = 0;
+    TORCH_CHECK(::GetDevice(&device) == Success,
+                "flagos: could not resolve the device for a blocking copy");
+    TORCH_CHECK(::StreamSynchronize(GetCurrentStreamForDevice(device)) == Success,
+                "flagos: could not synchronize the current copy stream");
 #elif defined(USE_ILUVATAR)
     // iluvatar owns its streams, so the queue every producer submits to is
     // reachable directly. The guard above selected *this tensor's* device
@@ -487,6 +485,24 @@ void BlockingMemcpy(
       "); the destination buffer would have been left unwritten");
 }
 
+void CopySameDevice(const at::Tensor& src, const at::Tensor& dst) {
+  const size_t nbytes = src.numel() * src.element_size();
+  if (nbytes == 0) return;
+#if defined(USE_DCU) || defined(USE_MUSA)
+  // The synchronous runtime spelling can enqueue D2D work on the legacy queue.
+  // Put the copy between its producer and consumer on the tensor's stream.
+  const c10::DeviceGuard guard(src.device());
+  const auto stream = GetCurrentStreamForDevice(src.device().index());
+  TORCH_CHECK(
+      MemcpyAsync(dst.data_ptr(), src.data_ptr(), nbytes,
+                  MemcpyDeviceToDevice, stream) == Success,
+      "flagos: same-device copy failed");
+#else
+  BlockingMemcpy(
+      dst.data_ptr(), src.data_ptr(), nbytes, MemcpyDeviceToDevice, src);
+#endif
+}
+
 ADD_IMPL_TO_DISPATCHER(
     LocalScalarDenseFn, local_scalar_dense_dispatcher, "_local_scalar_dense")
 ADD_IMPL_TO_DISPATCHER(ToCopyFn, to_copy_dispatcher, "_to_copy")
@@ -549,12 +565,12 @@ at::Tensor _copy_from(
         self.sizes().equals(dst.sizes()) &&
         self.scalar_type() == dst.scalar_type()) {
       // Fast path: both contiguous, same shape and dtype → direct memcpy.
-      // Both operands are flagos tensors but not necessarily on the same one, so
-      // this goes through the peer-aware form.
-      size_t nbytes = self.numel() * self.element_size();
-      if (nbytes > 0) {
+      if (self.device() == dst.device()) {
+        CopySameDevice(self, dst);
+      } else if (self.numel() > 0) {
         CrossDeviceMemcpy(
-            dst.data_ptr(), self.data_ptr(), nbytes, self, dst);
+            dst.data_ptr(), self.data_ptr(),
+            self.numel() * self.element_size(), self, dst);
       }
     } else {
 #if defined(FLAGOS_MUSA_KERNEL)
@@ -616,57 +632,32 @@ at::Tensor _copy_from(
       const bool copied_on_device = ascend::StridedCopy(dst, self);
 #endif
       if (!copied_on_device) {
-        TORCH_CHECK(CpuFallbackAllowed(),
-                    "native FlagGems hosts do not permit CPU fallback: device copy/cast");
-        // Fallback: CPU round-trip (device->host, strided copy on CPU, host->device).
-        at::Tensor self_contig = self.is_contiguous()
-            ? self
-            : at::native::flagos::contiguous(self, c10::MemoryFormat::Contiguous);
-        size_t nbytes = self_contig.numel() * self_contig.element_size();
-        at::Tensor cpu_src =
-            at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
-        if (nbytes > 0) {
-          BlockingMemcpy(
-              cpu_src.data_ptr(),
-              self_contig.data_ptr(),
-              nbytes,
-              MemcpyDeviceToHost,
-              self_contig);
-        }
-        size_t dst_storage_nbytes = dst.storage().nbytes();
-        at::Tensor cpu_dst_storage = at::empty(
-            {static_cast<int64_t>(dst_storage_nbytes)},
-            dst.options().device(at::kCPU).dtype(at::kByte));
-        int64_t dst_storage_offset_bytes =
-            dst.storage_offset() * static_cast<int64_t>(dst.element_size());
-        char* dst_storage_base =
-            static_cast<char*>(dst.data_ptr()) - dst_storage_offset_bytes;
-        if (dst_storage_nbytes > 0) {
-          BlockingMemcpy(
-              cpu_dst_storage.data_ptr(),
-              dst_storage_base,
-              dst_storage_nbytes,
-              MemcpyDeviceToHost,
-              dst);
-        }
-
-        at::Tensor cpu_dst = at::empty({0}, dst.options().device(at::kCPU));
-        cpu_dst.set_(
-            cpu_dst_storage.storage(),
-            dst.storage_offset(),
-            dst.sizes(),
-            dst.strides());
-        at::native::copy_(cpu_dst, cpu_src, false);
-        if (dst_storage_nbytes > 0) {
-          BlockingMemcpy(
-              dst_storage_base,
-              cpu_dst_storage.data_ptr(),
-              dst_storage_nbytes,
-              MemcpyHostToDevice,
-              dst);
-        }
+        strided_copy_cast_via_cpu(self, dst);
       }
 #endif
+    }
+    return dst;
+  }
+
+  if (self.is_privateuseone() && dst.is_cpu()) {
+    // Matching dense layouts can transfer directly in physical order. A view
+    // with holes or a different destination layout needs a packed source.
+    const bool same_shape = self.sizes().equals(dst.sizes());
+    const bool same_dense_layout = same_shape &&
+        self.is_non_overlapping_and_dense() && self.strides().equals(dst.strides());
+    const auto packed = same_dense_layout ? self
+        : at::native::flagos::contiguous(self, c10::MemoryFormat::Contiguous);
+    const bool direct = same_shape && self.scalar_type() == dst.scalar_type() &&
+        (same_dense_layout || dst.is_contiguous()) && !dst.is_conj() && !dst.is_neg();
+    auto host = direct ? dst : at::empty_strided(
+        packed.sizes(), packed.strides(), packed.options().device(at::kCPU));
+    const size_t nbytes = packed.numel() * packed.element_size();
+    if (nbytes > 0) {
+      BlockingMemcpy(
+          host.data_ptr(), packed.data_ptr(), nbytes, MemcpyDeviceToHost, packed);
+    }
+    if (!direct) {
+      at::native::copy_(const_cast<at::Tensor&>(dst), host, false);
     }
     return dst;
   }
@@ -729,24 +720,6 @@ at::Tensor _copy_from(
       // copy path, which gathers through host memory.
       at::native::flagos::_copy_from(tmp, dst, false);
 #endif
-    }
-  } else if (self.is_privateuseone() && dst.is_cpu()) {
-    if (self.scalar_type() != dst.scalar_type()) {
-      // The device->host direction of the dtype case described above: land the
-      // source's bytes in a CPU tensor of the *source's* dtype, then let the
-      // host copy_ cast into `dst`. Allocating `tmp` with `dst.options()` (as
-      // the branches below do) would make the memcpy disagree with its own
-      // buffer as well.
-      auto tmp =
-          at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
-      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
-      at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
-    } else if (dst.is_contiguous()) {
-      Memcpy(dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
-    } else {
-      auto tmp = at::empty(self_contig.sizes(), dst.options());
-      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
-      at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
     }
   } else if (self.is_privateuseone() && dst.is_cuda()) {
     if (dst.is_contiguous()) {
@@ -1084,19 +1057,9 @@ at::Tensor _to_copy(
       }
     }
   } else if (src_is_flagos && dst_is_cpu) {
-    at::Tensor self_contig = self.contiguous();
-    at::Tensor temp =
-        at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
-    size_t nbytes = self_contig.numel() * self_contig.element_size();
-    if (nbytes > 0) {
-      BlockingMemcpy(
-          temp.data_ptr(),
-          self_contig.data_ptr(),
-          nbytes,
-          MemcpyDeviceToHost,
-          self_contig);
-    }
-    result = (dtype != self.scalar_type()) ? temp.to(dtype) : temp;
+    result = empty_for_copy(
+        self, self.options().device(at::kCPU).dtype(dtype), memory_format);
+    at::native::flagos::_copy_from(self, result, non_blocking);
   } else if (!src_is_flagos && dst_is_flagos) {
     int device_index = device.index() >= 0 ? device.index() : 0;
 #if defined(USE_MPS)

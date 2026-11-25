@@ -29,6 +29,11 @@ REQUIRED_COMMON_CASES = frozenset(
         f"{TEST_PATH}/test_native_host.py::test_layout_and_storage",
         f"{TEST_PATH}/test_native_host.py::test_dynamic_shapes_and_stream_scope",
         *(
+            f"{TEST_PATH}/test_transfer.py::{test}[{wheel}]"
+            for test in ("test_strided_transfer", "test_copy_stream_order")
+            for wheel in ("ordinary", "native")
+        ),
+        *(
             f"{TEST_PATH}/test_reductions.py::test_indexed_reduction[{op}]"
             for op in ("argmin", "max", "min")
         ),
