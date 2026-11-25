@@ -39,6 +39,12 @@ the existing retry helper falls back to the pinned primary index with the same
 version and options. An explicitly empty `TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL`
 disables mirror selection; a failed primary install remains a failure.
 
+Ascend integration and release builds receive the same pinned CPU Torch and
+vendor wheel cohort from their hosted prefetch job. If the download action
+returns without its completion output, the workflow retries once in a fresh
+directory. Provisioning starts only after verifying the delivered files and
+their published checksums.
+
 Groups run serially within a platform; separate platform jobs remain parallel.
 Commands have a 30-minute default deadline, overridable with
 `FLAGCICD_CASE_TIMEOUT`. Timeout and cancellation kill the command's process

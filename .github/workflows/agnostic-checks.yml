@@ -117,6 +117,7 @@ jobs:
             tests/unit/test_ci_commands.py
             tests/unit/test_ci_resolution.py
             tests/unit/test_conf_matches_codegen_routes.py
+            tests/unit/test_cpu_torch_artifact.py
             tests/unit/test_flagcicd_reports.py
             tests/unit/test_flagcicd_coverage.py
             tests/unit/test_ci_version_pins.py
