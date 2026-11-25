@@ -585,11 +585,12 @@ def stream(s):
 
 
 def get_amp_supported_dtype():
-    """Return list of supported dtypes for AMP (Automatic Mixed Precision).
+    """Return the supported autocast targets for the FlagOS device.
 
-    Required by torch.autocast for custom device backends.
+    Applications can explicitly select float32 for compute that combines
+    lower-precision model weights with float32 inputs.
     """
-    return [torch.float16, torch.bfloat16]
+    return [torch.float16, torch.bfloat16, torch.float32]
 
 
 class _DeviceProperties:
