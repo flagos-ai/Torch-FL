@@ -319,6 +319,23 @@ def install_alias(flagos) -> None:
             pass
 
 
+def install_ppu_stream_capture_query(flagos) -> None:
+    """Replace the CPU wheel's cached CUDA graph query on PPU only."""
+    graphs = getattr(torch.cuda, "graphs", None)
+    if graphs is None:
+        return
+    cached_query = getattr(graphs, "_cuda_isCurrentStreamCapturing", None)
+    if not (
+        isinstance(cached_query, type)
+        or getattr(cached_query, "__module__", None) == "torch._utils"
+    ):
+        return
+    query = flagos.is_current_stream_capturing
+    torch.cuda.is_current_stream_capturing = query
+    graphs.is_current_stream_capturing = query
+    graphs._cuda_isCurrentStreamCapturing = query
+
+
 def is_active() -> bool:
     """Return whether the compatibility layer installed device aliases."""
     return _active

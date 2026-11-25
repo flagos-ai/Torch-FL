@@ -513,6 +513,10 @@ def _phase_vendor_compat() -> None:
 
     native_host._bootstrap_launcher()
     device.install_device_shims(_platform.build_info().vendor, flagos)
+    if _platform.build_info().platform == "ppu":
+        from .compat.cuda import install_ppu_stream_capture_query
+
+        install_ppu_stream_capture_query(flagos)
 
     # torch::utils::device_lazy_init(PrivateUse1) imports the module named
     # `torch_<backend_name>` and calls its _lazy_init(). It only does so once some
