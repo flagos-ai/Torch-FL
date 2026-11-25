@@ -549,13 +549,25 @@ def test_default_confs_never_route_boxing(platform):
     hide the missing route behind the vendor's borrowed CUDA kernel and report
     coverage the vendor + FlagGems story does not have. Boxing is reachable only
     through the day-0 backends_<platform>_boxing.conf. See AGENTS.md.
+
+    The exception is the platform's own native-host route: an op in
+    VENDOR_HOST_ROUTES names the typed vendor entry the native-host wheel
+    builds (the DCU host forbids cpu_fallback entirely), so the conf routes it
+    to the platform's own kernel instead of `none`.
     """
+    vendor_routes = g.VENDOR_HOST_ROUTES.get(platform, set())
     routes = g.build_all(CONF_DIR)[platform][1]
     assert routes, f"{platform} produced no routes"
     for op, value in routes.items():
         from native_host_policy import configured_dtype_routes, route_backends
 
         keys = route_backends(value)
+        if keys[0] == platform:
+            assert op in vendor_routes, (
+                f"{platform}: {op} routes to the vendor kernel without a "
+                "VENDOR_HOST_ROUTES policy row naming a built vendor entry"
+            )
+            continue
         assert keys[0] in {"flaggems_cpp", "flaggems", "tileops", "none"}, op
         if len(keys) > 1:
             assert platform == "hygon"

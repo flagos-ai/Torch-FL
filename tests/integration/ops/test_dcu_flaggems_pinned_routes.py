@@ -35,6 +35,30 @@ in the published FlagGems routes.
   ``AttributeError`` where ATen returns a tensor. Issue #295, mirroring FlagGems
   #6332.
 
+* ``sort`` and ``sort.stable`` on an empty dimension: the kernel flattens
+  the reduction dimension and divides numel by its length before checking
+  for zero, so ``torch.empty(0, dtype=torch.int64).sort()`` raises
+  ``ZeroDivisionError`` instead of returning the empty values/index pair
+  ATen returns. FlagGems issue #9505; Torch-FL issue #858.
+* ``any``, ``any.dim`` and ``any.dims`` on an empty reduced dimension:
+  ``any_dim`` computes ``M = inp.numel() // N`` with ``N = 0``, so
+  ``torch.empty(0, dtype=torch.bool).any()`` raises ``ZeroDivisionError``
+  where ATen answers ``False``. FlagGems issue #6074; Torch-FL issue #859.
+* ``nonzero`` on an empty tensor: the wrapper reads the last prefix-sum
+  element, indexing ``-1`` into a size-zero vector, instead of returning
+  the documented empty ``(0, 1)`` index tensor. FlagGems issue #6073;
+  Torch-FL issue #860.
+* ``topk`` with real ``-inf`` values on a non-power-of-two length: the
+  padding lanes share their ordering key with the real values, so on a
+  hundred-column row padding indices can escape the valid range or
+  repeat where ATen returns k valid, unique ones. FlagGems issue #9303;
+  Torch-FL issue #861.
+
+All seven routes serve through the hygon vendor kernel
+(VENDOR_HOST_ROUTES): the DCU native host forbids cpu_fallback entirely,
+and the cases below assert the ATen contract, which is a property of
+the platform and not of whichever kernel serves it.
+
 Usage:
     pytest tests/integration/ops/test_dcu_flaggems_pinned_routes.py -v
 """
@@ -345,3 +369,176 @@ class TestTheRestOfTheFamilyIsNotPinned:
 
         for actual, expected in zip(result, reference):
             torch.testing.assert_close(actual.cpu(), expected)
+
+
+class TestEmptySortReturnsEmpty:
+    """``sort`` over an empty dimension, the case issue #858 names.
+
+    The Hygon FlagGems kernel flattens the reduction dimension and divides
+    numel by its length before checking for zero, so an empty dimension
+    reaches integer division by zero and the call raises instead of
+    returning the empty values/index pair ATen returns. The control sorts a
+    non-empty tensor, which the FlagGems kernel served before the reroute
+    and the vendor kernel must serve after it, so the file keeps asserting
+    the defect shape and not the op.
+    """
+
+    @pytest.mark.dcu
+    def test_empty_tensor_sort_returns_empty_values_and_indices(self):
+        x = torch.empty(0, dtype=torch.int64, device=DEVICE)
+        values, index = x.sort()
+        torch.flagos.synchronize()
+
+        assert values.shape == (0,)
+        assert index.shape == (0,)
+        assert index.dtype == torch.int64
+
+    @pytest.mark.dcu
+    def test_empty_dimension_sort_matches_cpu(self):
+        # The reported call is on a 2-D tensor whose reduced dimension is
+        # empty, one step away from the flat empty tensor above: sort over
+        # dim=1 of a (2, 0) tensor is the shape a real call site reaches.
+        x = torch.empty(2, 0, dtype=torch.int64, device=DEVICE)
+        values, index = x.sort(dim=1)
+        torch.flagos.synchronize()
+
+        reference_values, reference_index = torch.empty(2, 0, dtype=torch.int64).sort(
+            dim=1
+        )
+        assert values.cpu().shape == reference_values.shape == (2, 0)
+        assert index.cpu().shape == reference_index.shape == (2, 0)
+
+    @pytest.mark.dcu
+    def test_non_empty_sort_matches_cpu(self):
+        # The control: the same kernel on the shape it always handled.
+        x = torch.tensor([3, 1, 2], device=DEVICE)
+        values, index = x.sort()
+        torch.flagos.synchronize()
+
+        reference_values, reference_index = torch.tensor([3, 1, 2]).sort()
+        torch.testing.assert_close(values.cpu(), reference_values)
+        torch.testing.assert_close(index.cpu(), reference_index)
+
+
+class TestEmptyAnyIsFalse:
+    """``any`` over an empty reduced dimension, the case issue #859 names.
+
+    ``any_dim`` computes ``M = inp.numel() // N`` with ``N = 0`` for an
+    empty reduced dimension and raises ``ZeroDivisionError`` where ATen
+    answers ``False``. ``any()`` without a dim and the explicit ``any.dim``
+    spelling both land on that wrapper, and ``any.dims`` shares it, which
+    is why the reroute took the whole family the conf had on the Python path.
+    """
+
+    @pytest.mark.dcu
+    def test_scalar_any_of_an_empty_tensor_is_false(self):
+        result = torch.empty(0, dtype=torch.bool, device=DEVICE).any()
+        torch.flagos.synchronize()
+
+        assert result.cpu().item() is False
+
+    @pytest.mark.dcu
+    def test_dim_any_with_an_empty_reduced_dimension_is_false(self):
+        result = torch.empty(2, 0, dtype=torch.bool, device=DEVICE).any(dim=1)
+        torch.flagos.synchronize()
+
+        reference = torch.empty(2, 0, dtype=torch.bool).any(dim=1)
+        assert result.cpu().tolist() == reference.tolist() == [False, False]
+
+    @pytest.mark.dcu
+    def test_non_empty_any_matches_cpu(self):
+        # The control: the same wrapper on a dimension it always handled.
+        x = torch.tensor([False, True, False], device=DEVICE)
+        result = x.any()
+        torch.flagos.synchronize()
+
+        assert result.cpu().item() is True
+
+
+class TestEmptyNonzeroKeepsRank:
+    """``nonzero`` on an empty tensor, the case issue #860 names.
+
+    The Hygon FlagGems wrapper reads the last prefix-sum element for an
+    empty tensor, indexing ``-1`` into a size-zero vector, instead of
+    returning the documented result: an empty index tensor whose second
+    dimension is the input rank. The control runs the non-empty shape,
+    where the prefix-sum read is defined and the kernel was already
+    correct.
+    """
+
+    @pytest.mark.dcu
+    def test_empty_tensor_nonzero_returns_documented_rank(self):
+        result = torch.empty(0, dtype=torch.bool, device=DEVICE).nonzero()
+        torch.flagos.synchronize()
+
+        assert tuple(result.shape) == (0, 1)
+
+    @pytest.mark.dcu
+    def test_empty_matrix_nonzero_returns_documented_rank(self):
+        result = torch.empty(2, 3, dtype=torch.bool, device=DEVICE).nonzero()
+        torch.flagos.synchronize()
+
+        assert tuple(result.shape) == (0, 2)
+
+    @pytest.mark.dcu
+    def test_non_empty_nonzero_matches_cpu(self):
+        # The control: the same wrapper on a shape it always handled.
+        x = torch.tensor([False, True, False, True], device=DEVICE)
+        result = x.nonzero()
+        torch.flagos.synchronize()
+
+        reference = torch.tensor([False, True, False, True]).nonzero()
+        torch.testing.assert_close(result.cpu(), reference)
+
+
+class TestTopkInfPaddingStaysInRange:
+    """``topk`` with real ``-inf`` values, the case issue #861 names.
+
+    The issue's tensor, kept verbatim: a (1, 100) row holding three finite
+    values and ninety-seven ``-inf``. The Hygon FlagGems kernel gives the
+    padding lanes and the real ``-inf`` values the same ordering key, so on
+    a non-power-of-two length the padding indices can escape into the
+    output -- out of range, or repeated. ATen's contract is k valid, unique
+    indices, and the control keeps the power-of-two length the FlagGems kernel
+    served before the reroute.
+    """
+
+    @pytest.mark.dcu
+    def test_topk_over_a_row_of_real_minus_inf_returns_unique_in_range_indices(self):
+        x = torch.full((1, 100), float("-inf"), device=DEVICE)
+        x[0, :3] = torch.tensor([0.3, 2.0, 1.0], device=DEVICE)
+        values, index = x.topk(100, dim=-1)
+        torch.flagos.synchronize()
+        ids = index.cpu()
+
+        assert bool(((ids >= 0) & (ids < 100)).all()), (
+            f"topk returned an out-of-range index: {ids.tolist()}"
+        )
+        assert len(set(ids.flatten().tolist())) == 100, (
+            f"topk repeated an index: {sorted(ids.flatten().tolist())}"
+        )
+
+    @pytest.mark.dcu
+    def test_topk_matches_cpu_reference(self):
+        x = torch.full((1, 100), float("-inf"))
+        x[0, :3] = torch.tensor([0.3, 2.0, 1.0])
+        reference_values, reference_index = x.topk(100, dim=-1)
+
+        values, index = x.to(DEVICE).topk(100, dim=-1)
+        torch.flagos.synchronize()
+
+        torch.testing.assert_close(values.cpu(), reference_values)
+        torch.testing.assert_close(index.cpu(), reference_index)
+
+    @pytest.mark.dcu
+    def test_power_of_two_length_is_unaffected(self):
+        # The control: a length the kernel's lane count divides exactly.
+        x = torch.full((1, 128), float("-inf"))
+        x[0, :3] = torch.tensor([0.3, 2.0, 1.0])
+        reference_values, reference_index = x.topk(128, dim=-1)
+
+        values, index = x.to(DEVICE).topk(128, dim=-1)
+        torch.flagos.synchronize()
+
+        torch.testing.assert_close(values.cpu(), reference_values)
+        torch.testing.assert_close(index.cpu(), reference_index)

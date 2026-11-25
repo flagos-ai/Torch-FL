@@ -274,6 +274,18 @@ CUDA_ABI_GAP_NOTES = {
         "pass -- `none` would put an FP8 mm back on the prelude's in-wrapper",
         "computation, which is the gap the claim exists to close. The first",
         "DCU lane after this change is what measures the hang here.",
+        "Issue #862 records a second, shape-conditional failure on the same",
+        "route: the _hygon mm peels a final K tile unconditionally, so with",
+        "K = 0 -- flag_gems.mm([2, 0], [0, 5]), which is what an empty Linear",
+        "backward reaches -- prev_k_mult = cdiv(0, 32) * 32 - 32 = -32 makes",
+        "mask_k = rk < K enable every negative offset and the kernel reads",
+        "before the start of the zero-length input buffers, VM-faulting",
+        "asynchronously under a GDB-caught SIGSEGV in libgalaxyhip/ROCR",
+        "(FlagGems issue #9506). CPU, full boxing and an mm-only boxing",
+        "override all pass the same case. The route still cannot move: the",
+        "conf is overload-granular and cannot express K = 0, and the claim",
+        "above needs the key registered, so like the hang this stays a",
+        "documented failure of the route until FlagGems guards the empty K.",
         "mse_loss is pinned to cuda: FlagGems issue #6221 (mse_loss_backward",
         "is not implemented on DCU).",
         "transpose.int is pinned to cuda: FlagGems issue #6219 (transpose is",
@@ -361,6 +373,47 @@ CUDA_ABI_GAP_NOTES = {
         "scatter_add, scatter_add.out, mean.out and mean.dtype_out",
         "were already there -- and the routes can be re-enabled per op with",
         "FLAGOS_OP_<name>=flaggems once the FlagGems side is repaired.",
+        "sort, sort.stable, any, any.dim, any.dims, nonzero and topk leave the",
+        "FlagGems Python path for the same kind of correctness reason, on",
+        "inputs the survey cannot see -- empty dimensions and non-power-of-two",
+        "lengths -- and route to the hygon vendor kernel rather than to",
+        "cpu_fallback: the DCU native host forbids cpu_fallback entirely, and",
+        "the DTK kernels are the vendor libtorch's own ATen implementations,",
+        "which carry none of the defects below. Each was measured on DCU on",
+        "2026-11-19, boxing and FlagGems arms in fresh processes with the build",
+        "held fixed, and both CPU and all-boxing controls pass:",
+        "sort and sort.stable flatten the reduction dimension and divide numel",
+        "by its length before checking for zero, so an empty dimension reaches",
+        "integer division by zero inside the kernel: sort() over",
+        "torch.empty(0, dtype=torch.int64) raises ZeroDivisionError instead of",
+        "returning the empty values/index pair ATen returns. Torch-FL issue",
+        "#858, FlagGems issue #9505.",
+        "any, any.dim and any.dims all go through any_dim, which computes",
+        "M = inp.numel() // N with N = 0 when the reduced dimension is empty:",
+        "torch.empty(0, dtype=torch.bool).any() raises ZeroDivisionError where",
+        "ATen answers false. Torch-FL issue #859, FlagGems issue #6074.",
+        "nonzero reads the last prefix-sum element for an empty tensor, which",
+        "indexes -1 into a size-zero vector, so",
+        "torch.empty(0, dtype=torch.bool).nonzero() cannot return the documented",
+        "rank -- an empty (0, 1) index tensor. Torch-FL issue #860, FlagGems",
+        "issue #6073.",
+        "topk shares one ordering key between the padding lanes and real -inf",
+        "values, so on a non-power-of-two length the padding indices can escape",
+        "into the output: topk(100) over a (1, 100) row holding three finite",
+        "values and ninety-seven -inf returns out-of-range and duplicated",
+        "indices where ATen returns k valid unique ones. Torch-FL issue #861,",
+        "FlagGems issue #9303.",
+        "The same overload-granular direction applies: any.out, any.dims_out,",
+        "any.all_out, nonzero.out, sort.values, sort.values_stable and",
+        "topk.values were already off the Python path, the whole family moves",
+        "with the defect, and each route can be re-enabled with",
+        "FLAGOS_OP_<name>=flaggems once its upstream fix lands. The vendor",
+        "entries themselves are typed and generated",
+        "(scripts/codegen/codegen_native_vendor.py, from the cohort in",
+        "native_host_policy.py): the any family reduces through or_stub on the",
+        "vendor device, sort/sort.stable/topk run the vendor sort/topk stubs",
+        "over PrivateUse1 outputs the structured meta sizes, and nonzero hands",
+        "the vendor kernel an out it resizes itself.",
         "native_batch_norm is pinned to cuda for an availability reason, one",
         "level below the kernels: the route does not fail, it cannot be",
         "entered. This op is routed through the FlagGems *Python* path, and",
@@ -755,6 +808,9 @@ CUDA_ABI_TRITON_GAPS = {
         "addr_",
         "alias",
         "alias_copy.out",
+        "any",
+        "any.dim",
+        "any.dims",
         "atan2_",
         "atanh_",
         "baddbmm_",
@@ -855,6 +911,7 @@ CUDA_ABI_TRITON_GAPS = {
         "native_batch_norm",
         "ne_.Scalar",
         "ne_.Tensor",
+        "nonzero",
         "nextafter.out",
         "nonzero_static",
         "ormqr",
@@ -878,6 +935,8 @@ CUDA_ABI_TRITON_GAPS = {
         "silu_backward",
         "slice.Tensor",
         "slice_backward",
+        "sort",
+        "sort.stable",
         "special_bessel_j0",
         "special_bessel_y0",
         "special_bessel_y1",
@@ -895,10 +954,41 @@ CUDA_ABI_TRITON_GAPS = {
         "sub_.Tensor",
         "take",
         "take.out",
+        "topk",
         "transpose.int",
         "view_as_complex",
         "xlogy_.Scalar_Other",
         "xlogy_.Tensor",
+    },
+}
+
+# Ops a CUDA-ABI platform's native host serves from the vendor's own kernels
+# once the FlagGems route is held, named per platform.
+#
+# These ops stay in CUDA_ABI_TRITON_GAPS above -- the gap is what keeps them
+# off the FlagGems route -- and this set is what turns the hold into a
+# `hygon` row instead of `none`: the DCU native host forbids cpu_fallback
+# entirely (torch.ops.flagos.strict_host_routes), so a `none` route is a
+# runtime error there, and the typed vendor entries the native-host wheel
+# builds (scripts/codegen/codegen_native_vendor.py, from the cohort in
+# native_host_policy.py) serve the family from the DTK kernels. Each entry's
+# measurement is recorded in CUDA_ABI_GAP_NOTES and in the cohort.
+#
+# The entries are availability pins, not precision ones: the vendor kernels are
+# the vendor libtorch's own ATen CUDA implementations, which dispatch every
+# dtype the ATen kernel admits, so the cohort rows carry dtype_scoped=False and
+# the generated entries gate no dtype. The conf row is dtype-blind the way
+# every route is -- the conf cannot express an emptiness condition, which is
+# the defect being routed around.
+VENDOR_HOST_ROUTES = {
+    "hygon": {
+        "any",
+        "any.dim",
+        "any.dims",
+        "nonzero",
+        "sort",
+        "sort.stable",
+        "topk",
     },
 }
 
@@ -3949,11 +4039,21 @@ def build_all(conf_dir: Path) -> dict:
         tileops_here = tileops if platform in TILEOPS_PLATFORMS else set()
         # No vendor kernel set: a CUDA-ABI platform on this tree has no native
         # operator library, so the vendor slot is empty and everything FlagGems
-        # does not cover falls to `none` (cpu_fallback). Boxing is deliberately
-        # absent from a default conf; see CUDA_ABI_PLATFORMS.
+        # does not cover falls to `none` (cpu_fallback) -- except where the
+        # platform's native host carries measured vendor entries (the issue
+        # #858 empty-input cohort routes to the DTK kernels through
+        # VENDOR_HOST_ROUTES, because the DCU native host forbids cpu_fallback
+        # entirely). Boxing stays absent from a default conf; see
+        # CUDA_ABI_PLATFORMS.
         routes = {
             op: route(
-                op, platform, cpp_here, py_here - gaps, set(), all_ops, tileops_here
+                op,
+                platform,
+                cpp_here,
+                py_here - gaps,
+                VENDOR_HOST_ROUTES.get(platform, set()),
+                all_ops,
+                tileops_here,
             )
             for op in sorted(all_ops)
         }

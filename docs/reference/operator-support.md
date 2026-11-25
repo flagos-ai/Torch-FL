@@ -16,7 +16,7 @@ full-coverage conf.
 | NVIDIA CUDA | `cuda` | 549 | 1485 | 2037 / 2037 | 100.0% |
 | PPU | `ppu` | 592 | 1445 | 2037 / 2037 | 100.0% |
 | MetaX | `metax` | 604 | 1433 | 2037 / 2037 | 100.0% |
-| Hygon DCU | `dcu` | 454 | 1583 | 2037 / 2037 | 100.0% |
+| Hygon DCU | `dcu` | 458 | 1584 | 2042 / 2042 | 100.0% |
 | Kunlunxin | `kunlunxin` | 0 | 57 | 57 / 2037 | 2.8% |
 | Ascend | `ascend` | 221 | 157 | 378 / 2037 | 18.6% |
 | Enflame GCU | `gcu` | 251 | 183 | 434 / 2037 | 21.3% |

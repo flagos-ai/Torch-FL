@@ -699,7 +699,12 @@ def test_conf_route_counts_are_stable():
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each
         # platform's measured triton gaps -- is `none` (cpu_fallback). The
         # boxing routes live in backends_<platform>_boxing.conf.
-        "hygon": {"none": 1577, "flaggems": 465},
+        # sort/sort.stable, any/any.dim/any.dims, nonzero and topk left the
+        # FlagGems Python route for the empty-dimension and -inf-padding
+        # defects issues #858-#861 track: 465 -> 458 flaggems. The seven route
+        # to the hygon vendor kernel (VENDOR_HOST_ROUTES) instead of none,
+        # because the DCU native host forbids cpu_fallback entirely.
+        "hygon": {"none": 1577, "flaggems": 458, "hygon": 7},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
