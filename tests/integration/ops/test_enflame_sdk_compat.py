@@ -20,15 +20,8 @@ import pytest
 import torch
 
 from torch_fl import flagos
-from torch_fl._build_config import ACCELERATOR
 
 pytestmark = pytest.mark.gcu
-
-
-@pytest.fixture(autouse=True)
-def _enflame_wheel():
-    if ACCELERATOR != "enflame":
-        pytest.skip("requires the Enflame wheel")
 
 
 def test_enflame_device_name():
@@ -50,8 +43,7 @@ def test_flagtree_jit_with_an_empty_cache(tmp_path):
         is_flagtree_enflame_available,
     )
 
-    if not is_flagtree_enflame_available():
-        pytest.skip("requires the FlagTree Enflame backend")
+    assert is_flagtree_enflame_available(), "requires the FlagTree Enflame backend"
 
     process = subprocess.run(
         [
