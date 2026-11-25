@@ -61,6 +61,8 @@ container_options: >-
   --env MTHREADS_VISIBLE_DEVICES=all
 
 timeout_minutes: 60
+# Integration also provisions the pinned cohort and builds the AOT wheel.
+integration_timeout_minutes: 90
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-musa
 

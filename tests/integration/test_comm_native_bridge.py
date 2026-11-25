@@ -39,10 +39,9 @@ Two things are asserted, in the order they can break:
    that failure *is* an ImportError out of ``importlib``.
 
 2. **The tier.** A world-size-1 ``flagos`` group must resolve its inner backend
-   to ``nccl``, with neither the FlagCX nor the staged-gloo skip reason set, and
-   complete a collective. The bridge being importable is not the same claim: the
-   tier is reached through ``ProcessGroupFlagOS._load_nccl_extension()``, and a
-   group that fell back would still leave the extension loaded.
+   to ``nccl`` when FlagCX is unavailable, with neither the native nor the
+   staged-gloo skip reason set. The test verifies the bridge through a
+   collective on a device tensor.
 
 This is the completion bar issue #366 states -- an installed wheel reaches RCCL
 with no source checkout -- and it runs in CI's wheel-only workspace, where the
@@ -62,6 +61,7 @@ from __future__ import annotations
 
 import socket
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -108,8 +108,9 @@ def test_the_installed_package_carries_the_native_comm_bridge():
     print(f"bridge: {bridge}")
 
 
-def test_the_rccl_tier_resolves_to_that_bridge():
+def test_the_rccl_tier_resolves_to_that_bridge(monkeypatch):
     _skip_unless_dcu()
+    monkeypatch.setitem(sys.modules, "flagcx", None)
 
     dist.init_process_group(
         "flagos",

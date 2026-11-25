@@ -24,8 +24,15 @@ GROUP_ID = "common_regression"
 TEST_PATH = "tests/integration/common"
 COMMAND = ("python", "-m", "pytest", TEST_PATH, "-v", "--tb=short")
 REQUIRED_COMMON_CASES = frozenset(
-    f"{TEST_PATH}/test_reductions.py::test_indexed_reduction[{op}]"
-    for op in ("argmin", "max", "min")
+    {
+        f"{TEST_PATH}/test_stream.py::test_compiled_stream_chain",
+        f"{TEST_PATH}/test_native_host.py::test_layout_and_storage",
+        f"{TEST_PATH}/test_native_host.py::test_dynamic_shapes_and_stream_scope",
+        *(
+            f"{TEST_PATH}/test_reductions.py::test_indexed_reduction[{op}]"
+            for op in ("argmin", "max", "min")
+        ),
+    }
 )
 
 
