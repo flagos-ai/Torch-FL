@@ -267,6 +267,62 @@ _COHORTS["hygon"] = {
             "dtypes": ["Float"],
             "reason": "Normalization requires the original HCU reciprocal-square-root arithmetic.",
         },
+        {
+            "op": "any",
+            "family": "flag_reduce_all",
+            "stub": "or_stub",
+            "dtype_scoped": False,
+            "dtypes": ["Bool"],
+            "reason": "Issue #859: the FlagGems any_dim kernel divides numel by an empty dimension length and raises ZeroDivisionError where ATen answers false; measured on DCU 2026-11-19 with the bool reproducer.",
+        },
+        {
+            "op": "any.dim",
+            "family": "flag_reduce_dim",
+            "stub": "or_stub",
+            "dtype_scoped": False,
+            "dtypes": ["Bool"],
+            "reason": "Issue #859: any_dim computes M = inp.numel() // N with N = 0 for an empty reduced dimension; the vendor route serves every dtype the ATen dispatch admits.",
+        },
+        {
+            "op": "any.dims",
+            "family": "flag_reduce_dims",
+            "stub": "or_stub",
+            "dtype_scoped": False,
+            "dtypes": ["Bool"],
+            "reason": "Issue #859: any.dims shares the any_dim wrapper and fails on the same empty reduced dimension.",
+        },
+        {
+            "op": "nonzero",
+            "family": "nonzero_out",
+            "dtype_scoped": False,
+            "dtypes": ["Bool"],
+            "reason": "Issue #860: the FlagGems nonzero wrapper reads the last prefix-sum element for an empty tensor, indexing -1 into a size-zero vector; the vendor kernel resizes the passed out itself, measured on DCU 2026-11-19 with the bool reproducer.",
+        },
+        {
+            "op": "sort",
+            "family": "index_pair",
+            "stub": "sort_stub",
+            "schema_of": "sort.stable",
+            "dtype_scoped": False,
+            "dtypes": ["Int64"],
+            "reason": "Issue #858: the _hygon sort kernel divides numel by the flattened reduction length before checking for zero, so an empty dimension reaches integer division by zero; measured on DCU 2026-11-19 with the int64 reproducer.",
+        },
+        {
+            "op": "sort.stable",
+            "family": "index_pair",
+            "stub": "sort_stub",
+            "dtype_scoped": False,
+            "dtypes": ["Int64"],
+            "reason": "Issue #858: sort.stable takes the same _hygon kernel and fails on the same empty dimension; FlagGems issue #9505.",
+        },
+        {
+            "op": "topk",
+            "family": "index_pair",
+            "stub": "topk_stub",
+            "dtype_scoped": False,
+            "dtypes": ["Float"],
+            "reason": "Issue #861: padding lanes share the ordering key with real -inf values, so topk over a non-power-of-two length returns out-of-range and duplicated indices; measured on DCU 2026-11-19 with the 100-column -inf reproducer, FlagGems issue #9303.",
+        },
     ],
     "sources": [
         {
@@ -307,10 +363,17 @@ def source_policy(vendor):
 
 
 def configured_dtype_routes(vendor, *, policy=None):
-    """Render measured input-dtype clauses for the vendor conf generator."""
+    """Render measured input-dtype clauses for the vendor conf generator.
+
+    Availability pins (dtype_scoped=False) route the whole overload to the
+    vendor kernel as their base, so they carry no dtype clause: the clause
+    would only restate the base route and imply a precision scoping the entry
+    does not have.
+    """
     return {
         row["op"]: ",".join(row["dtypes"]) + ":" + vendor
         for row in (precision_policy(vendor) if policy is None else policy)["operators"]
+        if row.get("dtype_scoped", True)
     }
 
 

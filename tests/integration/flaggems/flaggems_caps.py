@@ -151,6 +151,16 @@ FLAGGEMS_PINNED_OFF: dict[str, tuple[str, ...]] = {
         # Hygon native-host policy restored the FlagGems base for mean.dim.
         # TestEmptyMeanIsNan covers the empty-reduction contract on ordinary wheels.
         "native_batch_norm",
+        # Issues #858-#861: the empty-input and -inf-padding family routes to
+        # the hygon vendor kernel (VENDOR_HOST_ROUTES) instead of none, because
+        # the DCU native host forbids cpu_fallback entirely.
+        "any",
+        "any.dim",
+        "any.dims",
+        "nonzero",
+        "sort",
+        "sort.stable",
+        "topk",
     ),
 }
 
@@ -185,8 +195,11 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # 454: #672 routed DCU's `mm` and `bmm` to FlagGems (the soft-lowp matrix
     # claim carries every dtype through the prelude, so the key cannot box), and
     # left this count at the pre-reroute 452. The hygon lane reported the two it
-    # had gained as `assert 454 == 452`.
-    "dcu": 463,
+    # had gained as `assert 454 == 452`. Issues #858-#861 then moved seven
+    # empty-input and -inf-padding routes (sort, sort.stable, any, any.dim,
+    # any.dims, nonzero, topk) off the Python path: 458 raw flaggems less the
+    # two seeded drawops -> 456.
+    "dcu": 456,
     # Isolated full-model precision checks restore SiLU to FlagGems.
     "gcu": 253,
     # The iluvatar lane's landing: the conf routes 583 ops to FlagGems, thirteen

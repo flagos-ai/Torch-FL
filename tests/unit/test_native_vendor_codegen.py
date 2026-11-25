@@ -129,7 +129,7 @@ def test_catalog_emission_rejects_stale_core_sources(
 
 def test_hcu_entries_use_published_structured_implementations(generator):
     outputs, catalog = generator.render(generator.load_policy("hygon"))
-    assert len(catalog) == 5
+    assert len(catalog) == 12
     for path, content in outputs.items():
         assert path.read_text() == content
     source = next(content for path, content in outputs.items() if path.suffix == ".cc")
@@ -140,7 +140,66 @@ def test_hcu_entries_use_published_structured_implementations(generator):
     assert "Matrix<" not in source
     assert "DeviceBoxingGuard" not in source and "redispatch" not in source
     routes = (ROOT / "torch_fl/configs/backends_hygon.conf").read_text()
+    availability = {
+        "any",
+        "any.dim",
+        "any.dims",
+        "nonzero",
+        "sort",
+        "sort.stable",
+        "topk",
+    }
     for row in catalog:
         assert row["vendor"] == "hygon"
-        expected = ",".join(row["dtypes"]) + ":hygon"
-        assert f"{row['op']} = flaggems; {expected}" in routes
+        if row["op"] in availability:
+            assert f"\n{row['op']} = hygon" in routes, row["op"]
+        else:
+            expected = ",".join(row["dtypes"]) + ":hygon"
+            assert f"{row['op']} = flaggems; {expected}" in routes
+
+
+def test_hcu_availability_entries_route_to_the_vendor_kernel(generator):
+    outputs, catalog = generator.render(generator.load_policy("hygon"))
+    source = next(content for path, content in outputs.items() if path.suffix == ".cc")
+    routes = (ROOT / "torch_fl/configs/backends_hygon.conf").read_text()
+
+    # The flag reductions call the named ATen stub on the vendor device: the
+    # shared structured impl dispatches on the operand's own device type,
+    # which no vendor kernel is registered under.
+    assert "FlagReduce<at::meta::structured_any_dim>(" in source
+    assert "FlagReduce<at::meta::structured_any_dims>(" in source
+    assert "FlagReduce<at::meta::structured_any>(" in source
+    assert "at::native::or_stub" in source
+    # Index pairs return both tensors the stub fills.
+    assert "PairOutput<at::meta::structured_sort_stable> kernel;" in source
+    assert (
+        "at::native::sort_stub(at::kCUDA, self, kernel.values, kernel.indices, dim, descending, false);"
+        in source
+    )
+    assert (
+        "topk_stub(at::kCUDA, self, kernel.values, kernel.indices, k, dim, largest, sorted);"
+        in source
+    )
+    # Nonzero hands the vendor kernel an out it resizes itself.
+    assert "NonzeroOut<at::native::nonzero_out_cuda>(self)" in source
+
+    availability = {
+        "any",
+        "any.dim",
+        "any.dims",
+        "nonzero",
+        "sort",
+        "sort.stable",
+        "topk",
+    }
+    for row in catalog:
+        if row["op"] not in availability:
+            continue
+        assert row["family"] in {
+            "flag_reduce_dim",
+            "flag_reduce_dims",
+            "flag_reduce_all",
+            "index_pair",
+            "nonzero_out",
+        }
+        assert f"\n{row['op']} = hygon" in routes, row["op"]

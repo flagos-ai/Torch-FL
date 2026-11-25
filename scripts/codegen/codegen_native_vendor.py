@@ -45,9 +45,18 @@ def validate_policy(policy):
         seen.add(row["op"])
         if not row.get("reason") or not row.get("dtypes"):
             raise ValueError("precision exceptions require evidence and dtypes")
-        if set(row["dtypes"]) - {"Float", "BFloat16"}:
+        if set(row["dtypes"]) - {"Float", "BFloat16", "Bool", "Int64"}:
             raise ValueError("unmeasured precision dtype")
-        if row["family"] not in {"structured", "reduction", "blas"}:
+        if row["family"] not in {
+            "structured",
+            "reduction",
+            "blas",
+            "flag_reduce_dim",
+            "flag_reduce_dims",
+            "flag_reduce_all",
+            "index_pair",
+            "nonzero_out",
+        }:
             raise ValueError("unsupported native vendor family")
         if row["family"] == "blas" and row.get("rank") not in (2, 3):
             raise ValueError("BLAS entries require matrix or batched-matrix rank")
@@ -56,6 +65,21 @@ def validate_policy(policy):
             or row.get("empty") != "nan"
         ):
             raise ValueError("unsupported reduction contract")
+        if row["family"].startswith("flag_reduce") and not re.fullmatch(
+            r"[a-z_]+_stub", row.get("stub", "")
+        ):
+            raise ValueError("flag reductions name the ATen dispatch stub they call")
+        if row["family"] == "index_pair" and not re.fullmatch(
+            r"[a-z_]+_stub", row.get("stub", "")
+        ):
+            raise ValueError("index-pair entries name the ATen dispatch stub they call")
+        if row["family"] == "index_pair" and row["op"] == "sort":
+            # The functional `sort` schema has no out= variant of its own, so the
+            # entry is emitted from the sort.stable group with stable=None.
+            if row.get("schema_of") != "sort.stable":
+                raise ValueError("sort entries are emitted from the sort.stable group")
+        if row.get("schema_of") and row["family"] != "index_pair":
+            raise ValueError("schema_of is an index-pair-only alias")
     return policy
 
 
@@ -76,42 +100,166 @@ def schema_groups():
     return groups, parsed.backend_indices[DispatchKey.CUDA]
 
 
+# The reduction stubs take a TensorIterator and dispatch on the device type the
+# caller passes, so the flag-reduction entries force at::kCUDA under a
+# VendorScope -- the same contraction the Reduction helper strikes for
+# mean.dim, whose structured impl would otherwise ask the stub for the
+# operand's own (PrivateUse1) device type and find no kernel.
+FLAG_REDUCE_BOUNDARIES = {
+    "flag_reduce_dim": ["self", "dim", "keepdim"],
+    "flag_reduce_dims": ["self", "dim", "keepdim"],
+    "flag_reduce_all": ["self"],
+}
+
+# The index-pair stubs take the operand tensors directly (Sorting.h), with the
+# tail arguments spelled in the stub's own order: sort's trailing stable flag
+# is last, where the sort.stable schema carries it first.
+INDEX_PAIR_STUB_TAILS = {
+    "sort_stub": "{dim}, {descending}, {stable}",
+    "topk_stub": "{k}, {dim}, {largest}, {sorted}",
+}
+
+
 def render(policy):
     groups, backend = schema_groups()
+    parsed = parse_native_yaml(
+        str(
+            Path(torchgen.__file__).parent
+            / "packaged/ATen/native/native_functions.yaml"
+        ),
+        str(Path(torchgen.__file__).parent / "packaged/ATen/native/tags.yaml"),
+    )
+    # The flat function map backs the availability entries: an op like sort has
+    # no structured group of its own, so its signature comes from its own
+    # schema while the meta machinery comes from the aliased group.
+    all_funcs = {str(f.func.name): f for f in parsed.native_functions}
     policy_hash = hashlib.sha256(
         json.dumps(policy, sort_keys=True).encode()
     ).hexdigest()
     entries, functions, bindings, headers, catalog = [], [], [], set(), []
     for index, row in enumerate(sorted(policy["operators"], key=lambda r: r["op"])):
         name = row["op"]
-        group = groups.get(name)
+        family = row["family"]
+        schema_name = row.get("schema_of", name)
+        group = groups.get(schema_name)
         if group is None:
             raise ValueError(f"no structured functional schema for {name}")
         metadata = backend.get_kernel(group)
-        if metadata is None or not metadata.structured:
-            raise ValueError(f"no structured vendor implementation for {name}")
         with native_function_manager(group):
-            pointer, result, args = unified_sig(group.functional)
+            group_pointer, group_result, group_args = unified_sig(group.functional)
             meta_args = structured.meta_arguments(group)
             impl_args = structured.impl_arguments(group)
+        if row.get("schema_of"):
+            # The aliased op carries its own schema (sort vs sort.stable): the
+            # entry signature must match the op's PrivateUse1 wrapper, while the
+            # meta call comes from the aliased group and fills the alias-only
+            # arguments with nullopt.
+            with native_function_manager(all_funcs[name]):
+                pointer, result, args = unified_sig(all_funcs[name])
+        else:
+            pointer, result, args = group_pointer, group_result, group_args
         names = [arg_name for _, arg_name in args]
-        if (
-            result != "at::Tensor"
-            or not args
-            or args[0][0] != "const at::Tensor &"
-            or [arg.name for arg in meta_args] != names
-            or [arg.name for arg in impl_args] != names + ["out"]
-        ):
-            raise ValueError(f"unsupported structured argument/result boundary: {name}")
-        parent = f"{metadata.cpp_namespace}::structured_{metadata.kernel}"
-        headers.add(f"ATen/ops/{group.functional.func.name.name.base}_native.h")
+        group_names = [arg_name for _, arg_name in group_args]
+        meta_call_args = ", ".join(
+            n if n in names else "::std::nullopt" for n in group_names
+        )
+        if family in {"structured", "reduction", "blas"}:
+            if metadata is None or not metadata.structured:
+                raise ValueError(f"no structured vendor implementation for {name}")
+            if (
+                result != "at::Tensor"
+                or not args
+                or args[0][0] != "const at::Tensor &"
+                or [arg.name for arg in meta_args] != names
+                or [arg.name for arg in impl_args] != names + ["out"]
+            ):
+                raise ValueError(
+                    f"unsupported structured argument/result boundary: {name}"
+                )
+            parent = f"{metadata.cpp_namespace}::structured_{metadata.kernel}"
+            headers.add(f"ATen/ops/{group.functional.func.name.name.base}_native.h")
+            record_parent = parent
+            if family == "blas":
+                if names != ["self", "mat2"]:
+                    raise ValueError(f"unsupported BLAS argument boundary: {name}")
+                call = f"Matrix<{parent}, {row['rank']}>({', '.join(names)})"
+            elif family == "reduction":
+                if names != ["self", "dim", "keepdim", "dtype"]:
+                    raise ValueError(f"unsupported reduction argument boundary: {name}")
+                call = f"Reduction<{parent}>(at::native::{row['stub']}, {', '.join(names)})"
+            else:
+                call = f"StructuredCall<{parent}>({', '.join(names)})"
+            scope = "VendorDeviceScope" if family == "blas" else "VendorScope"
+            returns_pair = False
+        elif family in FLAG_REDUCE_BOUNDARIES:
+            if metadata is None or not metadata.structured:
+                raise ValueError(f"no structured vendor implementation for {name}")
+            if result != "at::Tensor" or names != FLAG_REDUCE_BOUNDARIES[family]:
+                raise ValueError(f"unsupported flag-reduction boundary: {name}")
+            # The meta class is named for the functional op (any.dim ->
+            # structured_any_dim); it sizes the output without dispatching, and
+            # the reduction itself goes through the named stub on the vendor
+            # device -- the shared structured impl dispatches on the operand's
+            # own device type, which no vendor kernel is registered under.
+            meta_class = f"at::meta::structured_{schema_name.replace('.', '_')}"
+            headers.add(f"ATen/ops/{schema_name.replace('.', '_')}_meta.h")
+            call = f"FlagReduce<{meta_class}>(at::native::{row['stub']}, {', '.join(names)})"
+            scope = "VendorScope"
+            returns_pair = False
+            record_parent = meta_class
+        elif family == "index_pair":
+            if metadata is None or not metadata.structured:
+                raise ValueError(f"no structured vendor implementation for {name}")
+            if result != "::std::tuple<at::Tensor,at::Tensor>":
+                raise ValueError(f"index-pair entries return two tensors: {name}")
+            meta_class = f"at::meta::structured_{schema_name.replace('.', '_')}"
+            headers.add(f"ATen/ops/{schema_name.replace('.', '_')}_meta.h")
+            tail_names = names[1:]
+            if row["stub"] == "sort_stub":
+                if names not in (
+                    ["self", "dim", "descending"],
+                    ["self", "stable", "dim", "descending"],
+                ):
+                    raise ValueError(f"unsupported sort boundary: {name}")
+                stable = "stable.value_or(false)" if "stable" in names else "false"
+                tail = INDEX_PAIR_STUB_TAILS["sort_stub"].format(
+                    dim="dim", descending="descending", stable=stable
+                )
+            elif row["stub"] == "topk_stub":
+                if names != ["self", "k", "dim", "largest", "sorted"]:
+                    raise ValueError(f"unsupported topk boundary: {name}")
+                tail = INDEX_PAIR_STUB_TAILS["topk_stub"].format(
+                    **{n: n for n in tail_names}
+                )
+            else:
+                raise ValueError(f"unsupported index-pair stub: {row['stub']}")
+            call = (
+                f"at::native::{row['stub']}(at::kCUDA, self, "
+                f"kernel.values, kernel.indices, {tail})"
+            )
+            scope = "VendorScope"
+            returns_pair = True
+            record_parent = meta_class
+        elif family == "nonzero_out":
+            if metadata is None or metadata.structured:
+                raise ValueError(f"no plain vendor kernel for {name}")
+            if result != "at::Tensor" or names != ["self"]:
+                raise ValueError(f"unsupported nonzero boundary: {name}")
+            kernel_symbol = f"{metadata.cpp_namespace}::{metadata.kernel}"
+            headers.add(f"ATen/ops/{schema_name.replace('.', '_')}_native.h")
+            call = f"NonzeroOut<{kernel_symbol}>(self)"
+            scope = "VendorScope"
+            returns_pair = False
+            record_parent = kernel_symbol
+        else:
+            raise ValueError(f"unsupported native vendor family: {family}")
         record = {
             "vendor": policy["vendor"],
             "op": name,
             "schema": str(group.functional.func),
             "pointer": pointer,
-            "parent": parent,
-            "family": row["family"],
+            "parent": record_parent,
+            "family": family,
             "dtypes": sorted(row["dtypes"]),
             "policy_sha256": policy_hash,
         }
@@ -126,30 +274,36 @@ def render(policy):
             f"{json.dumps(record['abi'])}, {encoded}, {fn_type}, {dispatcher})"
         )
         arguments = ", ".join(f"{kind} {arg_name}" for kind, arg_name in args)
-        call_args = ", ".join(names)
-        if row["family"] == "blas":
-            if names != ["self", "mat2"]:
-                raise ValueError(f"unsupported BLAS argument boundary: {name}")
-            call = f"Matrix<{parent}, {row['rank']}>({call_args})"
-        elif row["family"] == "reduction":
-            if names != ["self", "dim", "keepdim", "dtype"]:
-                raise ValueError(f"unsupported reduction argument boundary: {name}")
-            call = f"Reduction<{parent}>(at::native::{row['stub']}, {call_args})"
-        else:
-            call = f"StructuredCall<{parent}>({call_args})"
-        scope = "VendorDeviceScope" if row["family"] == "blas" else "VendorScope"
         admitted = " || ".join(
             f"self.scalar_type() == at::ScalarType::{dtype}"
             for dtype in sorted(row["dtypes"])
         )
+        if returns_pair:
+            signature = (
+                f"::std::tuple<at::Tensor, at::Tensor> Entry_{index}({arguments})"
+            )
+            body = (
+                f"  PairOutput<{meta_class}> kernel;\n"
+                f"  kernel.meta({meta_call_args});\n"
+                f"  {call};\n"
+                f"  return ::std::make_tuple(kernel.values, kernel.indices);"
+            )
+        else:
+            signature = f"at::Tensor Entry_{index}({arguments})"
+            body = f"  return {call};"
+        gate = (
+            ""
+            if row.get("dtype_scoped") is False
+            else f'  TORCH_CHECK({admitted}, "unmeasured native vendor dtype: {name}");\n'
+        )
         functions.append(
-            f"at::Tensor Entry_{index}({arguments}) {{\n"
-            f'  TORCH_CHECK({admitted}, "unmeasured native vendor dtype: {name}");\n'
-            f"  ++hits[{index}];\n"
-            f'  RECORD_FUNCTION("flagos::{policy["vendor"]}::{name}", std::vector<c10::IValue>());\n'
-            f"  {scope} scope(self);\n"
-            f"  return {call};\n"
-            "}\n"
+            f"{signature} {{\n"
+            + gate
+            + f"  ++hits[{index}];\n"
+            + f'  RECORD_FUNCTION("flagos::{policy["vendor"]}::{name}", std::vector<c10::IValue>());\n'
+            + f"  {scope} scope(self);\n"
+            + body
+            + "\n}\n"
         )
         bindings.append(
             f"  result.append(py::make_tuple({json.dumps(name)}, "

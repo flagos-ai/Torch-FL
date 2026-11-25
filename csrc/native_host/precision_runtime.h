@@ -239,6 +239,91 @@ at::Tensor Reduction(Stub& stub, const at::Tensor& input,
   return kernel.output;
 }
 
+// The flag reductions (the any family) share one structured meta with the CPU
+// build and dispatch through a named ATen stub -- or_stub -- that the vendor
+// library registers under the CUDA device key. The operand's own device type
+// is PrivateUse1, so the stub is called with at::kCUDA under a VendorScope
+// instead of letting the shared structured impl ask for a kernel the vendor
+// library does not register. ATen's empty-reduction identity for these ops is
+// false, which the stub's own kernel writes; no NaN fill applies.
+template <class Meta, class Stub>
+at::Tensor FlagReduce(Stub& stub, const at::Tensor& input,
+                      at::OptionalIntArrayRef dim, bool keepdim) {
+  StructuredOutput<Meta> kernel;
+  kernel.meta(input, dim, keepdim);
+  auto iterator = at::native::make_reduction(
+      "native vendor flag reduce", kernel.output, input, dim, keepdim,
+      kernel.output.scalar_type());
+  DescribeCudaMemory(iterator);
+  stub(at::kCUDA, iterator);
+  return kernel.output;
+}
+
+template <class Meta, class Stub>
+at::Tensor FlagReduceAll(Stub& stub, const at::Tensor& input) {
+  StructuredOutput<Meta> kernel;
+  kernel.meta(input);
+  auto iterator = at::native::make_reduction(
+      "native vendor flag reduce all", kernel.output, input,
+      at::OptionalIntArrayRef(), false, kernel.output.scalar_type());
+  DescribeCudaMemory(iterator);
+  stub(at::kCUDA, iterator);
+  return kernel.output;
+}
+
+// Two-output structured entries (sort, sort.stable, topk): the meta sizes both
+// results, which are allocated on the operand's own PrivateUse1 storage, and
+// the named dispatch stub runs the vendor kernel against them.
+template <class Meta>
+struct PairOutput : Meta {
+  at::Tensor values;
+  at::Tensor indices;
+
+  const at::Tensor& maybe_get_output(int64_t index) override {
+    TORCH_CHECK(index == 0 || index == 1,
+                "native vendor pair entry requires two outputs");
+    return index == 0 ? values : indices;
+  }
+
+  void set_output_raw_strided(int64_t index, at::IntArrayRef sizes,
+                              at::IntArrayRef strides, at::TensorOptions options,
+                              at::DimnameList names) override {
+    TORCH_CHECK(index == 0 || index == 1,
+                "native vendor pair entry requires two outputs");
+    TORCH_CHECK(options.device().is_privateuseone(),
+                "native vendor meta must allocate a flagos output");
+    TORCH_CHECK(options.layout() == at::kStrided && !options.pinned_memory(),
+                "native vendor meta requires unpinned strided device storage");
+    auto& output = index == 0 ? values : indices;
+    auto* allocator = at::GetAllocator(at::kPrivateUse1);
+    constexpr c10::DispatchKeySet keys(c10::DispatchKey::PrivateUse1);
+    const auto dtype = c10::typeMetaToScalarType(options.dtype());
+    output = strides.empty()
+        ? at::detail::empty_generic(sizes, allocator, keys, dtype, options.memory_format_opt())
+        : at::detail::empty_strided_generic(sizes, strides, allocator, keys, dtype);
+    TORCH_INTERNAL_ASSERT(output.device() == options.device());
+    if (!names.empty()) at::namedinference::propagate_names(output, names);
+  }
+
+  void set_output_strided(int64_t index, at::IntArrayRef sizes,
+                          at::IntArrayRef strides, at::TensorOptions options,
+                          at::DimnameList names) override {
+    set_output_raw_strided(index, sizes, strides, options, names);
+  }
+};
+
+// Nonzero's CUDA kernel sizes and resizes the passed out itself (the element
+// count is only known after a device-to-host sum), so the entry hands it an
+// empty kLong tensor on the operand's own storage and lets the kernel shape it.
+template <at::Tensor& (*Kernel)(const at::Tensor&, at::Tensor&)>
+at::Tensor NonzeroOut(const at::Tensor& input) {
+  auto* allocator = at::GetAllocator(at::kPrivateUse1);
+  constexpr c10::DispatchKeySet keys(c10::DispatchKey::PrivateUse1);
+  at::Tensor out = at::detail::empty_generic({0}, allocator, keys, at::kLong);
+  Kernel(input, out);
+  return out;
+}
+
 #if !defined(FLAGOS_NATIVE_HYGON)
 inline void CheckBlas(cublasStatus_t status, const char* call) {
   TORCH_CHECK(status == CUBLAS_STATUS_SUCCESS,
