@@ -3,8 +3,8 @@
 #pragma once
 
 #include "../device_memory_interface.h"
+#include "../../accelerator/enflame/tops_compat.h"
 
-#include <tops_runtime_api.h>
 #include <cstdio>
 
 namespace c10::flagos {
@@ -19,7 +19,7 @@ class TopsPointerDeviceGuard {
   explicit TopsPointerDeviceGuard(const void* dev_ptr) {
     if (!dev_ptr)
       return;
-    topsPointerAttribute_t attr{};
+    enflame::TopsPointerAttributes attr{};
     if (topsPointerGetAttributes(&attr, dev_ptr) != topsSuccess)
       return;
     if (attr.device < 0)
@@ -59,8 +59,8 @@ bool TopsCrossDeviceEnds(
     const void* src,
     int* dst_device,
     int* src_device) {
-  topsPointerAttribute_t dst_attr{};
-  topsPointerAttribute_t src_attr{};
+  enflame::TopsPointerAttributes dst_attr{};
+  enflame::TopsPointerAttributes src_attr{};
   if (topsPointerGetAttributes(&dst_attr, dst) != topsSuccess)
     return false;
   if (topsPointerGetAttributes(&src_attr, src) != topsSuccess)
