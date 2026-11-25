@@ -484,6 +484,24 @@ void BlockingMemcpy(
       "); the destination buffer would have been left unwritten");
 }
 
+void CopySameDevice(const at::Tensor& src, const at::Tensor& dst) {
+  const size_t nbytes = src.numel() * src.element_size();
+  if (nbytes == 0) return;
+#if defined(USE_DCU) || defined(USE_MUSA)
+  // The synchronous runtime spelling can enqueue D2D work on the legacy queue.
+  // Put the copy between its producer and consumer on the tensor's stream.
+  const c10::DeviceGuard guard(src.device());
+  const auto stream = GetCurrentStreamForDevice(src.device().index());
+  TORCH_CHECK(
+      MemcpyAsync(dst.data_ptr(), src.data_ptr(), nbytes,
+                  MemcpyDeviceToDevice, stream) == Success,
+      "flagos: same-device copy failed");
+#else
+  BlockingMemcpy(
+      dst.data_ptr(), src.data_ptr(), nbytes, MemcpyDeviceToDevice, src);
+#endif
+}
+
 ADD_IMPL_TO_DISPATCHER(
     LocalScalarDenseFn, local_scalar_dense_dispatcher, "_local_scalar_dense")
 ADD_IMPL_TO_DISPATCHER(ToCopyFn, to_copy_dispatcher, "_to_copy")
@@ -546,12 +564,12 @@ at::Tensor _copy_from(
         self.sizes().equals(dst.sizes()) &&
         self.scalar_type() == dst.scalar_type()) {
       // Fast path: both contiguous, same shape and dtype → direct memcpy.
-      // Both operands are flagos tensors but not necessarily on the same one, so
-      // this goes through the peer-aware form.
-      size_t nbytes = self.numel() * self.element_size();
-      if (nbytes > 0) {
+      if (self.device() == dst.device()) {
+        CopySameDevice(self, dst);
+      } else if (self.numel() > 0) {
         CrossDeviceMemcpy(
-            dst.data_ptr(), self.data_ptr(), nbytes, self, dst);
+            dst.data_ptr(), self.data_ptr(),
+            self.numel() * self.element_size(), self, dst);
       }
     } else {
 #if defined(FLAGOS_MUSA_KERNEL)

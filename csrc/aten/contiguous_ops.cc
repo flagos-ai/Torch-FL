@@ -11,7 +11,6 @@
 #include <ATen/NamedTensorUtils.h>
 #include <ATen/native/Resize.h>
 #include <ATen/ops/copy_native.h>
-#include <c10/core/DeviceGuard.h>
 #include <flagos.h>
 #include "device_boxing.h"
 // ascend_copy.h and gcu_copy.h are included unconditionally: each supplies an
@@ -264,19 +263,7 @@ at::Tensor clone(
     return result.copy_(self);
   }
   if (self.is_non_overlapping_and_dense() && self.strides().equals(result.strides())) {
-    const size_t nbytes = self.numel() * self.element_size();
-#if defined(USE_DCU)
-    // Order the HIP transfer with both the producer and the consumer.
-    const c10::DeviceGuard guard(self.device());
-    const auto stream = GetCurrentStreamForDevice(self.device().index());
-    TORCH_CHECK(
-        MemcpyAsync(result.data_ptr(), self.data_ptr(), nbytes,
-                    MemcpyDeviceToDevice, stream) == Success,
-        "flagos clone: device-to-device copy failed");
-#else
-    BlockingMemcpy(
-        result.data_ptr(), self.data_ptr(), nbytes, MemcpyDeviceToDevice, self);
-#endif
+    CopySameDevice(self, result);
     return result;
   }
 

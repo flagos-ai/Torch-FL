@@ -112,20 +112,23 @@ def _check_strided_transfer():
 def _check_copy_stream_order():
     # Use the measured large-copy shape to exercise the asynchronous transfer.
     host = torch.linspace(-1, 1, 200 * 40999 * 3).reshape(200, 40999, 3)
-    expected = host.cos().cos()
-    source = host.to(DEVICE)
-    side = torch.Stream(device=source.device)
-    side.wait_stream(torch.accelerator.current_stream(source.device))
+    values = (host, -host)
+    inputs = [(value.to(DEVICE), value) for value in values]
+    device = inputs[0][0].device
+    side = torch.Stream(device=device)
+    side.wait_stream(torch.accelerator.current_stream(device))
     with side, torch.no_grad():
-        target = torch.empty_like(source)
+        target = torch.empty_like(inputs[0][0])
         for name, copy in (("clone", torch.clone), ("copy_", target.copy_)):
-            for _ in range(4):
-                result = torch.cos(copy(torch.cos(source)))
+            for source, expected in inputs * 2:
+                # Two sign changes give an exact reference. Alternating inputs
+                # exposes a copy that reads an intermediate from a prior call.
+                result = torch.neg(copy(torch.neg(source)))
                 torch.testing.assert_close(
                     result.cpu(),
                     expected,
-                    atol=1e-6,
-                    rtol=1e-6,
+                    atol=0,
+                    rtol=0,
                     msg=lambda message: f"{name}: {message}",
                 )
 
