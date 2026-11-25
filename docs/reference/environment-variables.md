@@ -144,6 +144,7 @@ None is needed on a stock CUDA box; each platform guide states which apply.
 |----------|-------|---------|---------|
 | `FLAGOS_ALIAS_CUDA` | Runtime | `1` (on) | Alias the `cuda` device string to `flagos` for drop-in compatibility. Set `0` to opt out |
 | `FLAGOS_DISABLE_CUDA_SHIM` | Runtime | `0` (off) | Skip registering the `torch.cuda` compatibility shim for generic GPU operations |
+| `FLAGOS_COSMOS_CUDA_COMPAT` | Runtime | `0` (off) | Run the original Cosmos attention kernels on CUDA views of FlagOS tensors. Use a dedicated eager inference process with NVIDIA CUDA PyTorch and the same attention packages as the CUDA reference. Legacy `Tensor.cuda()` transfers in that process target FlagOS. |
 | `FLAGOS_METAX_CUDART_SHIM` | Runtime | `0` (off) | Preload the libcudart version-tag shim before `import torch`. Required for MetaX with generic PyTorch wheels |
 | `FLAGOS_METAX_COMPAT` | Runtime | `0` (off) | Patch FlagGems `torch.cuda` device queries for MetaX compatibility |
 | `FLAGOS_DCU_HIP_VERSION` | Runtime | No default | Override HIP version detection for the DCU runtime |
