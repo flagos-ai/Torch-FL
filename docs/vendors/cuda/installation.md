@@ -83,6 +83,12 @@ default and a separate FlagOS stream. The forward route runs the CUDA kernel on
 the active FlagOS stream and copies its results into FlagOS-owned storage before
 returning. The supported scope is eager forward inference with read-only inputs.
 
+Run the parity suite on Hopper with CUDA PyTorch and FlashAttention 3 installed.
+
+```bash
+FLAGOS_LOG=fallback python -m pytest -q tests/manual/test_nvidia_flash_attention_3.py
+```
+
 ## Verification
 
 ### Basic Device Check

@@ -12,8 +12,6 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-pytestmark = pytest.mark.nvidia
-
 
 @pytest.fixture(scope="module")
 def flash_attention():
