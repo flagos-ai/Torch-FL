@@ -1689,5 +1689,50 @@ def test_pin_compile_threads_respects_the_env_override(as_musa, monkeypatch):
     assert threads == 8
 
 
+@pytest.mark.anyplatform
+@pytest.mark.parametrize(
+    "profile,accelerator,backend",
+    [
+        (pp._ILUVATAR_PROFILE, "iluvatar", "iluvatar"),
+        (pp._KUNLUNXIN_PROFILE, "kunlunxin", "xpu"),
+        (pp._ASCEND_PROFILE, "ascend", "ascend"),
+        (pp._TSINGMICRO_PROFILE, "tsingmicro", "tsingmicro"),
+        (pp._CAMBRICON_PROFILE, "cambricon", "mlu"),
+    ],
+)
+def test_pin_compile_threads_on_non_cuda_like_triton_profiles(
+    monkeypatch, profile, accelerator, backend
+):
+    """All non-CUDA-like Triton platforms must pin default `backend="inductor"` too.
+
+    `flagos_compile_backend` serializes compilation via `_patch_ascend_compile_workers`
+    whenever `not platform_profile().is_cuda_like`, because a spawned
+    `compile_worker` imports `torch` + `triton` without `torch_fl` and fails in
+    `set_driver_to_gpu()` ("Could not find an active GPU backend") or crashes on
+    worker-built binaries. `pin_compile_threads()` must apply the same rule so
+    `torch.compile(..., backend="inductor")` works on Iluvatar, Kunlunxin, Ascend,
+    TsingMicro, and Cambricon as well.
+    """
+    monkeypatch.setattr(
+        "torch_fl.compile.platform_profile.platform_profile", lambda: profile
+    )
+    _set_accelerator(monkeypatch, accelerator)
+    applied, threads = _run_threads_pin(monkeypatch, backend=backend)
+    assert applied is True
+    assert threads == 1
+
+
+@pytest.mark.anyplatform
+def test_pin_compile_threads_skips_metal_profile(monkeypatch):
+    """Apple Metal uses Inductor's Metal scheduler rather than Triton workers."""
+    monkeypatch.setattr(
+        "torch_fl.compile.platform_profile.platform_profile", lambda: pp._METAL_PROFILE
+    )
+    _set_accelerator(monkeypatch, "apple")
+    applied, threads = _run_threads_pin(monkeypatch, backend="")
+    assert applied is False
+    assert threads == 32
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

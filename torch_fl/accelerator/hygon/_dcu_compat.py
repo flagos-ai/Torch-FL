@@ -148,10 +148,24 @@ def _hip_gcn_arch_name(hip, device_index):
 
 def _hip_total_memory(hip, device_index):
     free, total = ctypes.c_size_t(), ctypes.c_size_t()
+    previous_device = ctypes.c_int(0)
+    have_previous = False
     try:
-        # hipMemGetInfo reports the *current* device, so bind it first.
+        # hipMemGetInfo reports the *current* device, so bind device_index for
+        # the query and restore the caller's active HIP device afterwards.
+        # Leaving the HIP runtime on the last device probed silently moves rank
+        # 0 onto device N-1 whenever FlagOSDeviceInterface caches properties
+        # across range(device_count()).
+        hip_get_device = getattr(hip, "hipGetDevice", None)
+        if hip_get_device is not None:
+            have_previous = hip_get_device(ctypes.byref(previous_device)) == 0
         hip.hipSetDevice(device_index)
-        if hip.hipMemGetInfo(ctypes.byref(free), ctypes.byref(total)) != 0:
+        try:
+            ret = hip.hipMemGetInfo(ctypes.byref(free), ctypes.byref(total))
+        finally:
+            if have_previous:
+                hip.hipSetDevice(previous_device.value)
+        if ret != 0:
             return 0
     except (AttributeError, OSError):
         return 0
@@ -177,6 +191,10 @@ class _DcuDeviceProperties:
     warp_size: int = 64
     L2_cache_size: int = 0
     max_threads_per_multi_processor: int = 2560
+    # Inductor's coordinate-descent tuner (`get_max_numwarps`) reads this off
+    # `torch.cuda.get_device_properties()` under `mode="max-autotune"`. Every
+    # Hygon/ROCm wavefront architecture caps one workgroup at 1024 threads.
+    max_threads_per_block: int = 1024
     regs_per_multiprocessor: int = 196608
     shared_memory_per_block: int = 65536
     shared_memory_per_block_optin: int = 65536

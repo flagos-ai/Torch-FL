@@ -417,23 +417,144 @@ def install_metax_cuda_shim() -> None:
 
 def prepare_cuda(accelerator: str) -> None:
     """
-    Prepare torch.cuda for the FlagGems Python runtime.
+    Prepare torch.cuda for the FlagGems Python runtime and TorchDynamo.
 
-    FlagGems internally calls torch_device_fn.device(tensor.device), but when
-    tensor.device is 'flagos:0', torch.cuda.device() fails because it expects
-    a CUDA device. This patch wraps torch.cuda.device.__init__ to extract just
-    the device index from flagos/privateuseone devices.
+    FlagGems binds ``torch_device_fn = torch.cuda`` on CUDA-shaped vendors and
+    enters ``with torch_device_fn.device(tensor.device):`` across its operator
+    implementations. Eager execution reaches ``torch.cuda.device.__init__``,
+    whereas TorchDynamo's ``CUDADeviceVariable.create`` calls
+    ``torch.cuda._get_device_index(device, optional=True)`` directly and emits
+    ``torch.cuda._exchange_device`` / ``_maybe_exchange_device`` into the FX
+    graph. Extend ``_get_device_index`` (and CPU-only exchange stubs when no
+    vendor CUDA shim owns them) to accept ``flagos`` / ``privateuseone``
+    devices cleanly.
     """
-    _original_cuda_device_init = torch.cuda.device.__init__
+    import torch.cuda._utils as cuda_utils
 
-    def _patched_cuda_device_init(self, device):
-        # Handle flagos/privateuseone devices by extracting just the index
-        if hasattr(device, "type") and hasattr(device, "index"):
-            if device.type in ("privateuseone", "flagos"):
-                device = device.index if device.index is not None else 0
-        return _original_cuda_device_init(self, device)
+    if not getattr(cuda_utils._get_device_index, "_flagos_patched", False):
+        _original_cuda_get_device_index = cuda_utils._get_device_index
 
-    torch.cuda.device.__init__ = _patched_cuda_device_init
+        def _patched_cuda_get_device_index(
+            device, optional: bool = False, allow_cpu: bool = False
+        ) -> int:
+            if isinstance(device, int):
+                return _original_cuda_get_device_index(device, optional, allow_cpu)
+            if isinstance(device, str):
+                device = torch.device(device)
+            if isinstance(device, torch.device) and device.type in (
+                "privateuseone",
+                "flagos",
+            ):
+                if device.index is not None:
+                    return device.index
+                if optional:
+                    flagos_mod = getattr(torch, "flagos", None)
+                    if flagos_mod is not None and flagos_mod.device_count() > 0:
+                        return flagos_mod.current_device()
+                    return -1
+                raise ValueError(
+                    f"Expected a torch.device with a specified index "
+                    f"or an integer, but got:{device}"
+                )
+            return _original_cuda_get_device_index(device, optional, allow_cpu)
+
+        _patched_cuda_get_device_index._flagos_patched = True
+        cuda_utils._get_device_index = _patched_cuda_get_device_index
+        torch.cuda._get_device_index = _patched_cuda_get_device_index
+        for submodule_name in ("memory", "random", "streams"):
+            submodule = getattr(torch.cuda, submodule_name, None)
+            if submodule is not None and hasattr(submodule, "_get_device_index"):
+                submodule._get_device_index = _patched_cuda_get_device_index
+
+    if not getattr(torch.cuda.device.__init__, "_flagos_patched", False):
+        _original_cuda_device_init = torch.cuda.device.__init__
+
+        def _patched_cuda_device_init(self, device):
+            if isinstance(device, str) and (
+                device in ("privateuseone", "flagos")
+                or device.startswith(("privateuseone:", "flagos:"))
+            ):
+                device = torch.device(device)
+            if hasattr(device, "type") and hasattr(device, "index"):
+                if device.type in ("privateuseone", "flagos"):
+                    device = cuda_utils._get_device_index(device, optional=True)
+            return _original_cuda_device_init(self, device)
+
+        _patched_cuda_device_init._flagos_patched = True
+        torch.cuda.device.__init__ = _patched_cuda_device_init
+
+    if (
+        not hasattr(torch._C, "_cuda_exchangeDevice")
+        and getattr(torch.cuda._exchange_device, "__module__", "") == "torch.cuda"
+    ):
+
+        def _flagos_exchange_device(device: int) -> int:
+            if device < 0:
+                return -1
+            flagos_mod = getattr(torch, "flagos", None)
+            if flagos_mod is None or flagos_mod.device_count() == 0:
+                return -1
+            prev = flagos_mod.current_device()
+            if prev != device:
+                flagos_mod.set_device(device)
+            return prev
+
+        def _flagos_maybe_exchange_device(device: int) -> int:
+            if device < 0:
+                return -1
+            return _flagos_exchange_device(device)
+
+        torch.cuda._exchange_device = _flagos_exchange_device
+        torch.cuda._maybe_exchange_device = _flagos_maybe_exchange_device
+
+    import importlib
+
+    try:
+        graphs_mod = importlib.import_module("torch.cuda.graphs")
+    except Exception:
+        graphs_mod = getattr(torch.cuda, "graphs", None)
+
+    graphs_capture = (
+        getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None)
+        if graphs_mod is not None
+        else None
+    )
+    if (
+        graphs_capture is None
+        or isinstance(graphs_capture, type)
+        or getattr(graphs_capture, "__module__", None) == "torch._utils"
+    ):
+
+        @torch.compiler.assume_constant_result
+        def _flagos_is_current_stream_capturing() -> bool:
+            flagos_mod = getattr(torch, "flagos", None)
+            query = getattr(flagos_mod, "is_current_stream_capturing", None)
+            if callable(query) and query is not _flagos_is_current_stream_capturing:
+                return bool(query())
+            return False
+
+        torch.cuda.is_current_stream_capturing = _flagos_is_current_stream_capturing
+        if graphs_mod is not None:
+            graphs_mod.is_current_stream_capturing = _flagos_is_current_stream_capturing
+            graphs_mod._cuda_isCurrentStreamCapturing = (
+                _flagos_is_current_stream_capturing
+            )
+    else:
+        cuda_capture = getattr(torch.cuda, "is_current_stream_capturing", None)
+        if callable(cuda_capture) and getattr(cuda_capture, "__module__", "") not in (
+            "torch.cuda",
+            "torch.cuda.graphs",
+            "torch._C",
+            "builtins",
+        ):
+            wrapped_capture = torch.compiler.assume_constant_result(cuda_capture)
+            torch.cuda.is_current_stream_capturing = wrapped_capture
+            if (
+                graphs_mod is not None
+                and getattr(graphs_mod, "is_current_stream_capturing", None)
+                is cuda_capture
+            ):
+                graphs_mod.is_current_stream_capturing = wrapped_capture
 
     # Initialize CUDA only for builds that use its FlagGems Python path.
     # A DCU self-contained wheel selects a hipified libtorch for a stock +cpu torch,

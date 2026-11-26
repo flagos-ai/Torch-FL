@@ -338,14 +338,19 @@ def pin_compile_threads() -> bool:
     platform = _platform.build_info().platform
     from torch_fl.compile.device_interface import _torch_has_cuda_kernels
     from torch_fl.compile.flagtree_shim import flagtree_backend
+    from torch_fl.compile.platform_profile import platform_profile
 
-    if platform == "gcu":
+    profile = platform_profile()
+    if profile.compiler == "triton" and not profile.is_cuda_like:
+        # Non-CUDA-like Triton platforms (Ascend, GCU, MUSA, Iluvatar,
+        # Kunlunxin, TsingMicro, Cambricon) link the CPU-only torch wheel and
+        # own their runtime state in-process; a spawned compile_worker imports
+        # torch+triton without torch_fl and either finds no active GPU backend
+        # (`set_driver_to_gpu()`) or crashes on worker-compiled binaries.
         vendor_pinned = True
     else:
         backend = flagtree_backend()
-        vendor_pinned = backend == "ppu" or (
-            platform == "musa" and backend == "mthreads"
-        )
+        vendor_pinned = backend == "ppu"
 
     # The default FlagGems-primary CUDA wheel links the CPU-only pip torch, where
     # `torch.cuda.is_available()` is torch_fl's own shim. The compile worker

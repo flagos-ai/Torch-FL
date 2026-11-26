@@ -185,7 +185,10 @@ class _GuardStream(torch.Stream):
         return self.stream_id
 
     cuda_stream = handle
+    gcu_stream = handle
     musa_stream = handle
+    mlu_stream = handle
+    txda_stream = handle
 
     def record_event(self, event=None):
         from . import Event
@@ -199,8 +202,95 @@ class _GuardStream(torch.Stream):
         return event.wait(self)
 
     def wait_stream(self, stream):
-        stream = getattr(stream, "_stream", stream)
-        return super().wait_stream(stream)
+        coerced = coerce_privateuse1_stream(stream, self.device_index)
+        return super().wait_stream(stream if coerced is None else coerced)
+
+
+_HANDLE_ATTRS = (
+    "handle",
+    "cuda_stream",
+    "gcu_stream",
+    "musa_stream",
+    "mlu_stream",
+    "txda_stream",
+    "stream_id",
+)
+
+
+@cache
+def _privateuse1_device_type() -> int:
+    for code in (20, *range(32)):
+        try:
+            if torch.Stream(0, 0, code).device.type in ("flagos", "privateuseone"):
+                return code
+        except Exception:
+            continue
+    return 20
+
+
+def coerce_privateuse1_stream(stream, fallback_device_index: int = 0):
+    """Return a borrowed PrivateUse1 ``torch.Stream`` for ``stream``, or ``None``.
+
+    PyTorch C++ ``THPVariable_record_stream`` (``Tensor.record_stream``) requires
+    a ``torch.Stream`` instance, and ``WrapperRecordStream`` reads the raw vendor
+    queue pointer from ``c10::Stream::id()`` on a ``PrivateUse1`` device. Native
+    accelerators without owned C++ guard streams (GCU ``TopsStream``, Iluvatar
+    ``IluStream``, Kunlunxin ``_StreamHandle``) and CPU-torch ``flagos.Stream``
+    wrappers expose raw handles in Python instead of inheriting ``torch.Stream``,
+    while ``torch.cuda.Stream`` packs a CUDA pool index into ``stream_id`` rather
+    than the raw ``cudaStream_t``. Wrapping the raw handle in a borrowed
+    ``PrivateUse1`` ``torch.Stream`` satisfies both contracts while leaving
+    non-stream objects untouched so upstream's error still fires.
+    """
+    inner = getattr(stream, "_stream", stream)
+    real = getattr(inner, "_real", None)
+    if real is not None:
+        inner = real
+
+    if isinstance(inner, torch.Stream):
+        if inner.device.type in ("flagos", "privateuseone"):
+            return inner
+        if isinstance(inner, torch.cuda.Stream):
+            dev_idx = (
+                fallback_device_index
+                if inner.device_index < 0
+                else int(inner.device_index)
+            )
+            return torch.Stream(
+                int(inner.cuda_stream),
+                dev_idx,
+                _privateuse1_device_type(),
+            )
+        return inner
+
+    if isinstance(inner, (int, float, str, bytes, torch.Tensor)):
+        return None
+    if not callable(getattr(inner, "synchronize", None)):
+        return None
+
+    raw_handle = None
+    found_attr = False
+    for attr in _HANDLE_ATTRS:
+        if not hasattr(inner, attr):
+            continue
+        val = getattr(inner, attr)
+        if val is None:
+            raw_handle = 0
+            found_attr = True
+            break
+        if isinstance(val, int) and not isinstance(val, bool):
+            raw_handle = int(val)
+            found_attr = True
+            break
+    if not found_attr:
+        return None
+
+    dev_idx = getattr(inner, "device_index", None)
+    if dev_idx is None:
+        dev = getattr(inner, "device", None)
+        dev_idx = getattr(dev, "index", None)
+    dev_idx = fallback_device_index if dev_idx is None else int(dev_idx)
+    return torch.Stream(raw_handle, dev_idx, _privateuse1_device_type())
 
 
 class _GuardStreams:
