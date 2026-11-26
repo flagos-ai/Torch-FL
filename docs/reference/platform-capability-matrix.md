@@ -14,7 +14,7 @@ when a platform gains or loses one.
 
 | lane (`FLAGOS_ACCELERATOR` id) | Kind | runtime dir | aten backend | Python compat | conf routes | CI |
 |---|---|---|---|---|---|---|
-| `nvidia` | FlagGems-primary on CUDA | `nvidia` | FlagGems, optional native precision | `nvidia` | 2034 | yes |
+| `nvidia` | FlagGems-primary on CUDA | `nvidia` | FlagGems, optional native precision | `nvidia` | 2035 | yes |
 | `thead` | FlagGems-primary on the PPU runtime | `nvidia` | FlagGems | `thead` | 2042 | yes |
 | `metax` | FlagGems-primary on MACA | `metax` | FlagGems, optional AOT native hosts | `metax` | 2042 | yes |
 | `hygon` | FlagGems-primary on DTK | `nvidia` (+ DTK-core shim) | FlagGems, optional AOT native hosts | `hygon` | 2042 | yes |
