@@ -461,12 +461,6 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "0 (off)",
         "Skip registering the torch.cuda compatibility shim for generic GPU operations",
     ),
-    "FLAGOS_COSMOS_CUDA_COMPAT": (
-        SCOPE_RUNTIME,
-        "0 (off)",
-        "Use native CUDA attention and functional ATen numerics on FlagOS "
-        "tensors in a dedicated NVIDIA CUDA PyTorch Cosmos inference process",
-    ),
     "FLAGOS_METAX_CUDART_SHIM": (
         SCOPE_RUNTIME,
         "0 (off)",

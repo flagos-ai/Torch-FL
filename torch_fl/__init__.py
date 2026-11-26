@@ -551,10 +551,6 @@ def _phase_ecosystem() -> None:
     device.prepare_cuda(accelerator)
 
     cuda.install_alias(flagos)
-    if _env.flag("FLAGOS_COSMOS_CUDA_COMPAT"):
-        from .compat import cosmos_attention
-
-        cosmos_attention.install()
 
     # Both of these have to precede the flag_gems import below, which happens
     # here rather than in _phase_vendor_compat for exactly that reason. That
@@ -605,10 +601,6 @@ def _phase_ecosystem() -> None:
     from . import native_host
 
     native_host._activate()
-    if _env.flag("FLAGOS_COSMOS_CUDA_COMPAT"):
-        from .compat.cosmos_numerics import install_cuda_numerics
-
-        install_cuda_numerics()
 
 
 def __getattr__(name: str):
