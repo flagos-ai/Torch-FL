@@ -42,6 +42,25 @@ class TestCloneDispatchCase:
         assert y.device.type == "flagos"
         assert torch.equal(y.cpu(), x.cpu())
 
+    @pytest.mark.parametrize("side_stream", [False, True])
+    def test_hygon_large_clone_orders_next_kernel(self, side_stream):
+        if not torch_fl.backend_config_path().endswith("backends_hygon.conf"):
+            pytest.skip("Hygon contiguous clone stream regression")
+
+        # A host read of the clone itself waits for device work and can hide
+        # the ordering bug. Queue a consumer first and only read its result.
+        shape = (200, 40999, 3)
+        host = torch.full(shape, 7.0, dtype=torch.float32)
+        device = torch.device("flagos:0")
+        x = host.to(device)
+        current = torch.flagos.current_stream(device)
+        stream = torch.flagos.Stream(device=device) if side_stream else current
+        stream.wait_stream(current)
+        with torch.flagos.stream(stream):
+            for _ in range(8):
+                result = x.clone() + 4
+                assert torch.equal(result.cpu(), host + 4)
+
     def test_copy_kernel_works(self):
         src = torch.arange(16, dtype=torch.float16).reshape(4, 4).to("flagos:0")
         dst = torch.empty_like(src)
