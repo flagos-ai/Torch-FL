@@ -373,6 +373,11 @@ class TestRngSeedSource:
                 torch_fl._C._get_default_generator(bad_idx)
         with pytest.raises((RuntimeError, IndexError)):
             torch.flagos.get_rng_state(count)
+        with pytest.raises((RuntimeError, IndexError)):
+            torch.flagos.get_rng_state(-1)
+        state0 = torch.flagos.get_rng_state(0)
+        with pytest.raises((RuntimeError, IndexError)):
+            torch.flagos.set_rng_state(state0, count)
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops

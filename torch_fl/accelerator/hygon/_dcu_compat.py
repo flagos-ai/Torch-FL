@@ -90,6 +90,39 @@ def _device_index(device) -> int:
     return int(device)
 
 
+def _resolve_rng_device_index(device, current_device_fn, device_count_fn) -> int:
+    """Resolve and bounds-check a flagos RNG device argument."""
+    import torch
+
+    if device is None:
+        idx = current_device_fn()
+    elif isinstance(device, int) and not isinstance(device, bool):
+        if device < 0:
+            raise RuntimeError(f"Device index must not be negative, got {device}")
+        idx = device
+    elif isinstance(device, torch.device):
+        if device.type not in ("flagos", "privateuseone", "cuda"):
+            raise ValueError(f"Expected a 'flagos' device, but got {device}")
+        idx = current_device_fn() if device.index is None else device.index
+    elif isinstance(device, str):
+        dev = torch.device(device)
+        if dev.type not in ("flagos", "privateuseone", "cuda"):
+            raise ValueError(f"Expected a 'flagos' device, but got {dev}")
+        idx = current_device_fn() if dev.index is None else dev.index
+    else:
+        dev = torch.device("flagos", device)
+        idx = current_device_fn() if dev.index is None else dev.index
+
+    count = int(device_count_fn())
+    if count <= 0:
+        raise RuntimeError(
+            "Cannot get default flagos generator when no flagos devices are available."
+        )
+    if idx < 0 or idx >= count:
+        raise RuntimeError(f"Invalid device index {idx} for {count} flagos device(s).")
+    return idx
+
+
 def _load_hip():
     """The HIP driver, for device queries torch.cuda cannot answer here."""
     global _hip
@@ -647,17 +680,23 @@ def patch_torch_cuda_for_dcu() -> bool:
     # CUDA seeding to them.
     def _manual_seed_all(seed):
         seed = int(seed)
-        for i in range(max(torch.flagos.device_count(), 1)):
+        for i in range(torch.flagos.device_count()):
             try:
                 _get_cuda_generator(i).manual_seed(seed)
             except Exception:
                 pass
 
     def _manual_seed(seed):
-        try:
-            _get_cuda_generator(_current_device()).manual_seed(int(seed))
-        except Exception:
-            pass
+        seed = int(seed)
+        count = torch.flagos.device_count()
+        if count <= 0:
+            return
+        idx = _current_device()
+        if 0 <= idx < count:
+            try:
+                _get_cuda_generator(idx).manual_seed(seed)
+            except Exception:
+                pass
 
     torch.cuda.manual_seed_all = _manual_seed_all
     torch.cuda.manual_seed = _manual_seed
@@ -717,11 +756,24 @@ def install_dcu_rng_bridge() -> bool:
         native_manual_seed_all(seed)
         torch.cuda.manual_seed_all(seed)
 
+    def _rng_current_device():
+        try:
+            cur = flagos.current_device()
+        except Exception:
+            return 0
+        return cur if cur >= 0 else 0
+
     def get_rng_state(device="flagos"):
-        return generators[_device_index(device)].get_state()
+        idx = _resolve_rng_device_index(
+            device, _rng_current_device, lambda: len(generators)
+        )
+        return generators[idx].get_state()
 
     def set_rng_state(state, device="flagos"):
-        generators[_device_index(device)].set_state(state)
+        idx = _resolve_rng_device_index(
+            device, _rng_current_device, lambda: len(generators)
+        )
+        generators[idx].set_state(state)
 
     # Keep the native PrivateUse1 seed bookkeeping in sync while exposing the
     # state object that the actual DCU CUDA kernels consume.

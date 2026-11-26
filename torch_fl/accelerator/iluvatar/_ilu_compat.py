@@ -161,12 +161,14 @@ def install_ilu_rng_generators():
     def manual_seed(seed):
         seed = int(seed)
         native_manual_seed(seed)
+        if flagos.device_count() <= 0:
+            return
         _generator(flagos.current_device()).manual_seed(seed)
 
     def manual_seed_all(seed):
         seed = int(seed)
         native_manual_seed_all(seed)
-        for index in range(len(generators)):
+        for index in range(flagos.device_count()):
             _generator(index).manual_seed(seed)
 
     flagos.manual_seed = manual_seed

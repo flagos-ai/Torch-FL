@@ -181,6 +181,138 @@ def test_cpp_default_generator_bounds_check():
             torch_fl._C._get_default_generator(bad_idx)
 
 
+def test_vendor_rng_device_index_bounds_and_zero_device():
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("PyTorch is required")
+    from torch_fl.accelerator.hygon import _dcu_compat
+    from torch_fl.accelerator.metax import _metax_compat
+    from torch_fl.accelerator.nvidia import _cuda_compat
+
+    for mod in (_cuda_compat, _metax_compat, _dcu_compat):
+        helper = mod._resolve_rng_device_index
+        assert helper("flagos", lambda: 1, lambda: 2) == 1
+        assert helper(None, lambda: 1, lambda: 2) == 1
+        assert helper("flagos:0", lambda: 1, lambda: 2) == 0
+        assert helper("cuda:1", lambda: 0, lambda: 2) == 1
+        assert helper(1, lambda: 0, lambda: 2) == 1
+
+        with pytest.raises(RuntimeError, match="Invalid device index 2 for 2"):
+            helper(2, lambda: 0, lambda: 2)
+        with pytest.raises(RuntimeError, match="Device index must not be negative"):
+            helper(-1, lambda: 0, lambda: 2)
+        with pytest.raises(ValueError, match="Expected a 'flagos' device"):
+            helper("cpu", lambda: 0, lambda: 2)
+        with pytest.raises(RuntimeError, match="no flagos devices are available"):
+            helper("flagos", lambda: -1, lambda: 0)
+        with pytest.raises(RuntimeError, match="no flagos devices are available"):
+            helper(0, lambda: -1, lambda: 0)
+
+
+def test_nvidia_and_metax_patch_flagos_rng_state_bounds(monkeypatch):
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("PyTorch is required")
+    import ctypes
+    import torch
+    from torch_fl.accelerator.metax import _metax_compat
+    from torch_fl.accelerator.nvidia import _cuda_compat
+
+    # 1. Verify NVIDIA patch_torch_cuda_for_flagos() enforces bounds & current_device
+    class FakeCudaLib:
+        def cuDeviceGetCount(self, ptr):
+            ctypes.cast(ptr, ctypes.POINTER(ctypes.c_int))[0] = 2
+            return 0
+
+    fake_flagos_nv = types.SimpleNamespace(
+        device_count=lambda: 2,
+        current_device=lambda: 1,
+        set_device=lambda idx: None,
+        Event=None,
+        Stream=None,
+        memory_allocated=lambda idx=0: 0,
+        memory_reserved=lambda idx=0: 0,
+        memory_stats=lambda idx=0: {},
+        empty_cache=lambda: None,
+        reset_peak_memory_stats=lambda idx=0: None,
+        manual_seed=lambda s: None,
+        manual_seed_all=lambda s: None,
+    )
+    fake_cuda_nv = types.SimpleNamespace(
+        device=type("FakeDeviceCtx", (), {"__init__": lambda self, d: None}),
+        default_generators=(),
+    )
+    fake_torch_nv = types.SimpleNamespace(
+        cuda=fake_cuda_nv,
+        flagos=fake_flagos_nv,
+        _C=types.SimpleNamespace(),
+        device=torch.device,
+        tensor=torch.tensor,
+        int64=torch.int64,
+        uint8=torch.uint8,
+        initial_seed=lambda: 12345,
+    )
+    monkeypatch.setattr(_cuda_compat, "torch", fake_torch_nv)
+    monkeypatch.setattr(_cuda_compat, "_patched", False)
+    monkeypatch.setattr(_cuda_compat, "_cuda_generators", {})
+    monkeypatch.setattr(_cuda_compat, "_boxing_built", lambda: False)
+    monkeypatch.setattr(_cuda_compat, "is_nvidia_cuda_available", lambda: True)
+    monkeypatch.setattr(_cuda_compat, "_load_libcuda", lambda: FakeCudaLib())
+    monkeypatch.setattr(_cuda_compat, "_patch_triton_do_bench", lambda: None)
+
+    assert _cuda_compat.patch_torch_cuda_for_flagos()
+    fake_flagos_nv.manual_seed_all(100)
+    fake_flagos_nv.manual_seed(202)
+    assert not torch.equal(
+        fake_flagos_nv.get_rng_state(0), fake_flagos_nv.get_rng_state()
+    )
+    with pytest.raises(RuntimeError, match="Invalid device index 2 for 2"):
+        fake_flagos_nv.get_rng_state(2)
+    with pytest.raises(RuntimeError, match="Device index must not be negative"):
+        fake_flagos_nv.get_rng_state(-1)
+    with pytest.raises(RuntimeError, match="Invalid device index 2 for 2"):
+        fake_flagos_nv.set_rng_state(fake_flagos_nv.get_rng_state(0), 2)
+
+    # 2. Verify MetaX patch_torch_cuda_for_metax() enforces bounds & zero-device safety
+    dev_count = [2]
+    fake_flagos_mx = types.SimpleNamespace(
+        device_count=lambda: dev_count[0],
+        current_device=lambda: 1 if dev_count[0] > 0 else -1,
+        set_device=lambda idx: None,
+        Event=object(),
+        manual_seed=lambda s: None,
+        manual_seed_all=lambda s: None,
+    )
+    fake_cuda_mx = types.SimpleNamespace(device_count=lambda: 0, default_generators=())
+    fake_torch_mx = types.SimpleNamespace(
+        cuda=fake_cuda_mx,
+        flagos=fake_flagos_mx,
+        _C=types.SimpleNamespace(),
+        device=torch.device,
+    )
+    monkeypatch.setattr(_metax_compat, "torch", fake_torch_mx)
+    monkeypatch.setattr(_metax_compat, "_patched", False)
+    monkeypatch.setattr(_metax_compat, "_cuda_generators", {})
+    monkeypatch.setattr(
+        _metax_compat,
+        "_get_cuda_generator",
+        lambda idx: _cuda_compat._CudaPhiloxGenerator(10 + idx),
+    )
+    monkeypatch.setattr(_metax_compat, "_find_metax_path", lambda: "/maca")
+    monkeypatch.setattr(_metax_compat, "_load_mcruntime", lambda p: object())
+    monkeypatch.setattr(_metax_compat, "_patch_cuda_tensor_ops", lambda p: None)
+    monkeypatch.setattr(_metax_compat, "_patch_triton_do_bench", lambda: None)
+
+    assert _metax_compat.patch_torch_cuda_for_metax()
+    with pytest.raises(RuntimeError, match="Invalid device index 2 for 2"):
+        fake_flagos_mx.get_rng_state(2)
+    with pytest.raises(RuntimeError, match="Device index must not be negative"):
+        fake_flagos_mx.get_rng_state(-1)
+    dev_count[0] = 0
+    assert fake_flagos_mx.manual_seed(7) is None
+    assert fake_flagos_mx.manual_seed_all(7) is None
+    with pytest.raises(RuntimeError, match="no flagos devices are available"):
+        fake_flagos_mx.get_rng_state()
+
+
 def test_zero_visible_devices_subprocess_no_segfault():
     _require_built_torch_fl()
     env = os.environ.copy()
@@ -188,8 +320,15 @@ def test_zero_visible_devices_subprocess_no_segfault():
         "ROCR_VISIBLE_DEVICES",
         "HIP_VISIBLE_DEVICES",
         "CUDA_VISIBLE_DEVICES",
+        "MACA_VISIBLE_DEVICES",
         "ASCEND_RT_VISIBLE_DEVICES",
         "MUSA_VISIBLE_DEVICES",
+        "MTHREADS_VISIBLE_DEVICES",
+        "COREX_VISIBLE_DEVICES",
+        "TOPS_VISIBLE_DEVICES",
+        "PPU_VISIBLE_DEVICES",
+        "ALIXPU_VISIBLE_DEVICES",
+        "MLU_VISIBLE_DEVICES",
         "XPURT_VISIBLE_DEVICES",
         "ZE_AFFINITY_MASK",
     ):

@@ -1,5 +1,6 @@
 """Unit coverage for the DCU CUDA/flagos RNG state bridge."""
 
+import pytest
 import torch
 
 import torch_fl
@@ -88,3 +89,9 @@ def test_dcu_rng_bridge_accepts_device_forms(monkeypatch):
         torch_fl.flagos.get_rng_state(torch.device("flagos:1")),
         torch.tensor([7, 0], dtype=torch.int64).view(torch.uint8),
     )
+    with pytest.raises(RuntimeError, match="Invalid device index 2 for 2"):
+        torch_fl.flagos.get_rng_state(2)
+    with pytest.raises(RuntimeError, match="Device index must not be negative"):
+        torch_fl.flagos.get_rng_state(-1)
+    with pytest.raises(ValueError, match="Expected a 'flagos' device"):
+        torch_fl.flagos.get_rng_state("cpu")
