@@ -47,9 +47,7 @@ def test_zero_and_fill_accept_a_fake_tensor():
 
 def test_raw_stream_getter_can_be_installed_twice(monkeypatch):
     """A recompile re-installs the getter; it must not capture itself."""
-    monkeypatch.setattr(
-        torch._C, "_cuda_getCurrentRawStream", object(), raising=False
-    )
+    monkeypatch.setattr(torch._C, "_cuda_getCurrentRawStream", object(), raising=False)
     monkeypatch.setattr(cuda_graph, "_capture_raw_stream", None)
     monkeypatch.setattr(cuda_graph, "_native_raw_stream", None)
 

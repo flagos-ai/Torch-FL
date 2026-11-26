@@ -34,9 +34,7 @@ def test_sdpa_shape_inference_runs_on_fake_tensors():
     with FakeTensorMode():
         query = torch.randn(1, 8, 16, 64, device="flagos:0", dtype=torch.bfloat16)
 
-        out = torch.nn.functional.scaled_dot_product_attention(
-            query, query, query
-        )
+        out = torch.nn.functional.scaled_dot_product_attention(query, query, query)
 
         assert out.shape == query.shape
         assert out.dtype == query.dtype
