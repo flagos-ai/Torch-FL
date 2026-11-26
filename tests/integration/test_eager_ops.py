@@ -286,7 +286,8 @@ def test_softmax_backward_preserves_values_and_output_storage(
         if layout == "strided_out":
             out = torch.empty(2, 3, 514, device=DEVICE)[..., ::2]
         pointer, stride = out.data_ptr(), out.stride()
-        actual = op.out(*args, grad_input=out)
+        output_keyword = "out" if logarithmic else "grad_input"
+        actual = op.out(*args, **{output_keyword: out})
         assert actual is out
         if layout == "strided_out":
             assert (actual.data_ptr(), actual.stride()) == (pointer, stride)
@@ -375,17 +376,18 @@ def test_bf16_inplace_lerp_preserves_scalar_weight(require_ops):
 @pytest.mark.parametrize(
     "name,overload,options",
     [
+        ("div", "out", {}),
         ("addcdiv", "out", {"value": -0.25}),
         ("addcmul", "out", {"value": 0.125}),
         ("lerp", "Scalar_out", {"weight": 0.125}),
     ],
 )
-def test_optimizer_out_preserves_aliasing(
+def test_out_preserves_aliasing(
     require_ops, name, overload, options, alias, dtype, aten_dtype
 ):
     require_ops(aten_dtype, f"{name}.{overload}")
     cpu = [values((5, 7), dtype) + 1, values((5, 7), dtype) + 2]
-    if name != "lerp":
+    if name in ("addcdiv", "addcmul"):
         cpu.append(torch.full_like(cpu[0], 2))
     op = getattr(torch, name)
 
@@ -410,13 +412,20 @@ def test_slice_backward_preserves_strided_gradient(require_ops, start):
     assert_exact(result, op(cpu.transpose(1, 2)[..., 8:], *args))
 
 
-def test_embedding_gradient_handles_repeated_and_padding_indices(require_ops):
-    require_ops("BFloat16", "embedding_dense_backward")
+@pytest.mark.parametrize(
+    "dtype,aten_dtype,padding_idx,scale_by_frequency",
+    [(BF16, "BFloat16", -1, False), (FP32, "Float", 7, True)],
+)
+def test_embedding_gradient_accumulates_repeated_indices(
+    require_ops, dtype, aten_dtype, padding_idx, scale_by_frequency
+):
+    require_ops(aten_dtype, "embedding_dense_backward")
     index = torch.tensor([[0, 1, 1, 7, 13]])
-    grad = values((1, 5, 129), BF16)
+    grad = values((1, 5, 129), dtype)
+    options = (17, padding_idx, scale_by_frequency)
     op = torch.ops.aten.embedding_dense_backward.default
-    result = op(grad.to(DEVICE), index.to(DEVICE), 17, 7, True)
-    assert_exact(result, op(grad, index, 17, 7, True))
+    result = op(grad.to(DEVICE), index.to(DEVICE), *options)
+    assert_exact(result, op(grad, index, *options))
 
 
 @pytest.mark.parametrize("shape", [(1, 37), (2, 3, 7)])

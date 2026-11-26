@@ -430,7 +430,9 @@ at::Tensor& AddInplaceTensorKernelKunlunxin(
 REGISTER_IMPL_TO_DISPATCHER(AddInplaceTensorFn, add_inplace_tensor_dispatcher, Backend::kKunlunxin, AddInplaceTensorKernelKunlunxin)
 
 at::Tensor MulTensorKernelKunlunxin(const at::Tensor& self, const at::Tensor& other) {
-  if (auto result = TryXdnnScalarBinary(self, other, "mul_scalar",
+  const auto& tensor = self.is_cpu() ? other : self;
+  const auto& cpu_scalar = self.is_cpu() ? self : other;
+  if (auto result = TryXdnnScalarBinary(tensor, cpu_scalar, "mul_scalar",
           [](auto* context, const auto& input, const auto& scalar, auto& output) {
             return xdnn_pytorch::mul_scalar(context, input, scalar, output);
           }); result.defined()) {
@@ -698,19 +700,21 @@ at::Tensor MeanDimKernelKunlunxin(
     const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim,
     std::optional<at::ScalarType> dtype) {
   const auto output_dtype = dtype.value_or(self.scalar_type());
-  if (self.scalar_type() != at::kFloat || output_dtype != at::kFloat) {
+  if (!kunlunxin::KunlunxinSupportsReductionDtype(self.scalar_type()) ||
+      output_dtype != at::kFloat) {
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::mean_dim>::call(
         self, dim, keepdim, dtype);
   }
-  auto dims = at::native::make_dim_vector(dim, self.dim());
+  const auto normalized_dim = dim && dim->empty() ? at::OptionalIntArrayRef() : dim;
+  auto dims = at::native::make_dim_vector(normalized_dim, self.dim());
   at::maybe_wrap_dims(dims, self.dim());
   auto shape = at::meta::get_reduction_shape(self, dims, keepdim);
   kunlunxin::KunlunxinDeviceGuard guard(self);
-  auto out = at::empty(shape, self.options());
+  auto out = at::empty(shape, self.options().dtype(output_dtype));
   if (!out.numel()) return out;
   if (!self.numel()) return out.fill_(std::numeric_limits<float>::quiet_NaN());
   if (self.dim() == 0) return out.copy_(self);
-  auto input = self.contiguous();
+  auto input = self.contiguous().to(output_dtype);
   auto* context = kunlunxin::GetKunlunxinContext(input);
   kunlunxin::XdnnTensorWrapper t_input(input), t_out(out);
   xdnn_pytorch::optional<std::vector<int64_t>> axes(

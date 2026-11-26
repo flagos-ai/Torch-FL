@@ -4,6 +4,7 @@
 """Shared host adapters, compiled along with the wheel-derived host source."""
 
 import math
+import operator
 
 import torch
 from torch_fl import _C
@@ -273,6 +274,15 @@ class KernelEntry:
             if metadata is None:
                 return False
             options, tuned, heuristics = metadata
+            if callable(grid):
+                # Some published compilers serialize the grid as an option.
+                # Resolve it with the selected launch metadata before warmup.
+                bound = {
+                    **self.defaults,
+                    **dict(zip(self.arg_names, values)),
+                    **options,
+                }
+                options["grid"] = tuple(operator.index(size) for size in grid(bound))
             options["warmup"] = True
             kernel = self.entry.jit_function.run(*values, **options)
             constants = {

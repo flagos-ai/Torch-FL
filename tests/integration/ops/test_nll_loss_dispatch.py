@@ -18,7 +18,7 @@ nll_loss_forward and nll_loss_backward dispatch tests
 Verifies that torch.nn.functional.nll_loss:
   - produces correct results on flagos device
   - backward produces correct gradients
-  - C++ wrapper routes to flaggems_python backend (default)
+  - C++ wrapper selects the installed route or a supported FlagGems override
   - dispatch log confirms the actual backend used
 
 Usage:
@@ -34,49 +34,57 @@ import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import override_is_logged, routed_backend_or_none
 
 
 DEVICE = "flagos:0"
 
 
-def _run_subprocess_forward(
-    extra_env: dict, check: bool = True
+def _run_nll_subprocess(
+    extra_env: dict, *, backward: bool = False
 ) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(extra_env)
-    code = (
-        "import torch_fl, torch, torch.nn.functional as F; "
-        "inp = torch.randn(4,10,device='flagos:0').log_softmax(dim=1); "
-        "target = torch.tensor([0,3,5,9], device='flagos:0'); "
-        "F.nll_loss(inp, target)"
-    )
+    code = """
+import sys
+import torch
+import torch_fl
+
+op_forward = torch.ops.aten.nll_loss_forward.default
+op_backward = torch.ops.aten.nll_loss_backward.default
+device = "flagos:0"
+cpu = torch.linspace(-2, 1, 40).reshape(4, 10).log_softmax(1)
+labels = torch.tensor([0, -100, 5, 9], dtype=torch.int64)
+options = (None, 1, -100)
+values, targets = cpu.to(device), labels.to(device)
+reference = op_forward(cpu, labels, *options)
+
+if sys.argv[1] == "backward":
+    seed = torch.tensor(0.5)
+    expected = op_backward(seed, cpu, labels, *options, reference[1])
+    actual = op_backward(seed.to(device), values, targets, *options, reference[1].to(device))
+    torch.testing.assert_close(actual.cpu(), expected, rtol=1e-4, atol=1e-4)
+else:
+    actual = op_forward(values, targets, *options)
+    for result, expected in zip(actual, reference, strict=True):
+        torch.testing.assert_close(result.cpu(), expected, rtol=1e-4, atol=1e-4)
+"""
     return subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", code, "backward" if backward else "forward"],
         env=env,
         capture_output=True,
         text=True,
     )
 
 
-def _run_subprocess_backward(
-    extra_env: dict, check: bool = True
-) -> subprocess.CompletedProcess:
-    env = os.environ.copy()
-    env.update(extra_env)
-    code = (
-        "import torch_fl, torch, torch.nn.functional as F; "
-        "inp = torch.randn(4,10,device='flagos:0',requires_grad=True).log_softmax(dim=1); "
-        "target = torch.tensor([0,3,5,9], device='flagos:0'); "
-        "loss = F.nll_loss(inp, target); "
-        "loss.backward()"
-    )
-    return subprocess.run(
-        [sys.executable, "-c", code],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+def _nll_route_probe(op, route, *, backward=False):
+    env = {"FLAGOS_LOG": "dispatch"}
+    if override_is_logged(op, "flaggems_python"):
+        env[f"FLAGOS_OP_{op}"] = "flaggems_python"
+        route = "flagos_python"
+    result = _run_nll_subprocess(env, backward=backward)
+    assert result.returncode == 0, result.stderr
+    assert f"[flagos dispatch] {op} -> {route}" in result.stderr, result.stderr
 
 
 class TestNllLossForwardCorrectness:
@@ -172,42 +180,20 @@ class TestNllLossDispatch:
     """Verify dispatch routing for nll_loss ops."""
 
     @pytest.mark.flaggems_python
-    def test_dispatch_log_forward_flaggems_python(self):
-        """The per-op override selects the FlagGems Python path for nll_loss_forward.
-
-        Skipped where the conf routes nll_loss_forward to ``none``: the op is
-        then not claimed on PrivateUse1 at all, so the call reaches cpu_fallback
-        before the dispatcher and no override can show up in the log.
-        """
-        if routed_backend_or_none("nll_loss_forward") is None:
+    def test_nll_forward_uses_available_route(self):
+        op = "nll_loss_forward"
+        route = routed_backend_or_none(op)
+        if route is None:
             pytest.skip("nll_loss_forward is routed to 'none' on this platform")
-        result = _run_subprocess_forward(
-            {
-                "FLAGOS_LOG": "dispatch",
-                "FLAGOS_OP_nll_loss_forward": "flaggems_python",
-            },
-            check=False,
-        )
-        assert "[flagos dispatch] nll_loss_forward -> flagos_python" in result.stderr
+        _nll_route_probe(op, route)
 
     @pytest.mark.flaggems_python
-    def test_dispatch_log_backward_flaggems_python(self):
-        """The per-op override selects the FlagGems Python path for nll_loss_backward.
-
-        Skipped where the conf routes nll_loss_backward to ``none``: the op is
-        then not claimed on PrivateUse1 at all, so the call reaches cpu_fallback
-        before the dispatcher and no override can show up in the log.
-        """
-        if routed_backend_or_none("nll_loss_backward") is None:
+    def test_nll_backward_uses_available_route(self):
+        op = "nll_loss_backward"
+        route = routed_backend_or_none(op)
+        if route is None:
             pytest.skip("nll_loss_backward is routed to 'none' on this platform")
-        result = _run_subprocess_backward(
-            {
-                "FLAGOS_LOG": "dispatch",
-                "FLAGOS_OP_nll_loss_backward": "flaggems_python",
-            },
-            check=False,
-        )
-        assert "[flagos dispatch] nll_loss_backward -> flagos_python" in result.stderr
+        _nll_route_probe(op, route, backward=True)
 
 
 class TestNllLossForwardAscendDispatch:
@@ -216,5 +202,5 @@ class TestNllLossForwardAscendDispatch:
     @pytest.mark.ascend
     def test_ascend_correctness(self):
         """Verify nll_loss_forward on ascend backend matches CPU reference."""
-        result = _run_subprocess_forward({"FLAGOS_OP_nll_loss_forward": "ascend"})
-        assert result.returncode == 0
+        result = _run_nll_subprocess({"FLAGOS_OP_nll_loss_forward": "ascend"})
+        assert result.returncode == 0, result.stderr
