@@ -684,7 +684,10 @@ steps:
     name: Native FlagGems host conformance
     platforms: [ascend]
     min_passed: 94
+    # The common regression groups use the wheel's default routes. Exercise
+    # the packaged FlagGems hosts here for operators that default to ACLNN.
     command: >-
+      FLAGOS_OP_cos=flaggems FLAGOS_OP_mean__dim=flaggems FLAGOS_OP_cat=flaggems
       PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
       python -m pytest tests/integration/ops/test_native_ascend_hosts.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"

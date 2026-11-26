@@ -1389,6 +1389,26 @@ def gen_flaggems_python_kernel(
                 '  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
                 "#endif\n"
             )
+        elif op == "_log_softmax_backward_data":
+            prelude += (
+                "#if defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (output.dim() > 0 && output.numel() > 0 &&\n"
+                "      output.sizes().equals(grad_output.sizes()) && output.device() == grad_output.device() &&\n"
+                "      output.scalar_type() == grad_output.scalar_type() &&\n"
+                "      (output.scalar_type() == input_dtype || output.scalar_type() == at::kFloat) &&\n"
+                "      (input_dtype == at::kFloat || input_dtype == at::kHalf || input_dtype == at::kBFloat16)) {\n"
+                "    const auto axis = at::maybe_wrap_dim(dim, output.dim());\n"
+                "    // The published backward reduces a single tile, capped at 512 / BLOCK_M.\n"
+                "    // All published configurations cover up to 64 elements in that tile.\n"
+                "    if (output.size(axis) > 64) {\n"
+                "      const auto grad = grad_output.to(at::kFloat);\n"
+                "      const auto scale = at::sum(grad, at::IntArrayRef(axis), true);\n"
+                "      return at::addcmul(grad, at::exp(output.to(at::kFloat)), scale, -1)\n"
+                "          .to(input_dtype).contiguous();\n"
+                "    }\n"
+                "  }\n"
+                "#endif\n"
+            )
         elif typed and op == "pow.Tensor_Scalar":
             # PyTorch's FP32 cube uses two multiplications. The general pow
             # kernel can round these exact products in the device math library.

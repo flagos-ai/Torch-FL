@@ -124,10 +124,7 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
   }
 #endif
 #if defined(FLAGOS_ACCEL_ILUVATAR)
-  if (src_type != dst_type ||
-      (src_type != at::kFloat && src_type != at::kBFloat16 && src_type != at::kLong)) {
-    return false;
-  }
+  if (src_type != dst_type) return false;
 #endif
   auto storage_type = src_type;
   if (src_type == dst_type) {

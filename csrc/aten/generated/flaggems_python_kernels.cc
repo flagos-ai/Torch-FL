@@ -260,6 +260,23 @@ at::Tensor & PrivLogSoftmaxOutKernelPython(const at::Tensor & self, int64_t dim,
 
 static TypedSourceSlot PrivLogSoftmaxBackwardDataFnSource("aten::_log_softmax_backward_data", "flag_gems.log_softmax_backward", "aca263c2da6fc21abcd7232097f4616d6c967fd2a504e724032a4835ddd446c1", "{\"abi\": \"aca263c2da6fc21abcd7232097f4616d6c967fd2a504e724032a4835ddd446c1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"input_dtype\", \"type\": \"at::ScalarType\"}], \"host\": \"flag_gems.log_softmax_backward\", \"op\": \"aten::_log_softmax_backward_data\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivLogSoftmaxBackwardDataKernelPython(const at::Tensor & grad_output, const at::Tensor & output, int64_t dim, at::ScalarType input_dtype) {
+#if defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (output.dim() > 0 && output.numel() > 0 &&
+      output.sizes().equals(grad_output.sizes()) && output.device() == grad_output.device() &&
+      output.scalar_type() == grad_output.scalar_type() &&
+      (output.scalar_type() == input_dtype || output.scalar_type() == at::kFloat) &&
+      (input_dtype == at::kFloat || input_dtype == at::kHalf || input_dtype == at::kBFloat16)) {
+    const auto axis = at::maybe_wrap_dim(dim, output.dim());
+    // The published backward reduces a single tile, capped at 512 / BLOCK_M.
+    // All published configurations cover up to 64 elements in that tile.
+    if (output.size(axis) > 64) {
+      const auto grad = grad_output.to(at::kFloat);
+      const auto scale = at::sum(grad, at::IntArrayRef(axis), true);
+      return at::addcmul(grad, at::exp(output.to(at::kFloat)), scale, -1)
+          .to(input_dtype).contiguous();
+    }
+  }
+#endif
   auto result = PrivLogSoftmaxBackwardDataFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.log_softmax_backward", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(output), static_cast<const int64_t&>(dim), static_cast<const at::ScalarType&>(input_dtype));
   UnboxToFlagos(result);
   return result;

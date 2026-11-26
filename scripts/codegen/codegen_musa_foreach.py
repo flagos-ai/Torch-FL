@@ -133,6 +133,7 @@ HOST = """\
 #include "musa_foreach.h"
 #include "../mudnn_common.h"
 #include "../../../foreach_utils.h"
+#include <flagos.h>
 
 #include <ATen/ops/_foreach_addcdiv_native.h>
 #include <ATen/ops/_foreach_addcmul_native.h>
