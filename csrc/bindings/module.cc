@@ -30,6 +30,10 @@
 #include <musa_runtime.h>
 #endif
 
+#ifdef USE_GCU
+#include <tops_runtime_api.h>
+#endif
+
 #ifdef USE_ILUVATAR
 // corex ships the CUDA-shaped C runtime, and this build links the CPU torch
 // wheel, so the device properties, the current stream and the stream-priority
@@ -320,6 +324,27 @@ static PyObject* _getOwnedRawStream(PyObject* arg, bool use_default) {
 static PyObject* _getNativeCurrentRawStream(PyObject*, PyObject* arg) {
   return _getOwnedRawStream(arg, false);
 }
+
+#ifdef USE_GCU
+static PyObject* _getEnflameDeviceIdentity(PyObject*, PyObject* arg) {
+  HANDLE_TH_ERRORS
+  TORCH_CHECK(THPUtils_checkLong(arg), "Enflame device identity expects a device index");
+  const auto index = static_cast<int>(THPUtils_unpackLong(arg));
+  topsDevice_t device{};
+  const auto status = topsDeviceGet(&device, index);
+  TORCH_CHECK(status == topsSuccess, "topsDeviceGet failed for device ", index,
+              ": ", topsGetErrorString(status));
+
+  char name[256] = {};
+  char bus_id[32] = {};
+  if (topsDeviceGetName(name, sizeof(name), device) != topsSuccess)
+    name[0] = '\0';
+  if (topsDeviceGetPCIBusId(bus_id, sizeof(bus_id), index) != topsSuccess)
+    bus_id[0] = '\0';
+  return Py_BuildValue("(ss)", name, bus_id);
+  END_HANDLE_TH_ERRORS
+}
+#endif
 
 static PyObject* _getNativeDefaultRawStream(PyObject*, PyObject* arg) {
   return _getOwnedRawStream(arg, true);
@@ -780,6 +805,9 @@ static PyMethodDef methods[] = {
 #ifdef USE_MUSA
     {"_get_musa_device_properties", _getMusaDeviceProperties, METH_O, nullptr},
     {"_get_musa_current_raw_stream", _getCurrentRawStream, METH_O, nullptr},
+#endif
+#ifdef USE_GCU
+    {"_get_enflame_device_identity", _getEnflameDeviceIdentity, METH_O, nullptr},
 #endif
 #ifdef USE_ILUVATAR
     {"_get_iluvatar_device_properties", _getIluvatarDeviceProperties, METH_O,

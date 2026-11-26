@@ -309,7 +309,6 @@ _MIGRATION_EXEMPTIONS = frozenset(
                 "binary_compare",
                 "cat",
                 "clamp_integral",
-                "contiguous",
                 "conv",
                 "conv_backward",
                 "cumprod",

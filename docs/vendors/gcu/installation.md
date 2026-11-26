@@ -142,6 +142,11 @@ The GCU compatibility layer prepares the vendor Triton runtime but does not call
 keeps one wrapper per overload and allows native and FlagGems RNG paths to share
 the same per-device seed/offset stream.
 
+Torch-FL supports both the legacy TopsRider runtime headers and TopsPlatform 4.
+With TOPS 4, it adapts FlagTree's generated host extensions to the SDK selected
+by FlagTree's `CAPS_PATH` (default `/opt/tops`). Device properties use the
+board name from EFML when TOPS reports a generic GCU name.
+
 ### One stream, two producers
 
 `torch.Stream` selects a TOPS queue through the PrivateUse1 device guard.

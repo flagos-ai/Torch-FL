@@ -364,6 +364,8 @@ def test_native_vendor_precision_gate_reads_the_installed_build(monkeypatch, ena
         ("dcu", True, ("dcu", "native_source_host"), None),
         ("dcu", False, ("dcu", "native_source_host"), "build_record"),
         ("dcu", True, ("nvidia", "native_source_host"), "platform_support"),
+        ("gcu", False, ("gcu",), None),
+        ("cuda", False, ("gcu",), "backend_marker"),
         ("gcu", True, ("native_source_host",), "platform_support"),
         ("gcu", False, ("native_source_host",), "platform_support"),
         ("gcu", True, ("enflame_native_host",), None),
@@ -376,7 +378,7 @@ def test_native_vendor_precision_gate_reads_the_installed_build(monkeypatch, ena
         ("ppu", True, ("native_vendor_precision",), "platform_support"),
     ],
 )
-def test_native_host_cases_keep_one_collection_shape(
+def test_backend_cases_keep_one_collection_shape(
     monkeypatch, platform, compiler, marks, gate
 ):
     class Item:

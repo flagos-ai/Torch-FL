@@ -39,6 +39,9 @@ if(FLAGOS_ACCELERATOR STREQUAL "bpu")
 elseif(FLAGOS_ACCELERATOR STREQUAL "metax")
   # maca torch headers are gated on USE_MACA (see csrc/CMakeLists.txt).
   target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_MACA=1)
+elseif(_flagos_is_gcu)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_GCU=1)
+  target_link_libraries(${LIBRARY_NAME} PRIVATE cuda_runtime_compat)
 elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
   # The device-properties / current-stream / priority-range bindings in
   # module.cc read corex directly: this build links the CPU torch wheel, so

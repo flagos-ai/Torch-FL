@@ -135,6 +135,8 @@ def pytest_collection_modifyitems(
 ) -> None:
     platform = _platform.detect_platform()
     markers_to_skip = _PLATFORM_SKIP_MARKERS.get(platform, ())
+    if platform != "gcu" and "gcu" not in markers_to_skip:
+        markers_to_skip += ("gcu",)
     flaggems_cpp_on = _flaggems_cpp_enabled()
     for item in items:
         # Legacy @metax cases assert the unbuilt handwritten mxcc operator

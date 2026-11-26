@@ -139,9 +139,6 @@
     "tests/integration/ops/test_mps_clamp_integral.py": {
       "pytest.mark.skipif": 1
     },
-    "tests/integration/ops/test_mps_contiguous.py": {
-      "pytest.mark.skipif": 1
-    },
     "tests/integration/ops/test_mps_conv.py": {
       "pytest.mark.skipif": 1
     },
@@ -324,7 +321,7 @@
   "kinds": {
     "pytest.importorskip": 3,
     "pytest.mark.skip": 1,
-    "pytest.mark.skipif": 56,
+    "pytest.mark.skipif": 55,
     "pytest.mark.xfail": 6,
     "pytest.skip": 98
   },
