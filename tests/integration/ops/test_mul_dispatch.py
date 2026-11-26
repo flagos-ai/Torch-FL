@@ -130,6 +130,7 @@ class TestMulPythonNumberOperand:
         torch.testing.assert_close((a * two).cpu(), (a * 2.0).cpu(), rtol=0, atol=0)
 
     @pytest.mark.nvidia
+    @pytest.mark.flaggems_python
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
     @pytest.mark.parametrize("layout", ["dense", "transpose"])
     @pytest.mark.parametrize("explicit_tensor", [False, True])
