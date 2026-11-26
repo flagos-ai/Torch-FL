@@ -321,7 +321,7 @@ def test_prefetch_and_experiment_keep_distinct_acceptance_scopes():
     )
     _, version, _, _ = parse_wheel_filename(pins["FLAGCX_EXPERIMENT_WHEEL_ascend"])
     assert version == Version(pins["FLAGCX_EXPERIMENT_VERSION_ascend"])
-    assert pins["FLAGCX_VERSION_ascend"] == "0.14.0+cann9.0.0"
+    assert pins["FLAGCX_VERSION_ascend"] == "0.14.1+cann9.0.0.910c"
     for option, pin in (
         ("--wheel", "FLAGCX_EXPERIMENT_WHEEL_ascend"),
         ("--version", "FLAGCX_EXPERIMENT_VERSION_ascend"),

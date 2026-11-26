@@ -6,6 +6,9 @@
 #include "ops.h"
 #include "../strided_ops.h"
 #include <ATen/native/BinaryOps.h>
+#include "../fallback.h"
+#include <ATen/native/CPUFallback.h>
+#include <ATen/native/ReduceOpsUtils.h>
 #include "../device_boxing.h"
 #include "../backends/flagos/python_op_caller.h"
 #include "../backends/flagos/typed_source_host.h"
@@ -860,9 +863,18 @@ at::Tensor ArgmaxKernelPython(const at::Tensor & self, ::std::optional<int64_t> 
   return result;
 }
 
-static TypedSourceSlot ArgminFnSource("aten::argmin", "flag_gems.argmin", "b7ed0cbbd18f7aa03ad6a700df3b6ba9efef8b339ece535e5ad353818f5d492f", "{\"abi\": \"b7ed0cbbd18f7aa03ad6a700df3b6ba9efef8b339ece535e5ad353818f5d492f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.argmin\", \"op\": \"aten::argmin\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ArgminKernelPython(const at::Tensor & self, ::std::optional<int64_t> dim, bool keepdim) {
-  auto result = ArgminFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.argmin", {self, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<int64_t>&>(dim), static_cast<const bool&>(keepdim));
+  TORCH_CHECK(!self.is_complex(), "argmin(): does not support complex input");
+  TORCH_CHECK(self.scalar_type() != at::kBool, "argmin(): does not support bool input");
+  if (dim.has_value()) {
+    at::native::zero_numel_check_dims(self, at::maybe_wrap_dim(*dim, self.dim()), "argmin()");
+  } else {
+    TORCH_CHECK_INDEX(self.numel() != 0, "argmin(): Expected reduction dim to be specified for input.numel() == 0.");
+  }
+  if (FlagGemsRejectsOpDtype("argmin", self.scalar_type())) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::argmin>::call(self, dim, keepdim);
+  }
+  auto result = CallPythonOp_Generic("torch_fl.compat.flaggems.reductions.argmin", {self, dim, keepdim});
   UnboxToFlagos(result);
   return result;
 }
@@ -3074,9 +3086,13 @@ at::Tensor MaxKernelPython(const at::Tensor & self) {
   return result;
 }
 
-static TypedSourceSlot MaxDimFnSource("aten::max.dim", "flag_gems.max_dim", "a8a5fb445dcd00f194435e9ebc311a57117e038c7e31f6c2650610a07c3f28a3", "{\"abi\": \"a8a5fb445dcd00f194435e9ebc311a57117e038c7e31f6c2650610a07c3f28a3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.max_dim\", \"op\": \"aten::max.dim\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> MaxDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = MaxDimFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.max_dim", {self, dim, keepdim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim));
+  TORCH_CHECK(!self.is_complex(), "max(): does not support complex input");
+  at::native::zero_numel_check_dims(self, at::maybe_wrap_dim(dim, self.dim()), "max()");
+  if (FlagGemsRejectsOpDtype("max.dim", self.scalar_type())) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::max_dim>::call(self, dim, keepdim);
+  }
+  auto result = CallPythonOp_GenericTuple("torch_fl.compat.flaggems.reductions.max_dim", {self, dim, keepdim}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
@@ -3182,9 +3198,13 @@ at::Tensor MinKernelPython(const at::Tensor & self) {
   return result;
 }
 
-static TypedSourceSlot MinDimFnSource("aten::min.dim", "flag_gems.min_dim", "b0d3566ece2d15be67087af81fbc2f05bd20af5de7081e3b1a085540c0a384bf", "{\"abi\": \"b0d3566ece2d15be67087af81fbc2f05bd20af5de7081e3b1a085540c0a384bf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.min_dim\", \"op\": \"aten::min.dim\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> MinDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = MinDimFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.min_dim", {self, dim, keepdim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim));
+  TORCH_CHECK(!self.is_complex(), "min(): does not support complex input");
+  at::native::zero_numel_check_dims(self, at::maybe_wrap_dim(dim, self.dim()), "min()");
+  if (FlagGemsRejectsOpDtype("min.dim", self.scalar_type())) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::min_dim>::call(self, dim, keepdim);
+  }
+  auto result = CallPythonOp_GenericTuple("torch_fl.compat.flaggems.reductions.min_dim", {self, dim, keepdim}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};

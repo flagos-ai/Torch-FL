@@ -103,6 +103,21 @@ def _assert_matches_cpu(out, expected, dtype):
         )
 
 
+@pytest.mark.anyplatform
+@pytest.mark.parametrize(
+    "dtype", [torch.float16, torch.bfloat16, torch.int32, torch.int64]
+)
+def test_indexed_reduction_fallback_matches_cpu(dtype):
+    host = torch.tensor([[3, 1, 4], [1, 5, 9]], dtype=dtype)
+    device = _to_device(host)
+    for reduce in (torch.argmax, torch.argmin):
+        torch.testing.assert_close(reduce(device, dim=1).cpu(), reduce(host, dim=1))
+    for reduce in (torch.max, torch.min):
+        actual, expected = reduce(device, dim=1), reduce(host, dim=1)
+        torch.testing.assert_close(actual.values.cpu(), expected.values)
+        torch.testing.assert_close(actual.indices.cpu(), expected.indices)
+
+
 class TestSumCorrectness:
     """``sum.dim_IntList`` on the flagos device equals the CPU reference."""
 

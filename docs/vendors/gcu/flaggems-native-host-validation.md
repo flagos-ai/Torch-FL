@@ -129,9 +129,9 @@ the vendor differs in one value.
 
 ## Actual operator routes
 
-The generated, opt-in
-[experiment config](../../../benchmarks/host_compiler/configs/enflame_native_host.conf)
-routes nine model operators directly to FlagGems:
+The opt-in experiment config generated in
+[Cohort and reproduction](#cohort-and-reproduction) routes nine model operators
+directly to FlagGems:
 `mul.Tensor`, `add.Tensor`, `neg`, `cos`, `sin`, `where.self`, `silu`, `_softmax`
 and `bmm`. The generated GCU scalar-pow category also expresses FP32 `pow(2)`
 through the selected multiply route, so this model operation executes the
@@ -246,13 +246,14 @@ The new wheel SHA256 is
 The filename's `+tops1.9.10` segment is a legacy build variant; verified SDK
 metadata is **1.7.2.2402**, not inferred from that filename.
 
-Regenerate the explicit experiment config, then run both providers outside the
-source checkout. Set `SOURCE`, `MODEL`, `RESULTS`, `VENDOR_PYTHON` and
-`NATIVE_PYTHON` to the corresponding paths:
+Generate the experiment config into a temporary file, then run both providers
+outside the source checkout. Set `SOURCE`, `MODEL`, `RESULTS`, `VENDOR_PYTHON`
+and `NATIVE_PYTHON` to the corresponding paths.
 
 ```bash
+NATIVE_CONF=$(mktemp "${TMPDIR:-/tmp}/torch-fl-enflame.XXXXXXXX")
 python "$SOURCE/scripts/codegen/gen_vendor_confs.py" \
-  --enflame-native-host-conf "$SOURCE/benchmarks/host_compiler/configs/enflame_native_host.conf"
+  --enflame-native-host-conf "$NATIVE_CONF"
 export TOPS_VISIBLE_DEVICES=0 TORCH_DEVICE_BACKEND_AUTOLOAD=0 PYTHONNOUSERSITE=1
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
@@ -260,10 +261,11 @@ cd /tmp
 taskset -c 64-71 "$VENDOR_PYTHON" "$SOURCE/benchmarks/host_compiler/qwen_strict_eager.py" \
   --model "$MODEL" --device gcu:0 --dtype bfloat16 --steps 8 --rounds 7 \
   --output "$RESULTS/vendor-final.json"
-FLAGOS_BACKEND_CONFIG="$SOURCE/benchmarks/host_compiler/configs/enflame_native_host.conf" \
+FLAGOS_BACKEND_CONFIG="$NATIVE_CONF" \
 taskset -c 64-71 "$NATIVE_PYTHON" "$SOURCE/benchmarks/host_compiler/qwen_strict_eager.py" \
   --model "$MODEL" --device flagos:0 --dtype bfloat16 --steps 8 --rounds 7 \
   --reference "$RESULTS/vendor-final.pt" --check-logits --output "$RESULTS/native-final.json"
+rm -f "$NATIVE_CONF"
 ```
 
 Keep device profiling and the forwarding API observer in separate processes.

@@ -23,6 +23,22 @@ REQUIRED_PLATFORMS = frozenset(
 GROUP_ID = "common_regression"
 TEST_PATH = "tests/integration/common"
 COMMAND = ("python", "-m", "pytest", TEST_PATH, "-v", "--tb=short")
+REQUIRED_COMMON_CASES = frozenset(
+    {
+        f"{TEST_PATH}/test_stream.py::test_compiled_stream_chain",
+        f"{TEST_PATH}/test_native_host.py::test_layout_and_storage",
+        f"{TEST_PATH}/test_native_host.py::test_dynamic_shapes_and_stream_scope",
+        *(
+            f"{TEST_PATH}/test_transfer.py::{test}[{wheel}]"
+            for test in ("test_strided_transfer", "test_copy_stream_order")
+            for wheel in ("ordinary", "native")
+        ),
+        *(
+            f"{TEST_PATH}/test_reductions.py::test_indexed_reduction[{op}]"
+            for op in ("argmin", "max", "min")
+        ),
+    }
+)
 
 
 def validate_pr_plan(plan):
@@ -80,4 +96,10 @@ def common_cases(report):
         or session["summary"].get("deselected", 0)
     ):
         raise ValueError("all common regression cases must be collected and pass")
-    return set(cases)
+    inventory = set(cases)
+    missing = REQUIRED_COMMON_CASES - inventory
+    if missing:
+        raise ValueError(
+            "missing required common regression cases: " + ", ".join(sorted(missing))
+        )
+    return inventory

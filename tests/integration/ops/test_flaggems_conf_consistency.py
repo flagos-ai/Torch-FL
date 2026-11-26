@@ -304,7 +304,7 @@ class TestFlagGemsConfConsistency:
         )
 
     def test_python_kernels_use_runtime_resolved_names(self):
-        """Generated calls must name the package-level FlagGems entry point.
+        """Resolve published operators through FlagGems and local adapters by path.
 
         ``flag_gems.<fn>`` is the name the active backend has already rebound to
         its vendor-specialized callable (``SpecOpRegistrar`` writes into the
@@ -317,21 +317,26 @@ class TestFlagGemsConfConsistency:
         raised ``TypeError: dynamic_func() missing 1 required positional
         argument: 'BLOCK_N'`` on MetaX hardware).
 
-        So the requirement is one dot: the ``flag_gems`` package, then the
-        operator name. ``PythonOpCache::GetFunc`` resolves that through its
-        dotted branch by importing the prefix and taking the attribute.
+        Torch-FL supplies three indexed reduction adapters. Their qualified
+        names select the same implementations on all FlagGems platforms.
         """
         paths = re.findall(
             r'CallPythonOp_\w+\("([^"]+)"',
             _read(_KERNELS_CC),
         )
         assert paths, f"no Python operation calls found in {_KERNELS_CC.name}"
+        adapters = {
+            f"torch_fl.compat.flaggems.reductions.{name}"
+            for name in ("argmin", "max_dim", "min_dim")
+        }
+        assert adapters.issubset(paths), sorted(adapters.difference(paths))
         noncanonical = sorted(
             path
             for path in paths
-            if not path.startswith("flag_gems.") or path.count(".") != 1
+            if path not in adapters
+            and (not path.startswith("flag_gems.") or path.count(".") != 1)
         )
         assert not noncanonical, (
-            "generated FlagGems calls must be the two-component package-level "
-            f"name flag_gems.<op>, not a module path or vendor alias: {noncanonical}"
+            "generated Python calls must use flag_gems.<op> or a registered "
+            f"Torch-FL adapter: {noncanonical}"
         )

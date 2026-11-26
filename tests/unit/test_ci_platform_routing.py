@@ -39,7 +39,7 @@ PLATFORMS = sorted(
 sys.path.insert(0, str(ROOT / ".github/scripts"))
 try:
     import flagcicd_plan as PLANNER
-    from ci.hardware_parity import GROUP_ID, TEST_PATH
+    from ci.hardware_parity import GROUP_ID, REQUIRED_COMMON_CASES, TEST_PATH
     from run_integration_tests import requires_pytest
 
     spec = importlib.util.spec_from_file_location(
@@ -344,7 +344,9 @@ def _parity_reports(plan, directory, *, defect=""):
             group_id = group["group_id"]
             size = max(2, group.get("min_passed", 0))
             cases = [f"{TEST_PATH}/test_device.py::test_case_{i}" for i in range(size)]
-            outcomes = ["passed"] * size
+            if group_id == GROUP_ID and defect != "missing_reductions":
+                cases = sorted(REQUIRED_COMMON_CASES) + cases
+            outcomes = ["passed"] * len(cases)
             collectors = []
             if group_id == GROUP_ID:
                 if lane_defect == "inventory":
@@ -353,7 +355,7 @@ def _parity_reports(plan, directory, *, defect=""):
                     outcomes[-1] = lane_defect
                 elif lane_defect == "collection_skip":
                     collectors = [f"{TEST_PATH}/test_skipped.py"]
-            counts = dict(Counter(outcomes), total=size, collected=size)
+            counts = dict(Counter(outcomes), total=len(cases), collected=len(cases))
             if group_id == GROUP_ID and lane_defect == "deselected":
                 counts["deselected"] = 1
             sessions.append(
@@ -416,6 +418,7 @@ def _parity_reports(plan, directory, *, defect=""):
         ("missing_group", "metax: expected the unfiltered common regression group"),
         ("filtered_group", "metax: expected the unfiltered common regression group"),
         ("missing_report", "missing platform report: metax"),
+        ("missing_reductions", "missing required common regression cases:"),
         ("commit", "report identity does not match the plan"),
         ("inventory", "common regression inventory differs from apple"),
         ("skipped", "test_case_1 (skipped)"),

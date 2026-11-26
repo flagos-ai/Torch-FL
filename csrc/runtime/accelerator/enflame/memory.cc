@@ -13,13 +13,17 @@
 // limitations under the License.
 
 #include <flagos.h>
-#include <tops_runtime_api.h>
+#include "tops_compat.h"
 
 #include <cstdio>
 #include <map>
 #include <mutex>
 
 namespace {
+
+using c10::flagos::enflame::AllocatePinnedHost;
+using c10::flagos::enflame::FreePinnedHost;
+using c10::flagos::enflame::TopsPointerAttributes;
 
 struct Block {
   MemoryType type = MemoryType::MemoryTypeUnmanaged;
@@ -40,7 +44,7 @@ class PointerDeviceGuard {
   explicit PointerDeviceGuard(const void* dev_ptr) {
     if (!dev_ptr)
       return;
-    topsPointerAttribute_t attr{};
+    TopsPointerAttributes attr{};
     if (topsPointerGetAttributes(&attr, dev_ptr) != topsSuccess)
       return;
     if (attr.device < 0)
@@ -115,8 +119,8 @@ bool CrossDeviceEnds(
     const void* src,
     int* dst_device,
     int* src_device) {
-  topsPointerAttribute_t dst_attr{};
-  topsPointerAttribute_t src_attr{};
+  TopsPointerAttributes dst_attr{};
+  TopsPointerAttributes src_attr{};
   if (topsPointerGetAttributes(&dst_attr, dst) != topsSuccess)
     return false;
   if (topsPointerGetAttributes(&src_attr, src) != topsSuccess)
@@ -185,7 +189,7 @@ class MemoryManager {
         return ErrorMemoryAllocation;
       }
     } else {
-      topsError_t err = topsHostMalloc(&mem, size, topsHostMallocDefault);
+      topsError_t err = AllocatePinnedHost(&mem, size);
       if (err != topsSuccess || mem == nullptr)
         return ErrorMemoryAllocation;
     }
@@ -210,7 +214,7 @@ class MemoryManager {
       PointerDeviceGuard guard(info.pointer);
       err = topsFree(info.pointer);
     } else {
-      err = topsHostFree(info.pointer);
+      err = FreePinnedHost(info.pointer);
     }
 
     m_registry.erase(it);

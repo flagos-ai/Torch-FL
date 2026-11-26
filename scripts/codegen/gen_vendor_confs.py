@@ -108,17 +108,19 @@ from backend_coverage import (  # noqa: E402
 
 # Native coverage comes from the same generated fragments CMake selects.
 # Additional FlagGems claims can extend that surface without adding vendor kernels.
-_platforms = json.loads(
-    (REPO_ROOT / "cmake/flagos_platforms.json").read_text(encoding="utf-8")
-)["accelerators"]
+PLATFORM_REGISTRATIONS = {
+    row["vendor"]: row["registration"]
+    for row in json.loads(
+        (REPO_ROOT / "cmake/flagos_platforms.json").read_text(encoding="utf-8")
+    )["accelerators"].values()
+}
 VENDORS = {}
-for _row in _platforms.values():
-    _registration = _row["registration"]
+for _vendor, _registration in PLATFORM_REGISTRATIONS.items():
     _native = _registration.get("base") or _registration.get("vendor")
     # TsingMicro maintains its own sparse routing config.
-    if _native and _row["vendor"] != "tsingmicro":
+    if _native and _vendor != "tsingmicro":
         _flaggems = _registration.get("flaggems")
-        VENDORS[_row["vendor"]] = (_native, (_flaggems,) if _flaggems else ())
+        VENDORS[_vendor] = (_native, (_flaggems,) if _flaggems else ())
 
 # Ops a vendor registers straight from register.cc instead of its .inc, so they
 # are invisible to the .inc scan. Ascend claims aten::matmul (and the
@@ -338,7 +340,7 @@ CUDA_ABI_GAP_NOTES = {
         "whenever the layer is built without a bias, which is how norm_out is",
         "built; with the pipeline loaded as bfloat16 (sweep.py's torch_dtype)",
         "that is add.Tensor(bf16_tensor, 0.0).",
-        "scatter_add_, argmin, mean and mean.dim are pinned to cuda for a",
+        "scatter_add_, mean and mean.dim are pinned to cuda for a",
         "correctness reason, on FlagGems kernels that return a wrong answer or",
         "raise rather than on anything the DCU backend cannot compile. Each was",
         "measured on DCU with DAS boxing and FlagGems over the same tensor, both",
@@ -350,17 +352,13 @@ CUDA_ABI_GAP_NOTES = {
         "contiguous and addresses through logical offset 4079, which is a silent",
         "wrong answer here and an HSA VMFault on other allocations. Reported as",
         "FlagGems issue #6448, with the same defect already filed as #6017.",
-        "argmin over a 20-column reduction returns 20, outside the valid [0, 19],",
-        "because the 32-lane kernel does not mask the tail; the survey cannot see",
-        "it, since its profiles reduce over the whole of a power-of-two row.",
-        "Reported as FlagGems issue #6447.",
         "mean and mean.dim raise ZeroDivisionError on an empty reduction --",
         "empty(0).mean() and empty(2, 0).mean(dim=1) -- where ATen returns NaN, so",
         "a shape-agnostic call site turns a defined result into an exception.",
         "Reported as FlagGems issue #6333.",
         "The conf is overload-granular and cannot express a shape condition, so",
         "the safe direction is the whole family on the boxing kernel --",
-        "scatter_add, scatter_add.out, argmin.out, mean.out and mean.dtype_out",
+        "scatter_add, scatter_add.out, mean.out and mean.dtype_out",
         "were already there -- and the routes can be re-enabled per op with",
         "FLAGOS_OP_<name>=flaggems once the FlagGems side is repaired.",
         "native_batch_norm is pinned to cuda for an availability reason, one",
@@ -757,7 +755,6 @@ CUDA_ABI_TRITON_GAPS = {
         "addr_",
         "alias",
         "alias_copy.out",
-        "argmin",
         "atan2_",
         "atanh_",
         "baddbmm_",
@@ -1601,7 +1598,6 @@ NATIVE_TRITON_GAPS = {
         # reproducible with the lines above; the torch_fl lever is the route,
         # and the aclnn kernels that serve it already exist.
         "max",
-        "max.dim",
         "mul_.Tensor",
         "native_dropout",
         "native_dropout_backward",
@@ -1925,7 +1921,6 @@ NATIVE_TRITON_GAPS = {
         "aminmax",
         "any.dims",
         "argmax",
-        "argmin",
         "asin",
         "asin_",
         "bucketize.Tensor",
@@ -1945,10 +1940,8 @@ NATIVE_TRITON_GAPS = {
         "kthvalue",
         "lgamma",
         "lgamma_",
-        "max.dim",
         "median",
         "median.dim",
-        "min.dim",
         "mode",
         "mse_loss",
         "nanmedian",
@@ -2549,7 +2542,6 @@ METAX_CPP_MEASURED = {
     "bmm",
     "bmm.out",
     "max",
-    "max.dim",
     "nonzero",
     "sort",
     "sort.stable",
@@ -2833,6 +2825,8 @@ SOFT_LOWP_CLAIMED_OPS = {
 # screen had to be tightened twice before the chip stopped finding defects it had
 # passed. Promoting an op means running it through stage 2, not stage 1.
 KUNLUNXIN_FLAGGEMS_MEASURED = {
+    "argmin",
+    "min.dim",
     "_linalg_eigvals",
     "_prelu_kernel",
     "_unsafe_view",
@@ -3093,6 +3087,7 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
 
 
 NATIVE_FLAGGEMS_MEASURED = {
+    "ascend": {"argmin"},
     "kunlunxin": KUNLUNXIN_FLAGGEMS_MEASURED,
 }
 

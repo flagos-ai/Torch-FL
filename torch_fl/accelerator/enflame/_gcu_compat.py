@@ -58,7 +58,11 @@ serve from its ``cuda`` entry.
 """
 
 import functools
+import hashlib
 import os
+from pathlib import Path
+import re
+import tempfile
 import time
 
 
@@ -434,8 +438,6 @@ def _derive_compile_arch(get_arch) -> None:
     if os.environ.get("COMPILE_ARCH"):
         return
 
-    import re
-
     from torch_fl import _env
 
     try:
@@ -506,6 +508,63 @@ def patch_triton_gcu_for_flagos() -> bool:
     return True
 
 
+def _patch_flagtree_tops_jit(backend) -> None:
+    """Adapt FlagTree's generated host extensions to the TOPS 4 headers."""
+    build_extension = getattr(backend, "build_gcu_ext", None)
+    get_cache = getattr(backend, "get_cache_manager", None)
+    sdk_root = getattr(backend, "_get_topscc_root", None)
+    if not all(callable(fn) for fn in (build_extension, get_cache, sdk_root)):
+        return
+    if getattr(build_extension, "_flagos_tops_patched", False):
+        return
+
+    # Read the headers used by FlagTree's actual host compile, which resolves
+    # CAPS_PATH independently of the SDK that built the torch_fl wheel.
+    try:
+        header = (Path(sdk_root()) / "include" / "tops_runtime_api.h").read_bytes()
+    except OSError:
+        return
+    version = re.search(rb"(?m)^\s*#\s*define\s+TOPSRT_VERSION\s+(\d+)\b", header)
+    if version is None or int(version[1]) < 4000:
+        return
+
+    names = {
+        "TOPS_SUCCESS": "topsSuccess",
+        "topsDeviceProp_t": "topsDeviceProp",
+        "ThreadDim": "threadDim",
+        "TOPS_ERROR_INVALID_VALUE": "topsErrorInvalidValue",
+    }
+    tokens = re.compile(r"\b(?:" + "|".join(names) + r")\b")
+
+    @functools.wraps(build_extension)
+    def build(name, src, srcdir, *args, **kwargs):
+        if name in {"gcu_utils", "__triton_launcher"}:
+            source = Path(src).read_text(encoding="utf-8")
+            adapted = tokens.sub(lambda match: names[match[0]], source)
+            if adapted != source:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", suffix=".cpp", dir=srcdir
+                ) as source_file:
+                    source_file.write(adapted)
+                    source_file.flush()
+                    return build_extension(
+                        name, source_file.name, srcdir, *args, **kwargs
+                    )
+        return build_extension(name, src, srcdir, *args, **kwargs)
+
+    # Both extensions hash their original source before calling build_gcu_ext.
+    # Keep their TOPS 4 binaries out of the cache namespace used by older SDKs.
+    cache_salt = b"torch-fl-tops-jit-v1:" + hashlib.sha256(header).digest()
+
+    @functools.wraps(get_cache)
+    def get_sdk_cache(key):
+        return get_cache(hashlib.sha256(cache_salt + key.encode()).hexdigest())
+
+    build._flagos_tops_patched = True
+    backend.build_gcu_ext = build
+    backend.get_cache_manager = get_sdk_cache
+
+
 def patch_flagtree_enflame_for_flagos() -> bool:
     """Redirect FlagTree's enflame backend onto torch_fl's flagos device.
 
@@ -528,6 +587,8 @@ def patch_flagtree_enflame_for_flagos() -> bool:
     import triton.backends
     import triton.backends.enflame.backend as _backend
     import triton.backends.enflame.toolkit as _toolkit
+
+    _patch_flagtree_tops_jit(_backend)
 
     # The registry entry is how the rest of FlagTree finds this driver, so patch
     # the class it hands out rather than a fresh import of the same module.

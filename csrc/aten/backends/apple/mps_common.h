@@ -261,22 +261,6 @@ bool MpsSupportsScalarDtype(at::ScalarType self_dtype, const at::Scalar& other);
 // with the caller's bool dtype.
 bool MpsSupportsAllDtype(at::ScalarType dtype);
 
-// argmax is reduced through float32 coordinates, which exactly represent the
-// realistic axis lengths. The result is int64, as in the reference.
-bool MpsSupportsArgmaxDtype(at::ScalarType dtype);
-
-// MPSGraph constants of a float or integer type, including inf for the floats.
-// `out` receives a strong reference that the autorelease pool releases.
-bool MpsPositiveInfinity(
-    MPSGraph* graph, at::ScalarType dtype, MPSGraphTensor** out);
-
-// The negative counterpart. An arg minimum replaces a NaN with it so the NaN
-// loses the reduction, the same way an arg maximum uses the positive one. An
-// integral width has no infinity; both answer zero there, which is only reached
-// by a dtype the caller has already declined.
-bool MpsNegativeInfinity(
-    MPSGraph* graph, at::ScalarType dtype, MPSGraphTensor** out);
-
 // triu selects values without arithmetic, so it is available at every mapped
 // element type except uint8. A missing uint8 MPSGraph mapping is declined.
 bool MpsSupportsTriuDtype(at::ScalarType dtype);
@@ -1381,12 +1365,6 @@ MPSGraphTensorData* MpsTensorData(
     size_t byteOffset,
     int64_t count,
     MPSDataType dtype);
-
-// Whether this build and host can describe an MTLBuffer at a nonzero byte
-// offset. False under an SDK older than Xcode 16 or a macOS runtime older than
-// 15; a caller that cannot stage its own asynchronous operands should then take
-// its host fallback.
-bool MpsOffsetTensorDataAvailable();
 
 // The 1-D placeholder matching a MpsTensorData over `count` elements. This is
 // the only shape a buffer-backed tensor is given; `MpsReshape` turns it into the

@@ -448,12 +448,12 @@ jobs:
           if-no-files-found: warn
 
       - name: Retain native-host build and conformance evidence
-        if: ${{ !cancelled() && env.TORCH_FL_NATIVE_HOST_EVIDENCE != '' }}
+        if: ${{ !cancelled() && steps.integration-tests.outcome != 'skipped' && contains(fromJSON(needs.configuration.outputs.integration_tests).*.group_id, 'native_host_build') }}
         uses: actions/upload-artifact@v4
         with:
           name: native-host-${{ inputs.platform }}-${{ github.run_attempt }}
-          path: ${{ env.TORCH_FL_NATIVE_HOST_EVIDENCE }}/
-          if-no-files-found: warn
+          path: ${{ env.TORCH_FL_NATIVE_HOST_EVIDENCE || format('{0}/torch-fl-native-host-evidence', runner.temp) }}/
+          if-no-files-found: ${{ steps.integration-tests.outcome == 'success' && 'error' || 'warn' }}
 
       # A fork diagnostic run still retains reports, without giving its tested
       # code an upload credential in the same job. Missing tokens are optional.

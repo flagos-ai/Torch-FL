@@ -97,7 +97,10 @@ def current_device():
     return _C._get_device()
 
 
-def set_device(device) -> None:
+def set_device(device: torch.device | str | int) -> None:
+    """Select a FlagOS device by index or indexed device specification."""
+    if isinstance(device, (str, torch.device)):
+        device = torch.accelerator._get_device_index(device)
     return _C._set_device(device)
 
 
@@ -691,9 +694,14 @@ class _DeviceProperties:
             self.gcnArchName = self.name
             return
 
-        # Ascend analogue: use the AICore count reported by the Ascend Triton
-        # backend. The module path is the same on FlagTree and triton-ascend.
-        self.name = f"Ascend NPU {device_id}"
+        if _platform() == "gcu":
+            from ..accelerator.enflame._device import get_device_name
+
+            self.name = get_device_name(device_id)
+        else:
+            self.name = f"Ascend NPU {device_id}"
+        # Preserve the existing core-count and capability defaults on backends
+        # that do not yet supply the full compiler-facing property set.
         self.multi_processor_count = _aicore_count()
         self.total_memory = mem_get_info(device_id)[1]
         # CUDA-style sentinels required by torch.utils._triton probes.

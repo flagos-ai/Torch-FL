@@ -60,14 +60,26 @@ def test_current_device_is_addressable():
 
 
 @pytest.mark.anyplatform
-def test_set_device_round_trip():
-    original = torch_fl.flagos.current_device()
+@pytest.mark.parametrize(
+    "device", [0, DEVICE, torch.device(DEVICE)], ids=["index", "string", "device"]
+)
+def test_set_device_round_trip(device):
+    original = torch.flagos.current_device()
     try:
-        torch_fl.flagos.set_device(0)
-        assert torch_fl.flagos.current_device() == 0
+        torch.flagos.set_device(device)
+        assert torch.flagos.current_device() == 0
     finally:
-        torch_fl.flagos.set_device(original)
-    assert torch_fl.flagos.current_device() == original
+        torch.flagos.set_device(original)
+    assert torch.flagos.current_device() == original
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize(
+    "device", ["flagos", torch.device("cpu:0")], ids=["missing-index", "wrong-type"]
+)
+def test_set_device_rejects_invalid_spec(device):
+    with pytest.raises(ValueError):
+        torch.flagos.set_device(device)
 
 
 @pytest.mark.anyplatform

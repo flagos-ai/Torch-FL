@@ -37,6 +37,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from manifest_composer import (
     composed_steps,
@@ -79,22 +80,6 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # composition exactly, so wiring a platform in or out is a visible edit here,
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
-    "native_host_build": tuple(
-        p
-        for p in _PLATFORMS
-        if p
-        not in {
-            "metax",
-            "ascend",
-            "enflame",
-            "hygon",
-            "iluvatar",
-            "kunlunxin",
-            "mthreads",
-            "nvidia",
-            "thead",
-        }
-    ),
     "native_source_hosts": tuple(p for p in _PLATFORMS if p != "ascend"),
     "native_source_hosts_metax": tuple(p for p in _PLATFORMS if p != "metax"),
     "native_source_hosts_hygon": tuple(p for p in _PLATFORMS if p != "hygon"),
@@ -354,6 +339,34 @@ def test_portable_operator_contracts_run_on_the_ordinary_wheel(platform):
     assert len(groups) == 1
     assert "main_ops" in groups[0]["command"]
     assert "not cuda" not in groups[0]["command"]
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_native_host_wheel_is_ready_before_the_common_regression(platform):
+    groups = composed_steps(platform)
+    ids = [group["manifest_id"] for group in groups]
+    assert ids.count("native_host_build") == 1
+    index = ids.index("native_host_build")
+    assert index < ids.index("common_regression")
+    command = groups[index]["command"]
+    mode = "--check-installed" if platform == "apple" else "--test-install"
+    assert command.endswith(f"build_native_hosts_ci.sh {mode}")
+
+
+def test_native_host_evidence_upload_follows_the_plan():
+    workflow = yaml.safe_load(
+        (_REPO / ".github/workflows/integration-tests.yml").read_text()
+    )
+    steps = workflow["jobs"]["integration-tests"]["steps"]
+    upload = next(
+        step
+        for step in steps
+        if step.get("with", {}).get("name", "").startswith("native-host-")
+    )
+    assert (
+        "contains(fromJSON(needs.configuration.outputs.integration_tests).*.group_id, 'native_host_build')"
+        in upload["if"]
+    )
 
 
 @pytest.mark.parametrize("profile", ["pr", "nightly"])

@@ -666,7 +666,7 @@ def test_conf_route_counts_are_stable():
         # Complex storage, spectral decomposition, seeded sampling and shift
         # aliases now have measured Ascend implementations. Five aliases extend
         # the global op universe and remain none on unrelated vendor builds.
-        "ascend": {"ascend": 206, "flaggems": 215, "none": 1621},
+        "ascend": {"ascend": 205, "flaggems": 217, "none": 1620},
         # The BPU is native: 34 ops route to the generated kernel layer, the
         # rest to `none`. Those kernels submit .hbm artifacts from
         # FLAGOS_BPU_OPLIB; without it each takes its own CPU round-trip, which
@@ -699,7 +699,7 @@ def test_conf_route_counts_are_stable():
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each
         # platform's measured triton gaps -- is `none` (cpu_fallback). The
         # boxing routes live in backends_<platform>_boxing.conf.
-        "hygon": {"none": 1578, "flaggems": 464},
+        "hygon": {"none": 1577, "flaggems": 465},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
@@ -714,7 +714,7 @@ def test_conf_route_counts_are_stable():
         # instead. See NATIVE_TRITON_GAPS["enflame"].
         # Native argmax/default+out close two CPU routes. Isolated precision
         # checks restore SiLU to FlagGems and retain the vendor mean.dim path.
-        "enflame": {"none": 1606, "enflame": 186, "flaggems": 250},
+        "enflame": {"none": 1603, "enflame": 186, "flaggems": 253},
         # kunlunxin is a native vendor backend: every op routes to the vendor
         # XPU SDK (``kunlunxin``), to FlagGems, or is left at ``none`` -- there
         # is no ``cuda`` route.  The ``kunlunxin`` count is exactly what
@@ -733,7 +733,7 @@ def test_conf_route_counts_are_stable():
         # only by the second screen.  `acos`, `_log_softmax` and `mean.dim` are
         # the three this lane itself rejected on the first attempt, and they are
         # why the screen was tightened.  See KUNLUNXIN_FLAGGEMS_MEASURED.
-        "kunlunxin": {"none": 1729, "kunlunxin": 57, "flaggems": 256},
+        "kunlunxin": {"none": 1727, "kunlunxin": 57, "flaggems": 258},
         # metax: _softmax/embedding moved off flaggems_cpp to flaggems (#501).
         # 8 ops moved flaggems -> boxing (594 -> 586 / 1433 -> 1441) because
         # route_boxing now consults codegen_ops.py's FlagGems holds. These were
@@ -756,7 +756,7 @@ def test_conf_route_counts_are_stable():
         # matrix claim needs the key registered, and a default conf may not route
         # boxing. The day-0 variant keeps `boxing`. Measured on a C550; see
         # METAX_FLAGGEMS_MEASURED in gen_vendor_confs.py.
-        "metax": {"flaggems": 587, "none": 1440, "flaggems_cpp": 15},
+        "metax": {"flaggems": 588, "none": 1440, "flaggems_cpp": 14},
         # cat moved to flaggems via the tensorlist_dim codegen category (#498).
         "mthreads": {"none": 1523, "flaggems": 466, "mthreads": 53},
         "thead": {"none": 1450, "flaggems": 592},

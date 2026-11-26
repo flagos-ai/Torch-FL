@@ -482,6 +482,9 @@ def test_native_host_ci_build_excludes_the_default_build(
     helper = workspace / ".github/scripts/lib/set_env_common.sh"
     helper.parent.mkdir(parents=True)
     helper.write_bytes((ROOT / ".github/scripts/lib/set_env_common.sh").read_bytes())
+    recorder = Path(".github/scripts/record_native_host_wheel.py")
+    (workspace / recorder).write_bytes((ROOT / recorder).read_bytes())
+    install = tmp_path / "installed"
     (workspace / "setup.py").write_text("# tracked source\n")
     for arguments in (
         ["init", "-q"],
@@ -515,7 +518,7 @@ def test_native_host_ci_build_excludes_the_default_build(
     python = tools / "python"
     python.write_text(
         f"#!{sys.executable}\n"
-        "import json, os, sys, zipfile\n"
+        "import hashlib, json, os, sys, zipfile\n"
         "from pathlib import Path\n"
         "if sys.argv[1] == 'setup.py':\n"
         "    root = Path.cwd()\n"
@@ -539,6 +542,13 @@ def test_native_host_ci_build_excludes_the_default_build(
         "    with zipfile.ZipFile(output / 'native.whl', 'w') as wheel:\n"
         "        wheel.writestr('torch_fl/_build_config.py', 'NATIVE_HOSTS = True\\n')\n"
         "        wheel.writestr('torch_fl/compatibility.json', '{}')\n"
+        "elif sys.argv[1] == '-m' and sys.argv[-1].endswith('.whl'):\n"
+        "    installed = Path(os.environ['PYTHONPATH']) / 'torch_fl-2.10.0.dist-info'\n"
+        "    installed.mkdir(parents=True)\n"
+        "    (installed / 'METADATA').write_text('Name: torch_fl\\nVersion: 2.10.0\\n')\n"
+        "    digest = hashlib.sha256(Path(sys.argv[-1]).read_bytes()).hexdigest()\n"
+        "    (installed / 'direct_url.json').write_text(json.dumps(\n"
+        "        {'archive_info': {'hashes': {'sha256': digest}}}))\n"
         "elif sys.argv[1] == '-m' or sys.argv[1].endswith('torch-fl-preflight'):\n"
         "    pass\n"
         "else:\n"
@@ -582,6 +592,7 @@ def test_native_host_ci_build_excludes_the_default_build(
             "FLAGOS_VENDOR_TORCH_LIB": str(workspace / "torch_fl/lib_metax"),
             "PATH": str(tools) + os.pathsep + os.environ["PATH"],
             "BUILD_RECEIPT": str(receipt),
+            "PYTHONPATH": str(install),
         },
         capture_output=True,
         text=True,
@@ -597,6 +608,9 @@ def test_native_host_ci_build_excludes_the_default_build(
     evidence = runner_temp / "torch-fl-native-host-evidence"
     assert github_env.read_text() == f"TORCH_FL_NATIVE_HOST_EVIDENCE={evidence}\n"
     assert (evidence / "native.whl").is_file()
+    wheel_record = json.loads((evidence / "wheel.json").read_text())
+    assert wheel_record["wheel"] == "native.whl"
+    assert wheel_record["package"] == str((install / "torch_fl").resolve())
     assert (
         evidence / "torch_fl/_build_config.py"
     ).read_text() == "NATIVE_HOSTS = True\n"

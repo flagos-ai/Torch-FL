@@ -48,7 +48,6 @@
 //   - arange.start
 //   - arange.start_step
 //   - argmax
-//   - argmin
 //   - asin
 //   - asin_
 //   - atan
@@ -154,11 +153,9 @@
 //   - masked_fill_.Scalar
 //   - masked_fill_.Tensor
 //   - masked_select
-//   - max.dim
 //   - mean.dim
 //   - median
 //   - median.dim
-//   - min.dim
 //   - mm
 //   - mm.out
 //   - mode
@@ -252,7 +249,7 @@
 //   - zeros
 //   - zeros_like
 //
-// Total: 244 ops registered here, 107 further FlagGems ops already claimed by gcu_register.inc.
+// Total: 247 ops registered here, 107 further FlagGems ops already claimed by gcu_register.inc.
 
   m.impl("_conv_depthwise2d", WrapperPrivConvDepthwise2d);
   m.impl("_efficient_attention_backward", WrapperPrivEfficientAttentionBackward);
@@ -286,6 +283,7 @@
   m.impl("all.dims", WrapperAllDims);
   m.impl("angle", WrapperAngle);
   m.impl("any.dim", WrapperAnyDim);
+  m.impl("argmin", WrapperArgmin);
   m.impl("asinh", WrapperAsinh);
   m.impl("asinh.out", WrapperAsinhOut);
   m.impl("asinh_", WrapperAsinhInplace);
@@ -401,10 +399,12 @@
   m.impl("masked_scatter", WrapperMaskedScatter);
   m.impl("masked_scatter_", WrapperMaskedScatterInplace);
   m.impl("max", WrapperMax);
+  m.impl("max.dim", WrapperMaxDim);
   m.impl("max_pool2d_with_indices", WrapperMaxPool2dWithIndices);
   m.impl("max_pool3d_with_indices", WrapperMaxPool3dWithIndices);
   m.impl("max_unpool2d", WrapperMaxUnpool2d);
   m.impl("min", WrapperMin);
+  m.impl("min.dim", WrapperMinDim);
   m.impl("mish", WrapperMish);
   m.impl("mish_", WrapperMishInplace);
   m.impl("mv", WrapperMv);

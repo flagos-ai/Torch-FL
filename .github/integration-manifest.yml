@@ -659,12 +659,17 @@ steps:
     platforms: [apple]
     command: python -m pytest tests/integration/test_mps_runtime.py -v --tb=short
 
-  # The common stream chain selects the preflight-checked AOT installation.
-  # The other common cases still exercise the ordinary installed wheel.
+  # Common native host cases select the verified installed wheel. Metal
+  # ships in the ordinary wheel and has the same evidence group.
   - id: native_host_build
-    name: Build native FlagGems hosts
+    name: Prepare native host runtime
     platforms: [metax, ascend, enflame, hygon, iluvatar, kunlunxin, mthreads, nvidia, thead]
     command: cd "$GITHUB_WORKSPACE" && bash .github/scripts/build_native_hosts_ci.sh --test-install
+
+  - id: native_host_build
+    name: Prepare native host runtime
+    platforms: [apple]
+    command: cd "$GITHUB_WORKSPACE" && bash .github/scripts/build_native_hosts_ci.sh --check-installed
 
   - id: common_regression
     name: Common regression

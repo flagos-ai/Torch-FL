@@ -44,14 +44,17 @@ def test_float_widths_follow_aten(dtype):
 
 
 @pytest.mark.anyplatform
-def test_dim_stays_on_the_unvalidated_reference():
-    # The GPU reduction currently diverges from aten when a per-row maximum
-    # contains a NaN or duplicate finite maxima. Leave this overload on the
-    # checked reference until the graph follows its first/missing-NaN rules.
+def test_dim_follows_aten():
     host = torch.tensor([[1.0, 3.0, 3.0], [3.0, 1.0, 1.0]])
     actual = torch.argmax(host.to(DEVICE), dim=1)
     expected = torch.argmax(host, dim=1)
     assert torch.equal(actual.cpu(), expected)
+
+
+@pytest.mark.anyplatform
+def test_empty_axis_raises():
+    with pytest.raises(IndexError, match="reduction dim 1 to have non-zero size"):
+        torch.argmax(torch.empty(2, 0, device=DEVICE), dim=1)
 
 
 @pytest.mark.anyplatform

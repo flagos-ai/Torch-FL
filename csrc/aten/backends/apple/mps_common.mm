@@ -241,48 +241,6 @@ bool MpsSupportsAllDtype(at::ScalarType dtype) {
   return MpsSupportsCompareDtype(dtype);
 }
 
-bool MpsSupportsArgmaxDtype(at::ScalarType dtype) {
-  // MPSGraph's coordinateAlongAxis: returns int32. Both the finite maximum and
-  // the NaN positions therefore stay in int32; only the final index is widened.
-  return dtype == at::kFloat;
-}
-
-namespace {
-bool MpsInfinity(
-    MPSGraph* graph, at::ScalarType dtype, double sign, MPSGraphTensor** out) {
-  if (graph == nil || out == nullptr) {
-    return false;
-  }
-  MPSDataType mps_dtype;
-  if (!MpsDataTypeOf(dtype, &mps_dtype) ||
-      (dtype != at::kFloat && dtype != at::kHalf &&
-       dtype != at::kBFloat16 && !c10::isIntegralType(dtype, false))) {
-    return false;
-  }
-  const double value = c10::isIntegralType(dtype, false)
-      ? 0.0
-      : sign * std::numeric_limits<double>::infinity();
-  *out = [graph constantWithScalar:value
-                             shape:MpsFlatShape(1)
-                          dataType:mps_dtype];
-  return *out != nil;
-}
-}  // namespace
-
-bool MpsPositiveInfinity(
-    MPSGraph* graph,
-    at::ScalarType dtype,
-    MPSGraphTensor** out) {
-  return MpsInfinity(graph, dtype, 1.0, out);
-}
-
-bool MpsNegativeInfinity(
-    MPSGraph* graph,
-    at::ScalarType dtype,
-    MPSGraphTensor** out) {
-  return MpsInfinity(graph, dtype, -1.0, out);
-}
-
 bool MpsSupportsTriuDtype(at::ScalarType dtype) {
   // A scalar zero selects the lower triangle. It has an element type for all
   // the arithmetic widths but not for uint8 on this SDK.
@@ -1820,10 +1778,6 @@ MPSGraphTensorData* MpsTensorData(
       [[MPSGraphTensorData alloc] initWithMPSNDArray:array];
   [array release];
   return data;
-}
-
-bool MpsOffsetTensorDataAvailable() {
-  return OffsetTensorDataAvailable();
 }
 
 MPSGraphTensor* MpsFlatPlaceholder(MPSGraph* graph, int64_t count, MPSDataType dtype) {

@@ -299,9 +299,7 @@ def test_every_non_mps_platform_skips_the_mps_mark():
     The migrated Apple files (tests/integration/ops/test_mps_*.py) keep a
     module-level `mps` mark and mark their portable contract cases
     `anyplatform`, so every other lane selects them into its shared cohort and
-    depends on this gate to skip them. The MUSA row was missing the entry, and
-    13 argmin/argmax NaN cases from test_mps_argmin_arpextreme.py ran on Moore
-    Threads hardware instead of being skipped.
+    depends on this gate to skip them.
     """
     for platform, markers in ops_conftest._PLATFORM_SKIP_MARKERS.items():
         if platform == "mps":
@@ -366,6 +364,8 @@ def test_native_vendor_precision_gate_reads_the_installed_build(monkeypatch, ena
         ("dcu", True, ("dcu", "native_source_host"), None),
         ("dcu", False, ("dcu", "native_source_host"), "build_record"),
         ("dcu", True, ("nvidia", "native_source_host"), "platform_support"),
+        ("gcu", False, ("gcu",), None),
+        ("cuda", False, ("gcu",), "backend_marker"),
         ("gcu", True, ("native_source_host",), "platform_support"),
         ("gcu", False, ("native_source_host",), "platform_support"),
         ("gcu", True, ("enflame_native_host",), None),
@@ -378,7 +378,7 @@ def test_native_vendor_precision_gate_reads_the_installed_build(monkeypatch, ena
         ("ppu", True, ("native_vendor_precision",), "platform_support"),
     ],
 )
-def test_native_host_cases_keep_one_collection_shape(
+def test_backend_cases_keep_one_collection_shape(
     monkeypatch, platform, compiler, marks, gate
 ):
     class Item:
