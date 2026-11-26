@@ -335,7 +335,7 @@ def test_pinned_runtime_retains_device_access_and_environment_contract():
     config = yaml.safe_load((ROOT / ".github/configs/thead.yml").read_text())
     assert (
         config["ci_image"]
-        == "harbor.baai.ac.cn/flagos-runtime/flagos-runtime-thead-ppu2.1.0:2.3.0@sha256:7837256c2dab931c762f86713a37d3fbecc902792392d67731c982ecda632cef"
+        == "harbor.baai.ac.cn/flagos-runtime/flagos-runtime-thead-ppu2.1.0:2.3.0@sha256:35fcbd0c3777f0af1f936fc725a91be76279ea77849d192ea11d6f90c12172bc"
     )
     assert config["runner_labels"] == ["flagcicd-810e"]
     assert "--privileged" not in config["container_options"]

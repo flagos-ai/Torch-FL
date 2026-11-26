@@ -15,7 +15,7 @@ The T-Head wheel uses FlagGems on the PPU SDK runtime.
 The CI config pins the official PPU SDK 2.1.0 runtime 2.3.0 by manifest digest:
 
 ```text
-harbor.baai.ac.cn/flagos-runtime/flagos-runtime-thead-ppu2.1.0:2.3.0@sha256:7837256c2dab931c762f86713a37d3fbecc902792392d67731c982ecda632cef
+harbor.baai.ac.cn/flagos-runtime/flagos-runtime-thead-ppu2.1.0:2.3.0@sha256:35fcbd0c3777f0af1f936fc725a91be76279ea77849d192ea11d6f90c12172bc
 ```
 
 The [official runtime inventory](https://flagos-ai.github.io/release-info/zh-cn/runtime/thead-ppu2.1.0/)
