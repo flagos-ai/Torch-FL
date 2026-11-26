@@ -796,7 +796,23 @@ def _patch_cuda_tensor_ops(metax_path):
 
     _orig_zero = torch.Tensor.zero_
 
+    def _is_fake(tensor):
+        """True for FakeTensor, whose storage does not exist.
+
+        Inductor calls ``zero_()`` / ``fill_()`` on such tensors while lowering
+        (``torch._inductor/ir.py: ir_node_to_tensor``); the stock kernels handle
+        them through meta dispatch, while the data-pointer shims below raise
+        "Cannot access data pointer of Tensor (e.g. FakeTensor, ...)".
+        """
+        try:
+            from torch._subclasses.fake_tensor import FakeTensor
+        except ImportError:
+            return False
+        return isinstance(tensor, FakeTensor)
+
     def _is_metax_device_tensor(tensor):
+        if tensor.is_meta or _is_fake(tensor):
+            return False
         return tensor.is_cuda or tensor.device.type in ("flagos", "privateuseone")
 
     def _metax_zero_(self):

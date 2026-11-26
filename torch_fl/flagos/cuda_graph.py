@@ -128,7 +128,11 @@ def install_raw_stream_getter() -> None:
     after those layers have run and before Inductor emits code.
     """
     global _native_raw_stream
-    _native_raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+    current = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+    # Idempotent: a recompile re-runs this, and capturing our own getter as the
+    # "native" one would make every stream query recurse into itself.
+    if current is not _raw_stream_getter:
+        _native_raw_stream = current
     torch._C._cuda_getCurrentRawStream = _raw_stream_getter
 
 
