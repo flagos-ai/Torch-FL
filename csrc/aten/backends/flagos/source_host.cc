@@ -4,7 +4,6 @@
 #include "source_host.h"
 
 #include <c10/core/DeviceGuard.h>
-#include <c10/core/GradMode.h>
 #include <c10/core/impl/VirtualGuardImpl.h>
 #include <torch/library.h>
 
@@ -54,7 +53,7 @@ bool Device(const c10::IValue& value, std::optional<c10::Device>& device) {
 }
 
 bool FindSource(const char* name, int64_t outputs, Source& source) {
-  if (!populated.load(std::memory_order_acquire) || c10::GradMode::is_enabled()) return false;
+  if (!populated.load(std::memory_order_acquire) || !NativeSourceCanRun()) return false;
   std::shared_lock<std::shared_mutex> lock(mutex);
   auto found = sources.find(Name(name));
   if (found == sources.end() || found->second.outputs != outputs) return false;

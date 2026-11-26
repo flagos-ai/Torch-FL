@@ -14,16 +14,146 @@
 
 #include <acl/acl_base_rt.h>
 
+#include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
 #include <mutex>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
 namespace at::native::flagos::ascend {
 namespace {
 
+thread_local bool eager_worker = false;
 thread_local std::unordered_map<int, aclrtStream> current_streams;
+std::atomic<bool> eager_queue_created{false};
+
+class EagerLaunchQueue {
+ public:
+  EagerLaunchQueue() : worker_([this] { Run(); }) {}
+  ~EagerLaunchQueue() {
+    {
+      std::lock_guard<std::mutex> lock(ready_mutex_);
+      exiting_ = true;
+    }
+    ready_.notify_one();
+    worker_.join();
+    eager_queue_created.store(false, std::memory_order_release);
+  }
+
+  void Submit(AscendAclnnCall call) {
+    std::lock_guard<std::mutex> producer(producer_mutex_);
+    const auto index = submitted_.load();
+    WaitForProgress([&] { return index - consumed_.load() < kCapacity || failed_.load(); });
+    CheckFailure();
+    slots_[index % kCapacity] = std::move(call);
+    submitted_.store(index + 1);
+    if (waiting_for_work_.load()) {
+      std::lock_guard<std::mutex> lock(ready_mutex_);
+      ready_.notify_one();
+    }
+  }
+
+  void WaitUntilSubmitted() {
+    const auto target = submitted_.load();
+    WaitForProgress([&] { return completed_.load() >= target; });
+  }
+
+  void Flush() {
+    WaitUntilSubmitted();
+    CheckFailure();
+  }
+
+ private:
+  static constexpr size_t kCapacity = 512;
+  using Task = AscendAclnnCall;
+
+  template <class Ready>
+  void WaitForProgress(Ready ready) {
+    if (ready()) return;
+    std::unique_lock<std::mutex> lock(progress_mutex_);
+    ++progress_waiters_;
+    progress_.wait(lock, ready);
+    --progress_waiters_;
+  }
+
+  void NotifyProgress() {
+    if (progress_waiters_.load() == 0) return;
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    progress_.notify_all();
+  }
+
+  void CheckFailure() {
+    if (failed_.load()) std::rethrow_exception(failure_);
+  }
+
+  void Run() {
+    eager_worker = true;
+    int device = -1;
+    for (uint64_t index = 0; ; ++index) {
+      if (submitted_.load() == index) {
+        std::unique_lock<std::mutex> lock(ready_mutex_);
+        waiting_for_work_.store(true);
+        ready_.wait(lock, [&] { return exiting_ || submitted_.load() != index; });
+        waiting_for_work_.store(false);
+        if (submitted_.load() == index) return;
+      }
+      Task task = std::move(slots_[index % kCapacity]);
+      consumed_.store(index + 1);
+      NotifyProgress();
+      if (!failed_.load()) {
+        try {
+          if (device != task.device) {
+            if (::SetDevice(task.device) != Success) {
+              throw std::runtime_error("Unable to bind the Ascend submission worker");
+            }
+            device = task.device;
+          }
+          const int result = task.execute(task.workspace, task.workspace_size,
+                                          task.executor, task.stream);
+          if (result != 0) {
+            throw std::runtime_error(std::string(task.api) + " failed: " +
+                                     std::to_string(result));
+          }
+        } catch (...) {
+          failure_ = std::current_exception();
+          failed_.store(true);
+        }
+      }
+      task.descriptors.reset();
+      completed_.store(index + 1);
+      NotifyProgress();
+    }
+  }
+
+  std::array<Task, kCapacity> slots_;
+  alignas(64) std::atomic<uint64_t> submitted_{0};
+  alignas(64) std::atomic<uint64_t> consumed_{0};
+  alignas(64) std::atomic<uint64_t> completed_{0};
+  std::mutex producer_mutex_;
+  std::mutex ready_mutex_;
+  std::condition_variable ready_;
+  bool exiting_ = false;
+  std::atomic<bool> waiting_for_work_{false};
+  std::mutex progress_mutex_;
+  std::condition_variable progress_;
+  std::atomic<size_t> progress_waiters_{0};
+  std::atomic<bool> failed_{false};
+  std::exception_ptr failure_;
+  std::thread worker_;
+};
+
+EagerLaunchQueue& EagerQueue() {
+  static EagerLaunchQueue queue;
+  return queue;
+}
 
 // One default stream per device, plus the lock guarding the map. See
 // acl_stream.h for why a single process-wide stream is not enough on a
@@ -95,7 +225,34 @@ FLAGOS_EXPORT aclrtStream GetDefaultAclStream() {
   return GetDefaultAclStreamForDevice(device_index);
 }
 
+FLAGOS_EXPORT bool AscendEagerQueueEnabled() {
+  static const bool enabled = [] {
+    const char* mode = std::getenv("TASK_QUEUE_ENABLE");
+    const char* blocking = std::getenv("ASCEND_LAUNCH_BLOCKING");
+    return (mode == nullptr || std::strcmp(mode, "0") != 0) &&
+           (blocking == nullptr || std::strcmp(blocking, "1") != 0);
+  }();
+  return enabled;
+}
+
+FLAGOS_EXPORT void SubmitAscendEager(AscendAclnnCall call) {
+  auto& queue = EagerQueue();
+  eager_queue_created.store(true, std::memory_order_release);
+  queue.Submit(std::move(call));
+}
+
+FLAGOS_EXPORT void FlushAscendEager() {
+  if (!eager_worker && eager_queue_created.load(std::memory_order_acquire))
+    EagerQueue().Flush();
+}
+
+FLAGOS_EXPORT void WaitForAscendEagerSubmissions() {
+  if (!eager_worker && eager_queue_created.load(std::memory_order_acquire))
+    EagerQueue().WaitUntilSubmitted();
+}
+
 FLAGOS_EXPORT void DrainDefaultAclStreams() {
+  FlushAscendEager();
   std::vector<std::pair<int, aclrtStream>> snapshot;
   {
     std::lock_guard<std::mutex> lock(default_streams_mutex);
@@ -131,6 +288,7 @@ FLAGOS_EXPORT aclrtStream GetCurrentAclStreamForDevice(int device_index) {
 }
 
 FLAGOS_EXPORT aclrtStream GetCurrentAclStream() {
+  FlushAscendEager();
   int device_index = 0;
   ::GetDevice(&device_index);
   return GetCurrentAclStreamForDevice(device_index);
@@ -172,6 +330,7 @@ extern "C" {
 
 __attribute__((visibility("default")))
 void* GetCurrentStream(int device_index) {
+  at::native::flagos::ascend::WaitForAscendEagerSubmissions();
   return (void*)at::native::flagos::ascend::GetCurrentAclStreamForDevice(
       device_index);
 }
@@ -183,5 +342,18 @@ void SetCurrentStream(int device_index, void* stream) {
 }
 
 } // extern "C"
+
+extern "C" FLAGOS_EXPORT void FlagosAscendDrainHostSubmissions() {
+  at::native::flagos::ascend::FlushAscendEager();
+}
+
+extern "C" FLAGOS_EXPORT int FlagosAscendFlushHostSubmissions() noexcept {
+  try {
+    at::native::flagos::ascend::FlushAscendEager();
+    return Success;
+  } catch (...) {
+    return ErrorUnknown;
+  }
+}
 
 #endif // USE_ASCEND

@@ -156,9 +156,282 @@ def bind_parameters(record, public):
     return bound
 
 
-def emit_entries(catalog, groups, selections=()):
+TSINGMICRO_EMBEDDING_GUARD = r"""
+inline bool TsingMicroEmbeddingBFloat16Accepts(
+    const at::Tensor& gradient, const at::Tensor& indices,
+    int64_t weights, int64_t padding, bool scale_by_frequency) {
+  constexpr int64_t extent = 1024;
+  constexpr int64_t tokens = 128;
+  return !scale_by_frequency
+      && weights > 0 && weights <= std::numeric_limits<int32_t>::max() / extent
+      && padding >= -1 && padding < weights
+      && gradient.defined() && indices.defined()
+      && gradient.device().is_privateuseone() && gradient.device() == indices.device()
+      && gradient.scalar_type() == at::kBFloat16 && indices.scalar_type() == at::kLong
+      && gradient.layout() == at::kStrided && indices.layout() == at::kStrided
+      && gradient.is_contiguous() && indices.is_contiguous()
+      && !gradient.is_neg() && !indices.is_neg()
+      && gradient.dim() >= 2 && gradient.size(-1) == extent
+      && gradient.numel() == tokens * extent
+      && gradient.sizes().slice(0, gradient.dim() - 1).equals(indices.sizes())
+      && reinterpret_cast<uintptr_t>(gradient.const_data_ptr()) % 16 == 0
+      && reinterpret_cast<uintptr_t>(indices.const_data_ptr()) % 16 == 0;
+}
+"""
+
+
+TSINGMICRO_MASKED_DIVIDE_GUARD = r"""
+inline bool TsingMicroMaskedDivideAccepts(const at::Tensor& input, const at::Scalar& divisor) {
+  constexpr auto max_elements = std::numeric_limits<int32_t>::max();
+  const bool supported = input.defined() && input.device().is_privateuseone()
+      && input.scalar_type() == at::kFloat && input.layout() == at::kStrided
+      && (input.dim() == 3 || input.dim() == 4)
+      && input.size(-1) > 1 && input.stride(-1) == 0
+      && input.numel() > 0 && input.numel() <= max_elements
+      && input.storage().nbytes() / sizeof(float) <= max_elements
+      && !input.is_neg() && !input.has_names()
+      && reinterpret_cast<uintptr_t>(input.const_data_ptr()) % 16 == 0
+      && divisor.isIntegral(false);
+  if (!supported) return false;
+  const auto reduction = divisor.toLong();
+  if (input.dim() == 3) return input.stride(1) == 1 && reduction == 1024;
+  return input.size(-1) == 128 && reduction == 128 && input.stride(-2) == 1
+      && input.stride(-3) == input.size(-2);
+}
+"""
+
+
+TSINGMICRO_ARGMAX_GUARD = r"""
+inline bool TsingMicroArgmaxAccepts(const at::Tensor& input,
+                                   std::optional<int64_t> dim, bool keepdim) {
+  return dim && (*dim == -1 || *dim == 1) && !keepdim
+      && input.defined() && input.device().is_privateuseone()
+      && input.scalar_type() == at::kFloat && input.layout() == at::kStrided
+      && input.dim() == 2 && input.size(0) == 1 && input.size(1) == 151936
+      && input.is_contiguous() && !input.is_neg() && !input.has_names()
+      && reinterpret_cast<uintptr_t>(input.const_data_ptr()) % 16 == 0;
+}
+"""
+
+
+TSINGMICRO_NLL_MEAN_GUARDS = r"""
+inline bool TsingMicroNllMeanForwardAccepts(
+    const at::Tensor& input, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction, int64_t ignore_index) {
+  return !weight && reduction == 1 && ignore_index == -100
+      && input.defined() && target.defined()
+      && input.device().is_privateuseone() && target.device() == input.device()
+      && input.scalar_type() == at::kFloat && target.scalar_type() == at::kLong
+      && input.layout() == at::kStrided && target.layout() == at::kStrided
+      && input.dim() == 2 && input.size(0) == 128 && input.size(1) == 151936
+      && target.dim() == 1 && target.size(0) == input.size(0)
+      && input.is_contiguous() && target.is_contiguous()
+      && !input.is_neg() && !target.is_neg() && !input.has_names() && !target.has_names()
+      && reinterpret_cast<uintptr_t>(input.const_data_ptr()) % 16 == 0
+      && reinterpret_cast<uintptr_t>(target.const_data_ptr()) % 16 == 8;
+}
+
+inline bool TsingMicroNllMeanScalarAccepts(const at::Tensor& value, c10::Device device) {
+  return value.defined() && value.device() == device && value.scalar_type() == at::kFloat
+      && value.layout() == at::kStrided && value.dim() == 0 && !value.is_neg();
+}
+
+inline bool TsingMicroNllMeanBackwardAccepts(
+    const at::Tensor& gradient, const at::Tensor& input, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction, int64_t ignore_index,
+    const at::Tensor& total_weight) {
+  return TsingMicroNllMeanForwardAccepts(input, target, weight, reduction, ignore_index)
+      && TsingMicroNllMeanScalarAccepts(gradient, input.device())
+      && TsingMicroNllMeanScalarAccepts(total_weight, input.device())
+      && reinterpret_cast<uintptr_t>(gradient.const_data_ptr()) % 16 == 0
+      && reinterpret_cast<uintptr_t>(total_weight.const_data_ptr()) % 16 == 4;
+}
+"""
+
+
+TSINGMICRO_LONG_ARITHMETIC_GUARD = r"""
+inline bool TsingMicroLongArithmeticAccepts(
+    const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  if (!self.defined() || !other.defined() || !self.device().is_privateuseone()
+      || self.scalar_type() != at::kLong || other.scalar_type() != at::kLong
+      || self.layout() != at::kStrided || other.layout() != at::kStrided
+      || self.dim() < 1 || self.dim() > 2 || self.numel() > 192
+      || !self.is_contiguous() || !other.is_contiguous()
+      || self.is_neg() || other.is_neg() || self.has_names() || other.has_names()
+      || !alpha.isIntegral(false) || alpha.toLong() != 1) {
+    return false;
+  }
+  return TypedWrappedNumber(other)
+      || (other.device() == self.device() && other.sizes().equals(self.sizes()));
+}
+"""
+
+
+TSINGMICRO_DENSE_UNARY_GUARD = r"""
+inline bool TsingMicroDenseUnaryAccepts(
+    const at::Tensor& tensor, at::ScalarType dtype, int64_t width) {
+  return tensor.defined() && tensor.device().is_privateuseone()
+      && tensor.scalar_type() == dtype && tensor.layout() == at::kStrided
+      && tensor.dim() == 3 && tensor.size(0) == 1
+      && (tensor.size(1) == 1 || tensor.size(1) == 128)
+      && tensor.size(2) == width && tensor.is_contiguous()
+      && !tensor.is_neg() && !tensor.is_conj() && !tensor.has_names();
+}
+"""
+
+
+TSINGMICRO_ORDERED_SUM_GUARD = r"""
+inline bool TsingMicroOrderedSumAccepts(
+    const at::Tensor& input, at::OptionalIntArrayRef dims, bool keepdim,
+    std::optional<at::ScalarType> dtype) {
+  if (!input.defined() || !input.is_privateuseone()
+      || input.layout() != at::kStrided || !input.is_non_overlapping_and_dense()
+      || input.storage_offset() != 0 || input.is_neg() || input.is_conj() || input.has_names()
+      || !dims || !keepdim || (dtype && *dtype != input.scalar_type())) {
+    return false;
+  }
+  const auto rank = input.dim();
+  if (input.scalar_type() == at::kBFloat16) {
+    if ((rank != 3 && rank != 4) || dims->size() != static_cast<size_t>(rank - 1)
+        || (*dims)[0] != 0 || (*dims)[1] != 1
+        || input.size(0) != 1 || input.size(1) != 128 || input.stride(-1) != 1) {
+      return false;
+    }
+    if (rank == 3) {
+      return input.size(2) == 1024 && input.is_contiguous();
+    }
+    return (*dims)[2] == 2 && (input.size(2) == 8 || input.size(2) == 16)
+        && input.size(3) == 128;
+  }
+  if (input.scalar_type() != at::kFloat || dims->size() != 1) {
+    return false;
+  }
+  const auto dim = (*dims)[0];
+  if ((rank != 3 && rank != 4) || (dim != -1 && dim != rank - 1)
+      || input.size(0) != 1 || input.size(1) != 128 || input.stride(-1) != 1) {
+    return false;
+  }
+  if (rank == 3) {
+    return input.size(2) == 1024;
+  }
+  return (input.size(2) == 8 || input.size(2) == 16) && input.size(3) == 128;
+}
+"""
+
+
+TSINGMICRO_BF16_ADDCDIV_GUARD = r"""
+inline bool TsingMicroBFloat16AddcdivAccepts(
+    const at::Tensor& self, const at::Tensor& first, const at::Tensor& second,
+    const at::Scalar& value, const at::Tensor& out) {
+  if (!self.defined() || !out.is_same(self) || !self.is_privateuseone() ||
+      self.scalar_type() != at::kBFloat16 || self.layout() != at::kStrided ||
+      !self.is_contiguous() || self.numel() <= 0 || self.storage_offset() != 0 ||
+      self.is_neg() || self.is_conj() || self.has_names() || !value.isFloatingPoint()) {
+    return false;
+  }
+  const auto eligible = [&](const at::Tensor& other) {
+    return other.defined() && other.layout() == at::kStrided &&
+        other.scalar_type() == self.scalar_type() && other.device() == self.device() &&
+        other.sizes().equals(self.sizes()) && other.is_contiguous() &&
+        other.storage_offset() == 0 && !other.is_neg() && !other.is_conj() &&
+        !other.has_names() && (!other.is_alias_of(self) || other.is_same(self));
+  };
+  return eligible(first) && eligible(second);
+}
+"""
+
+
+KUNLUNXIN_BF16_LERP_GUARD = r"""
+inline bool KunlunxinBFloat16LerpAccepts(
+    const at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {
+  if (!weight.isFloatingPoint() || !self.defined() || !end.defined() ||
+      !self.is_privateuseone() || self.scalar_type() != at::kBFloat16 ||
+      end.scalar_type() != self.scalar_type() || self.device() != end.device() ||
+      !self.sizes().equals(end.sizes()) || !self.is_contiguous() || !end.is_contiguous() ||
+      self.numel() == 0 || self.is_alias_of(end) || self.is_neg() || end.is_neg() ||
+      self.is_conj() || end.is_conj() || self.has_names() || end.has_names()) {
+    return false;
+  }
+  const auto scalar = weight.toDouble();
+  return scalar > 0.0 && scalar < 0.5 &&
+      static_cast<float>(scalar) > 0.0f && static_cast<float>(scalar) < 0.5f;
+}
+"""
+
+
+_ADAPTED_ENTRY_GUARDS = {
+    "kunlunxin_bf16_lerp_round_even": (
+        KUNLUNXIN_BF16_LERP_GUARD,
+        "KunlunxinBFloat16LerpAccepts(a0, a1, a2)",
+    ),
+    "tsingmicro_addcdiv_bf16_scale_first": (
+        TSINGMICRO_BF16_ADDCDIV_GUARD,
+        "TsingMicroBFloat16AddcdivAccepts(a0, a1, a2, a3, a4)",
+    ),
+    "tsingmicro_sum_ordered": (
+        TSINGMICRO_ORDERED_SUM_GUARD,
+        "TsingMicroOrderedSumAccepts(a0, a1, a2, a3)",
+    ),
+    "tsingmicro_embedding_bf16_input_order": (
+        TSINGMICRO_EMBEDDING_GUARD,
+        "TsingMicroEmbeddingBFloat16Accepts(a0, a1, a2, a3, a4)",
+    ),
+    "tsingmicro_float_scalar_divide_masked": (
+        TSINGMICRO_MASKED_DIVIDE_GUARD,
+        "TsingMicroMaskedDivideAccepts(a0, a1)",
+    ),
+    "tsingmicro_argmax_first_nan": (
+        TSINGMICRO_ARGMAX_GUARD,
+        "TsingMicroArgmaxAccepts(a0, a1, a2)",
+    ),
+    "tsingmicro_sin_reduced_argument": (
+        TSINGMICRO_DENSE_UNARY_GUARD,
+        "TsingMicroDenseUnaryAccepts(a0, at::kFloat, 128)",
+    ),
+    "tsingmicro_silu_stable_positive": (
+        TSINGMICRO_DENSE_UNARY_GUARD,
+        "TsingMicroDenseUnaryAccepts(a0, at::kBFloat16, 3072)",
+    ),
+    "tsingmicro_silu_backward_bf16_stages": (
+        TSINGMICRO_DENSE_UNARY_GUARD,
+        "!c10::InferenceMode::is_enabled() && "
+        "TsingMicroDenseUnaryAccepts(a0, at::kBFloat16, 3072) && "
+        "TsingMicroDenseUnaryAccepts(a1, at::kBFloat16, 3072) && "
+        "a0.size(1) == 128 && a0.sizes() == a1.sizes() && "
+        "a0.device() == a1.device() && "
+        "a0.storage_offset() == 0 && a1.storage_offset() == 0",
+    ),
+    "tsingmicro_nll_mean_forward_integer_offsets": (
+        TSINGMICRO_NLL_MEAN_GUARDS,
+        "TsingMicroNllMeanForwardAccepts(a0, a1, a2, a3, a4)",
+    ),
+    "tsingmicro_nll_mean_backward_integer_offsets": (
+        TSINGMICRO_NLL_MEAN_GUARDS,
+        "TsingMicroNllMeanBackwardAccepts(a0, a1, a2, a3, a4, a5, a6)",
+    ),
+    "tsingmicro_long_add_scalar_lanes": (
+        TSINGMICRO_LONG_ARITHMETIC_GUARD,
+        "TsingMicroLongArithmeticAccepts(a0, a1, a2)",
+    ),
+    "tsingmicro_long_sub_scalar_lanes": (
+        TSINGMICRO_LONG_ARITHMETIC_GUARD,
+        "TsingMicroLongArithmeticAccepts(a0, a1, a2)",
+    ),
+}
+
+
+def emit_entries(catalog, groups, selections=(), *, tensor_ranks=None):
     """Generate schema-specific callbacks; unsupported conversions stay visible."""
+    tensor_ranks = tensor_ranks or {}
     declarations, records, rejected = [], [], []
+    scoped_guards = {
+        row["adaptation"]: _ADAPTED_ENTRY_GUARDS[row["adaptation"]]
+        for row in selections
+        if row.get("adaptation") in _ADAPTED_ENTRY_GUARDS
+    }
+    declarations.extend(
+        dict.fromkeys(declaration for declaration, _ in scoped_guards.values())
+    )
     declarations.extend(
         f"std::atomic<int64_t> SourceVariantHits_{row['id']}{{0}};"
         for row in selections
@@ -190,7 +463,12 @@ def emit_entries(catalog, groups, selections=()):
             try:
                 bound = bind_parameters(record, public)
                 checks, values = [], {}
-                if selection is not None:
+                adaptation = (
+                    selection.get("adaptation") if selection is not None else None
+                )
+                if adaptation in scoped_guards:
+                    checks.append(scoped_guards[adaptation][1])
+                elif selection is not None:
                     mask = " | ".join(
                         "(uint64_t{1} << static_cast<unsigned>(at::ScalarType::"
                         + dtype
@@ -235,6 +513,9 @@ def emit_entries(catalog, groups, selections=()):
                     )
                     checks.append(check)
                     values[argument.name] = expression
+                for parameter, rank in tensor_ranks.get(name, {}).items():
+                    tensor = values[parameter]
+                    checks.append(f"{tensor}.dim()=={rank}")
                 invocation = (
                     namespace
                     + "::Forward("
@@ -308,6 +589,7 @@ def emit_entries(catalog, groups, selections=()):
 HEADER = r"""
 #include <atomic>
 #include <ATen/ops/_local_scalar_dense_native.h>
+#include <c10/core/InferenceMode.h>
 class PublishedSourceGuard {
  uint64_t mask_;
  std::optional<c10::Device> device_;

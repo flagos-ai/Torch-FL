@@ -164,6 +164,19 @@ def argument_key(value):
     return type(value), value
 
 
+def _triton_dtype_constant(value):
+    prefix = "__flagos_triton_dtype__:"
+    if type(value) is not str or not value.startswith(prefix):
+        return value
+    from triton import language
+
+    name = value[len(prefix) :]
+    dtype = getattr(language, name, None)
+    if not isinstance(dtype, language.dtype):
+        raise ValueError("unknown Triton dtype in Native Host launch: " + name)
+    return dtype
+
+
 class BoundKernel:
     def __init__(self, entry, grid):
         self.entry = entry
@@ -176,7 +189,15 @@ class BoundKernel:
 class KernelEntry:
     """Cache device specializations; execute host control flow on every call."""
 
-    def __init__(self, original, entry):
+    def __init__(
+        self,
+        original,
+        entry,
+        reuse_runtime_floats=False,
+        compile_before_enqueue=False,
+        permit_single_config=False,
+        eager_config=None,
+    ):
         self.original = original
         self.entry = entry
         self.returns_constants = original is entry
@@ -186,8 +207,11 @@ class KernelEntry:
             param.name: param.default for param in self.params if param.has_default
         }
         self.cache = {}
+        self.compile_before_enqueue = compile_before_enqueue
+        self.permit_single_config = permit_single_config
+        self.eager_config = eager_config
         self.native_cache = _launcher.KernelCache(
-            self.arg_names, self.defaults, self.returns_constants
+            self.arg_names, self.defaults, self.returns_constants, reuse_runtime_floats
         )
 
     def __getitem__(self, grid):
@@ -199,10 +223,158 @@ class KernelEntry:
     def warmup(self, *args, **kwargs):
         return self.original.warmup(*args, **kwargs)
 
+    def restore_constexpr_types(self, args, kwargs):
+        constexpr = {p.name for p in self.params if p.is_constexpr}
+        values = tuple(
+            _triton_dtype_constant(value)
+            if i < len(self.params) and self.params[i].is_constexpr
+            else value
+            for i, value in enumerate(args)
+        )
+        options = {
+            name: _triton_dtype_constant(value) if name in constexpr else value
+            for name, value in kwargs.items()
+        }
+        return values, options
+
+    def autotuner_config(self, wrapper, args, options):
+        from flag_gems.flagtune import cost_model
+        from flag_gems.runtime import TuningMode
+        from flag_gems.utils.libentry import LibTuner, LibTunerRunMode
+
+        fixed = self.eager_config
+        lib_tuner = isinstance(wrapper, LibTuner)
+        if (lib_tuner and not self.permit_single_config) or (
+            not lib_tuner and fixed is None
+        ):
+            return None
+        if lib_tuner and self.entry._has_flagtune_tuner:
+            self.entry._apply_flagtune()
+        if (
+            LibTunerRunMode(getattr(wrapper, "_run_mode", LibTunerRunMode.NORMAL))
+            is not LibTunerRunMode.NORMAL
+            or getattr(wrapper, "shared_config_pre_hook", None) is not None
+        ):
+            return None
+        if fixed is not None and (
+            getattr(wrapper, "user_defined_pre_hook", False)
+            or getattr(wrapper, "user_defined_post_hook", False)
+            or getattr(wrapper, "reset_to_zero", ())
+            or getattr(wrapper, "restore_value", ())
+            or getattr(wrapper, "early_config_prune", None) is not None
+            or getattr(wrapper, "perf_model", None) is not None
+        ):
+            return None
+        configs = wrapper.configs
+        cost_model_mode = lib_tuner and wrapper._flagtune_mode is TuningMode.COST_MODEL
+        if cost_model_mode:
+            # Use the published tuner's legal runtime candidate domain.
+            if getattr(wrapper, "early_config_prune", None) is not None:
+                return None
+            try:
+                configs = cost_model.runtime_candidates(
+                    wrapper, wrapper._flagtune_op_name, options
+                )
+            except RuntimeError:
+                return None
+        if fixed is not None:
+            return next(
+                (
+                    config
+                    for config in configs
+                    if config.pre_hook is None and config.all_kwargs() == fixed
+                ),
+                None,
+            )
+        if cost_model_mode:
+            # The cost model skips prediction for a singleton. Preserve
+            # existing tuning when it could select another configuration.
+            if len(configs) != 1:
+                return None
+            named = {**dict(zip(wrapper.arg_names, args)), **options}
+            key = wrapper.get_key(
+                {k: named[k] for k in wrapper.arg_names if k in named}
+            )
+            if key in wrapper.cache:
+                cached = wrapper.cache[key]
+                if cached.all_kwargs() != configs[0].all_kwargs():
+                    return None
+        if len(configs) != 1 or configs[0].pre_hook is not None:
+            return None
+        return configs[0]
+
+    def compile_metadata(self, args, kwargs, grid):
+        from triton.runtime import Autotuner, Heuristics
+
+        wrapper = self.entry.fn
+        options = dict(kwargs, grid=grid)
+        tuned, heuristics = {}, {}
+        if isinstance(wrapper, Autotuner):
+            config = self.autotuner_config(wrapper, args, options)
+            if config is None:
+                return None
+            config_options = config.all_kwargs()
+            if options.keys() & config_options.keys():
+                return None
+            options.update(config_options)
+            tuned = config.kwargs
+            wrapper = wrapper.fn
+        while type(wrapper) is Heuristics:
+            named = dict(zip(wrapper.arg_names, args))
+            for name, heuristic in wrapper.values.items():
+                options[name] = heuristics[name] = heuristic({**named, **options})
+            wrapper = wrapper.fn
+        if wrapper is self.entry.jit_function:
+            return options, tuned, heuristics
+        return None
+
+    def prepare_native(self, *args, grid, **kwargs):
+        """Compile a specialization with known metadata before C++ submits it."""
+        if not self.compile_before_enqueue:
+            return False
+        kwargs.setdefault("warmup", False)
+        if kwargs["warmup"]:
+            return False
+        device = _C._get_device()
+        with self.entry.lock:
+            key = self.native_cache.missing_key(args, kwargs, device)
+            if key is None:
+                return True
+            values, options = self.restore_constexpr_types(args, kwargs)
+            metadata = self.compile_metadata(values, options, grid)
+            if metadata is None:
+                return False
+            options, tuned, heuristics = metadata
+            options["warmup"] = True
+            kernel = self.entry.jit_function.run(*values, **options)
+            constants = {
+                p.name: p.default
+                for p in self.params
+                if p.is_constexpr and p.has_default
+            }
+            constants.update(tuned)
+            constants.update(heuristics)
+            for name in ("num_warps", "num_stages", "num_ctas"):
+                if name in options:
+                    constants[name] = options[name]
+            variant = (
+                kernel,
+                kernel.run,
+                kernel.function,
+                kernel.packed_metadata,
+                constants,
+                tuned,
+                heuristics,
+                (),
+            )
+            self.native_cache.prepare(key, args, kwargs, variant)
+        return True
+
     def run(self, *args, grid, **kwargs):
         kwargs.setdefault("warmup", False)
         if kwargs["warmup"]:
-            return self.original.run(*args, grid=grid, **kwargs)
+            values, options = self.restore_constexpr_types(args, kwargs)
+            return self.original.run(*values, grid=grid, **options)
         device = _C._get_device()
         native = self.native_cache.run(args, kwargs, grid, device)
         if native is not None and not isinstance(native, bytes):
@@ -213,9 +385,10 @@ class KernelEntry:
             tuple((k, argument_key(v)) for k, v in sorted(kwargs.items())),
         )
         variant = self.cache.get(key)
+        values, options = self.restore_constexpr_types(args, kwargs)
         if variant is None:
             # Only a specialization miss enters the original compiler/tuner.
-            kernel, constants = self.entry.run(*args, grid=grid, **kwargs)
+            kernel, constants = self.entry.run(*values, grid=grid, **options)
             records = self.entry.kernel_cache[device].values()
             record = next(
                 item for item in records if item[0] is kernel and item[1] is constants
@@ -238,8 +411,8 @@ class KernelEntry:
         if native is not None:
             self.native_cache.prepare(native, args, kwargs, variant)
         kernel, launch, function, packed, constants, tuned, heuristics, hooks = variant
-        named = dict(zip(self.arg_names, args))
-        named.update(kwargs)
+        named = dict(zip(self.arg_names, values))
+        named.update(options)
         if callable(grid):
             grid = grid({**named, **constants})
         grid = tuple(grid) + (1, 1)
@@ -418,11 +591,18 @@ class PointwiseOverload:
                 all_complex,
                 major,
             ) = _pointwise_helpers
-            max_tile = config.max_tile_size // (2 if all_complex(schema) else 1)
-            fill = "fill_scalar" in owner._scalar_fn.__name__ and major >= 9
+            hygon = getattr(owner, "_native_pointwise_hygon", False)
+            max_tile = config.max_tile_size // (
+                2 if not hygon and all_complex(schema) else 1
+            )
+            fill = (
+                "fill_scalar" in owner._scalar_fn.__name__
+                and major >= 9
+                and (not hygon or config.prefer_1d_tile)
+            )
             task = (num_tasks,) if config.prefer_1d_tile else shape
             tile_sizes = (
-                (1024 if config.prefer_1d_tile else 64,)
+                (1024 if config.prefer_1d_tile and not hygon else 64,)
                 if fill
                 else tile_heuristic(max_tile, *task)
             )
@@ -432,7 +612,7 @@ class PointwiseOverload:
                 if config.prefer_1d_tile
                 else math.prod((s + t - 1) // t for s, t in zip(shape, tile_sizes))
             )
-            if config.balance_grid:
+            if not hygon and getattr(config, "balance_grid", False):
                 num_ctas, tiles_per_cta = balanced(num_tiles, config.max_grid_size[0])
             else:
                 num_ctas = (
@@ -479,12 +659,13 @@ def pointwise_instantiate(owner, ndim):
         )
     overload = owner.overloads.get(key)
     if overload is None:
+        kernels = _kernel_factory(owner, ndim)
         adapter = (
             EnflamePointwiseOverload
-            if hasattr(owner, "_native_pointwise_module")
+            if isinstance(kernels, tuple)
             else PointwiseOverload
         )
-        overload = adapter(owner, ndim, _kernel_factory(owner, ndim))
+        overload = adapter(owner, ndim, kernels)
         owner.overloads[key] = overload
     return overload
 

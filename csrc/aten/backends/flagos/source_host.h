@@ -3,9 +3,19 @@
 
 #pragma once
 
+#include <c10/core/GradMode.h>
+#include <c10/core/impl/LocalDispatchKeySet.h>
 #include "python_op_caller.h"
 
 namespace at::native::flagos {
+
+// ATen builds the derivative outside the backend kernel and excludes the
+// Autograd keys while it redispatches. The compiled host may run in that
+// region even if GradMode remains enabled for the caller.
+inline bool NativeSourceCanRun() {
+  return !c10::GradMode::is_enabled() ||
+      c10::impl::tls_is_dispatch_keyset_excluded(c10::autograd_dispatch_keyset);
+}
 
 // Registration is per function; shape handling stays in the generated body.
 using SourceHostEntry = bool (*)(const std::vector<c10::IValue>&, const std::vector<PyKwarg>&,

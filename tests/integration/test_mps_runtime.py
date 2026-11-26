@@ -29,6 +29,7 @@ attempting Metal on a machine that has none.
 import os
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -59,11 +60,107 @@ def test_empty_allocates_on_the_device():
     assert x.numel() == 16
 
 
+def test_scalar_graph_operands_with_cache_disabled(tmp_path):
+    program = """
+import torch
+import torch_fl
+for dtype in (torch.float32, torch.bfloat16):
+    value = torch.tensor([0.5], dtype=dtype)
+    actual = value.to("flagos:0").exp().cpu()
+    torch.testing.assert_close(actual, value.exp())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "FLAGOS_USE_CACHING_ALLOCATOR": "0",
+            "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+        },
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_fp32_rms_scale_matches_vendor_mps():
+    generator = torch.Generator().manual_seed(42)
+    values = torch.randn((1, 128, 1024), generator=generator).bfloat16().float()
+
+    def rms_scale(device):
+        squared = values.to(device).pow(2)
+        scale = torch.rsqrt(squared.mean(-1, keepdim=True) + 1e-6)
+        return squared.cpu(), scale.cpu()
+
+    for result, reference in zip(rms_scale(DEVICE), rms_scale("mps")):
+        torch.testing.assert_close(result, reference, rtol=0, atol=0)
+
+
 def test_host_to_device_round_trip():
     host = torch.arange(16, dtype=torch.float32).reshape(4, 4)
     device = host.to(DEVICE)
     assert device.device.type == "flagos"
     assert torch.equal(device.cpu(), host)
+
+
+@pytest.mark.parametrize("offset", [0, 16])
+def test_explicit_contiguous_clone_copies_token_ids(offset):
+    host = torch.arange(128).reshape(1, 128)
+    source = host.to(DEVICE)[:, offset:]
+    expected = host[:, offset:].clone(memory_format=torch.contiguous_format)
+    actual = source.clone(memory_format=torch.contiguous_format)
+    assert torch.equal(actual.cpu(), expected)
+    assert actual.stride() == expected.stride()
+    assert actual.untyped_storage().data_ptr() != source.untyped_storage().data_ptr()
+
+
+def test_float_to_bfloat16_cast_preserves_subnormals_and_rounds_ties():
+    bits = torch.tensor(
+        [
+            0x00008000,
+            0x00018000,
+            0x3F808000,
+            0x3F818000,
+            -(1 << 31),
+            0x7F800000,
+            0x7F800001,
+        ],
+        dtype=torch.int32,
+    )
+    host = bits.view(torch.float32)
+    actual = host.to(DEVICE).bfloat16().cpu()
+    assert torch.equal(actual.view(torch.int16), host.bfloat16().view(torch.int16))
+
+
+def test_bfloat16_to_float_cast_preserves_all_finite_bit_patterns():
+    bits = torch.arange(1 << 16).to(torch.int16)
+    finite = (bits & 0x7F80) != 0x7F80
+    host = bits[finite].view(torch.bfloat16)
+    actual = host.to(DEVICE).float().cpu()
+    assert torch.equal(actual.view(torch.int32), host.float().view(torch.int32))
+
+
+@pytest.mark.parametrize("use_default_stream", [True, False])
+def test_metadata_view_keeps_queued_graph_inputs_alive(use_default_stream):
+    streams = [None, None] if use_default_stream else [flagos.Stream(), flagos.Stream()]
+    reference = torch.arange(128, dtype=torch.float32).reshape(16, 8) / 128
+    device_inputs = []
+    for stream in streams:
+        with nullcontext() if stream is None else flagos.stream(stream):
+            device_inputs.append(reference.to(DEVICE))
+    results = []
+    for i in range(12):
+        stream = streams[i % 2]
+        with nullcontext() if stream is None else flagos.stream(stream):
+            value = device_inputs[i % 2] + i
+            view = torch.ops.aten._unsafe_view.default(value, [8, 16])
+            results.append(view.neg())
+            del value, view
+            torch.empty_like(device_inputs[i % 2]).zero_()
+    flagos.synchronize()
+    for i, result in enumerate(results):
+        torch.testing.assert_close(result.cpu(), -(reference + i).reshape(8, 16))
 
 
 def test_stream_and_timing_event_synchronize():

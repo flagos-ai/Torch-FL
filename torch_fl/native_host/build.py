@@ -11,10 +11,12 @@ from enum import Enum
 import hashlib
 import importlib
 import importlib.metadata
+import importlib.util
 import inspect
 import json
 from pathlib import Path
 import symtable
+import sys
 import types
 import textwrap
 
@@ -514,7 +516,9 @@ class HostSource(ast.NodeTransformer):
 
 def source_module(module, package, modules=()):
     path = Path(inspect.getsourcefile(module))
-    source = path.read_text()
+    published = path.read_bytes()
+    source = importlib.util.decode_source(published)
+    digest = hashlib.sha256(published).hexdigest()
     tree = ast.parse(source)
     definitions = []
     # A device function can be saved under an alias and then replaced by a
@@ -523,6 +527,15 @@ def source_module(module, package, modules=()):
     visible = {
         node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
     }
+    if (
+        path.parts[-3:] == ("_mthreads", "ops", "bmm.py")
+        and digest == "e68e99d9a16cb534dab59d399da0609168e47b39196963e52431adacd7c2794f"
+    ):
+        # This published SQMMA host chooses an FP16 output for BF16 operands.
+        # Select its original FMA branch, which allocates the result in BF16.
+        visible["is_sqmma_compatible"].body[:0] = ast.parse(
+            "if a.dtype == torch.bfloat16:\n    return False"
+        ).body
     classes = {"PointwiseDynamicFunction", "FunctionSchema", "StridedBuffer"}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and visible[node.name] is not node:
@@ -532,7 +545,15 @@ def source_module(module, package, modules=()):
         if isinstance(node, ast.FunctionDef) and isinstance(
             function, types.FunctionType
         ):
-            if function.__module__ == module.__name__:
+            if function.__module__ != module.__name__:
+                # A compatibility wrapper can replace the published module
+                # attribute while retaining the original as a closure input.
+                function = inspect.unwrap(function)
+                if getattr(function, "__name__", None) != node.name:
+                    continue
+            if isinstance(function, types.FunctionType) and (
+                function.__module__ == module.__name__
+            ):
                 if type(value).__name__ == "ConstexprFunction":
                     node.decorator_list = []
                 definitions.append(node)
@@ -670,7 +691,7 @@ if _native_result is not None:
     return "\n".join(header) + "\n\n" + body + "\n\n" + "\n".join(binder) + "\n", {
         "module": module.__name__,
         "source": str(path),
-        "sha256": hashlib.sha256(source.encode()).hexdigest(),
+        "sha256": digest,
         "functions": sorted(names),
         "globals": globals_used,
         "regions": [record for _, record in regions],
@@ -695,6 +716,9 @@ def collect_modules(functions):
     prefixes += (
         "flag_gems.runtime.backend._" + flag_gems.runtime.device.vendor_name + ".",
     )
+    if flag_gems.runtime.device.vendor_name == "kunlunxin":
+        # The published registrar loads this backend from a short import root.
+        prefixes += ("_kunlunxin.",)
     prefixes += tuple(
         {
             fn.__module__.split(".")[0] + ".utils"
@@ -705,7 +729,9 @@ def collect_modules(functions):
     )
     while pending:
         module = pending.pop()
-        if module.__name__ in modules:
+        # Device compatibility shims can provide constants in source-less
+        # modules. They remain available to the compiled hosts as imports.
+        if module.__name__ in modules or not getattr(module, "__file__", None):
             continue
         modules[module.__name__] = module
         for value in vars(module).values():
@@ -743,6 +769,34 @@ def collect_modules(functions):
             ):
                 pending.append(importlib.import_module(node.module))
     return modules
+
+
+def stage_rank_modules(provider, namespace, package, family):
+    """Stage the published rank-specialized generators before host compilation."""
+    modules, ranks = {}, {}
+    for rank in range(1, 9):
+        stem = f"_flaggems_{family}_rank_{rank}"
+        path = package / f"{stem}.py"
+        sample = types.SimpleNamespace(shape=(1,) * rank)
+        inputs = (sample,) if family == "pad" else (None, None, sample)
+        wrappers = (f"_{family}_wrapper",)
+        if family == "pad":
+            wrappers += ("_pad_wrapper_out",)
+        source = provider.generate_code(
+            inputs,
+            *wrappers,
+            f"_{family}_jit_rank_{rank}",
+            provider.IndentedBuffer(),
+        ).getvalue()
+        write_changed(path, source)
+        name = f"{namespace}.{stem}"
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        modules[name] = module
+        ranks[str(rank)] = name
+    return modules, ranks
 
 
 def closure_source(function, provider, attribute):
@@ -864,13 +918,17 @@ def main():
 
         for dependency in ("flag_gems", "flagtree"):
             if importlib.metadata.version(dependency) != sdk_policy[dependency]:
-                raise RuntimeError("unmeasured MetaX SDK precision dependency cohort")
-        catalog = json.loads(torch.ops.flagos.native_metax_sdk_catalog())
+                raise RuntimeError(
+                    f"unmeasured {vendor} SDK precision dependency cohort"
+                )
+        catalog = json.loads(
+            getattr(torch.ops.flagos, f"native_{vendor}_sdk_catalog")()
+        )
         if catalog["policy"] != sdk_policy:
             raise RuntimeError(
                 "rebuild the core after changing the SDK precision policy"
             )
-        libraries = dict(torch.ops.flagos.native_metax_sdk_libraries())
+        libraries = dict(getattr(torch.ops.flagos, f"native_{vendor}_sdk_libraries")())
         manifest["sdk_precision"] = {
             **catalog,
             "flag_gems": importlib.metadata.version("flag_gems"),
@@ -889,6 +947,13 @@ def main():
         from Cython.Build import cythonize
         from Cython.Compiler import Options
 
+        if _build_config.ACCELERATOR == "kunlunxin":
+            from flag_gems.runtime.backend import SpecOpRegistrar
+
+            # Build-time device discovery can leave the public attributes
+            # pointing at generic providers. Stage the vendor's own selection.
+            SpecOpRegistrar(registry=vars(flag_gems), vendor="kunlunxin").apply()
+
         # Version-gated FlagGems branches may name APIs absent from this Torch
         # wheel. Preserve Python's NameError only if that branch is executed.
         Options.error_on_unknown_names = False
@@ -902,6 +967,12 @@ def main():
                     and hasattr(flag_gems, function.__name__)
                 }
             )
+        if _build_config.ACCELERATOR == "nvidia":
+            # The rank-three loss providers back generated ATen out adapters.
+            # FlagGems exports them without including them in _FULL_CONFIG.
+            args.functions = sorted(
+                set(args.functions) | {"nll_loss_nd_forward", "nll_loss_nd_backward"}
+            )
         functions = [getattr(flag_gems, name) for name in args.functions]
         registry_functions = [
             function
@@ -909,12 +980,26 @@ def main():
             if isinstance(function, types.FunctionType)
         ]
         policy = source_policy_for_build(_build_config, source_root)
-        alternatives = source_variants.load(policy)
+        bytecode = source_variants.build_bytecode(policy, package)
+        alternatives = source_variants.load(
+            policy, package=package, bytecode=bytecode, namespace=namespace
+        )
         if policy is not None:
             manifest["source_variants"] = policy
+        if bytecode:
+            manifest["source_variant_bytecode"] = bytecode
         modules = collect_modules(
             functions + registry_functions + list(alternatives.values())
         )
+        for family, name, key in (
+            ("pad", "flag_gems.ops.pad", "padding_ranks"),
+            ("index_copy", "flag_gems.ops.index_copy_", "index_copy_ranks"),
+        ):
+            if name in modules:
+                generated, manifest[key] = stage_rank_modules(
+                    modules[name], namespace, package, family
+                )
+                modules.update(generated)
         cython_extensions = []
         runtime = source_dir / "runtime.pyx"
         write_changed(
@@ -994,7 +1079,7 @@ def main():
     (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     license_dir = package / "licenses"
     license_dir.mkdir(exist_ok=True)
-    for provider in ("torch", "flag_gems", "flagtree"):
+    for provider in ("torch", "flag_gems", backend.config.compiler_distribution):
         distribution = importlib.metadata.distribution(provider)
         for source in distribution.files or ():
             if source.name.lower().startswith(
@@ -1057,6 +1142,13 @@ def main():
             "coverage": typed["coverage"],
         }
         (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    from torch_fl import _env
+    from torch_fl.native_host import device_artifacts
+
+    device_bundle = _env.value(device_artifacts.BUILD_BUNDLE)
+    record_data = getattr(backend, "record_device_artifact_data", None)
+    backend_data = record_data(triton_root) if device_bundle and record_data else None
+    device_artifacts.stage(device_bundle, package, backend_data=backend_data)
     print(json.dumps({"output": str(output), "host_modules": len(extensions)}))
 
 

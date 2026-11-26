@@ -24,7 +24,8 @@ Sources& Registry() {
 
 TypedSourceSlot::TypedSourceSlot(const char* op, const char* host, const char* abi,
                                  const char* catalog)
-    : op(op), host(host), abi(abi), catalog(catalog) {
+    : op(op), host(host), abi(abi), catalog(catalog),
+      scalar_factory_(std::string_view(op) == "aten::scalar_tensor") {
   auto& registry = Registry();
   std::lock_guard<std::mutex> lock(registry.mutex);
   TORCH_CHECK(registry.slots.emplace(op, this).second, "duplicate typed source slot: ", op);

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -151,6 +152,39 @@ def source_module(tmp_path, monkeypatch):
     return load
 
 
+def test_source_manifest_records_published_line_endings(source_module):
+    original = source_module("def host(value):\r\n    return value + 1\r\n")
+    _, record = build.source_module(original, "fg_aot")
+    published = Path(original.__file__).read_bytes()
+    assert b"\r\n" in published
+    assert record["sha256"] == hashlib.sha256(published).hexdigest()
+
+
+def test_collect_modules_keeps_device_metadata_as_a_source_less_import(
+    source_module, monkeypatch
+):
+    name = "flag_gems.runtime.backend._cambricon.utils"
+    metadata = types.ModuleType(name)
+    metadata.TOTAL_CORE_NUM = 48
+    monkeypatch.setitem(sys.modules, name, metadata)
+    flag_gems = types.ModuleType("flag_gems")
+    flag_gems.runtime = types.SimpleNamespace(
+        device=types.SimpleNamespace(vendor_name="cambricon")
+    )
+    monkeypatch.setitem(sys.modules, "flag_gems", flag_gems)
+    for module in ("flag_gems.utils.pointwise_dynamic", "triton"):
+        monkeypatch.setitem(sys.modules, module, types.ModuleType(module))
+    provider = source_module(f"""
+def host():
+    from {name} import TOTAL_CORE_NUM
+    return TOTAL_CORE_NUM
+""")
+    modules = build.collect_modules([provider.host])
+    assert modules == {provider.__name__: provider}
+    compiled, _ = build.source_module(provider, "fg_aot", modules)
+    assert f"from {name} import TOTAL_CORE_NUM" in compiled
+
+
 def test_source_generation_keeps_unexecuted_branches_and_loops(source_module):
     original = source_module("""
 calls = []
@@ -212,6 +246,24 @@ wrapped = decorate(target)
     )
     assert closure(5) == 22
     assert closure(8) == 31
+
+
+def test_source_generation_keeps_provider_behind_a_compatibility_wrapper(source_module):
+    provider = source_module("def host(value):\n    return value * 3\n")
+    original = provider.host
+
+    def wrapper(value):
+        return original(value) + 7
+
+    wrapper.__wrapped__ = original
+    provider.host = wrapper
+    source, record = build.source_module(provider, "fg_aot")
+    generated = {}
+    exec(source, generated)
+
+    assert generated["host"](5) == 15
+    assert provider.host(5) == 22
+    assert record["functions"] == ["host"]
 
 
 def test_identical_source_does_not_touch_build_artifact(tmp_path):

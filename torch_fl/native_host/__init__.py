@@ -57,6 +57,21 @@ def audit():
     return _hosts.audit()
 
 
+def collect_device_build_outputs():
+    """Record generated pointwise sources for an isolated device build."""
+    if _hosts is None:
+        raise RuntimeError("the wheel was built without native FlagGems hosts")
+    _hosts.pointwise_build_outputs = {}
+
+
+def enqueue_origins():
+    """Return process-wide C++ and Python-argument enqueues by kernel name."""
+    launcher = _model_runtime()
+    if launcher is None or not hasattr(launcher, "enqueue_origins"):
+        raise RuntimeError("install a Native Host wheel with enqueue-origin counters")
+    return launcher.enqueue_origins()
+
+
 def execution_scope(device=None):
     """Bind the current device-library stream while ordinary eager code runs."""
     from .vendor import stream_scope

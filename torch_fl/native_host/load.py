@@ -5,24 +5,57 @@
 
 import ast
 from contextvars import ContextVar
-from functools import wraps
+from functools import cache, wraps
 import hashlib
 import importlib
 import importlib.util
 import inspect
 import json
 import logging
+import os
 from pathlib import Path
 import shlex
 import sys
 import types
+
+_COMPILE_BEFORE_ENQUEUE = frozenset(
+    {
+        "ascend",
+        "cambricon",
+        "enflame",
+        "hygon",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "mthreads",
+        "nvidia",
+        "thead",
+        "tsingmicro",
+    }
+)
+_SINGLETON_TUNER_SOURCES = {
+    "flag_gems.flagtune.cost_model": "e50a33b2950f5170041ab03a54a19d355a7ac3b4610254e9f15b04f57e280a62",
+    "flag_gems.utils.libentry": "a6bcda6d615748d4ec1be4119f245e62002d5347a4b5e983a21cb6dff933d720",
+}
 
 _native_commands = []
 _admitted_kernels = {}
 _launched_kernels = {}
 _audit_installed = False
 _launcher_module = None
+_device_artifacts = None
 _inductor_autotuner = ContextVar("inductor_autotuner", default=None)
+
+
+@cache
+def _verified_singleton_tuner():
+    for module, expected in _SINGLETON_TUNER_SOURCES.items():
+        spec = importlib.util.find_spec(module)
+        if spec is None or not spec.origin or not Path(spec.origin).is_file():
+            return False
+        if hashlib.sha256(Path(spec.origin).read_bytes()).hexdigest() != expected:
+            return False
+    return True
 
 
 def audit_native_compilers(event, values):
@@ -135,10 +168,19 @@ def _validate_launcher(record, package, path, launcher):
 
 
 def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
-    global _audit_installed, _launcher_module
+    global _audit_installed, _launcher_module, _device_artifacts
+    from torch_fl import _env
     from torch_fl.flagos._streams import get_raw_stream
     from torch_fl.native_host.backends.driver import install_driver
+    from torch_fl.native_host import device_artifacts
 
+    required = enforce_native_compilation and _env.flag(
+        device_artifacts.REQUIRE_ARTIFACTS
+    )
+    if required:
+        # FlagGems builds an empty SQL registry during import even when there is
+        # no tuning. Keep that initialization process-local in strict eager.
+        os.environ["FLAGGEMS_DB_URL"] = "sqlite:///:memory:"
     package_module = importlib.import_module(package)
     path = Path(package_module.__file__).parent
     manifest = json.loads((path / "manifest.json").read_text())
@@ -147,6 +189,15 @@ def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
         manifest.get("backend"), package, path, _launcher_module
     )
     install_driver(backend, package, get_raw_stream, kernel_launcher)
+    if enforce_native_compilation:
+        device_artifacts.stabilize_scan_key()
+        _device_artifacts = device_artifacts.install(
+            path / device_artifacts.ARTIFACT_DIRECTORY,
+            required=required,
+        )
+        install_data = getattr(backend, "install_device_artifact_data", None)
+        if required and install_data is not None:
+            install_data(_device_artifacts.backend_data)
     if enforce_native_compilation and not _audit_installed:
         sys.addaudithook(audit_native_compilers)
         _audit_installed = True
@@ -179,13 +230,22 @@ class Hosts:
         self.path = Path(path)
         self.artifacts = self._artifacts()
         self.manifest = json.loads((self.path / "manifest.json").read_text())
+        self.package = self.manifest.get("package", "fg_aot")
+        self.source_variant_functions = {}
         if "source_variants" in self.manifest:
             from torch_fl.native_host.source_variants import (
                 load as load_source_variants,
             )
 
-            load_source_variants(
-                self.manifest["source_variants"], self.manifest["modules"]
+            bytecode = self.manifest.get("source_variant_bytecode")
+            if _device_artifacts is not None and _device_artifacts.required:
+                bytecode = bytecode or {}
+            self.source_variant_functions = load_source_variants(
+                self.manifest["source_variants"],
+                self.manifest["modules"],
+                package=self.path,
+                bytecode=bytecode,
+                namespace=self.package,
             )
         self.original_ops = {
             name: getattr(flag_gems, name)
@@ -199,20 +259,45 @@ class Hosts:
             raise RuntimeError(
                 "native hosts require their build-time Torch/FlagTree cohort"
             )
-        self.package = self.manifest.get("package", "fg_aot")
         _launcher = importlib.import_module(self.package + "._launcher")
-        _validate_launcher(
+        self.backend = _validate_launcher(
             self.manifest.get("backend"), self.package, self.path, _launcher
         )
         runtime = importlib.import_module(self.package + ".runtime")
         self.modules = {}
         self.originals = {}
         self.objects = {}
+        self.pointwise_build_outputs = None
         self.closures = {
             identity: importlib.import_module(self.package + "." + record["module"])
             for identity, record in self.manifest.get("closures", {}).items()
         }
         self.provenance = []
+        self.padding_ranks = self.manifest.get("padding_ranks", {})
+        self.index_copy_ranks = self.manifest.get("index_copy_ranks", {})
+        self.generated_kernel_sources = {
+            (self.path / f"_flaggems_{family}_rank_{int(rank)}.py").resolve(): (
+                name,
+                generator,
+            )
+            for family, ranks, generator in (
+                ("pad", self.padding_ranks, "flag_gems.ops.pad.generate_code"),
+                (
+                    "index_copy",
+                    self.index_copy_ranks,
+                    "flag_gems.ops.index_copy_.generate_code",
+                ),
+            )
+            for rank, name in ranks.items()
+        }
+        for row in self.manifest.get("source_variants", {}).get("entries", ()):
+            if row.get("adaptation"):
+                function = self.source_variant_functions[row["id"]]
+                path = Path(inspect.getsourcefile(function)).resolve()
+                self.generated_kernel_sources[path] = (
+                    function.__module__,
+                    row["adaptation"],
+                )
         self.LibEntry = LibEntry
         self.Pointwise = PointwiseDynamicFunction
         self.runtime = runtime
@@ -220,8 +305,20 @@ class Hosts:
             str(Path(torch_fl.__file__).parent / "lib/libflagos.so")
         )
         for name, record in self.manifest["modules"].items():
+            if (
+                name in self.padding_ranks.values()
+                or name in self.index_copy_ranks.values()
+            ):
+                source = (self.path / (name.rsplit(".", 1)[1] + ".py")).resolve()
+                if (
+                    self.generated_kernel_sources.get(source, (None, None))[0] != name
+                    or name != f"{self.package}.{source.stem}"
+                    or hashlib.sha256(source.read_bytes()).hexdigest()
+                    != record["sha256"]
+                ):
+                    raise RuntimeError(f"generated rank source changed: {name}")
             original = importlib.import_module(name)
-            source = Path(inspect.getsourcefile(original))
+            source = Path(inspect.getsourcefile(original)).resolve()
             if hashlib.sha256(source.read_bytes()).hexdigest() != record["sha256"]:
                 raise RuntimeError(f"FlagGems host source changed: {name}")
             self.originals[name] = original
@@ -278,18 +375,30 @@ class Hosts:
             entry = value if isinstance(value, self.LibEntry) else self.LibEntry(value)
             jit = entry.jit_function
             source = Path(inspect.getsourcefile(jit.fn)).resolve()
-            if "flag_gems" not in source.parts:
+            generated = self.generated_kernel_sources.get(source)
+            if "flag_gems" not in source.parts and generated is None:
                 raise RuntimeError(f"device kernel is not from FlagGems: {source}")
+            source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            vendor = self.manifest["backend"]["vendor"]
             self.provenance.append(
                 {
                     "kernel": jit.__name__,
                     "source": str(source),
-                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                    "sha256": source_hash,
                     "jit_sha256": hashlib.sha256(jit.src.encode()).hexdigest(),
                 }
             )
+            if generated is not None:
+                self.provenance[-1]["generator"] = generated[1]
             _admitted_kernels[id(jit)] = self.provenance[-1]
-            found = self.runtime.KernelEntry(value, entry)
+            eager_configs = getattr(self.backend, "eager_kernel_configs", {})
+            found = self.runtime.KernelEntry(
+                value,
+                entry,
+                compile_before_enqueue=vendor in _COMPILE_BEFORE_ENQUEUE,
+                permit_single_config=_verified_singleton_tuner(),
+                eager_config=eager_configs.get((jit.__name__, source_hash)),
+            )
         elif isinstance(value, types.FunctionType):
             identity = function_identity(value)
             if identity in self.closures:
@@ -338,6 +447,27 @@ class Hosts:
                     found._capture_output_pool = {}
                     if not isinstance(value, self.Pointwise):
                         found._native_pointwise_module = kind.__module__
+                        found._native_pointwise_hygon = kind.__module__ in {
+                            "_hygon.utils.pointwise_dynamic",
+                            "flag_gems.runtime.backend._hygon.utils.pointwise_dynamic",
+                        }
+                elif (
+                    self.padding_ranks
+                    and kind is self.originals["flag_gems.ops.pad"].PadFunction
+                ):
+                    found.overloads = {
+                        rank: self.modules[name]._pad_wrapper
+                        for rank, name in self.padding_ranks.items()
+                    }
+                elif (
+                    self.index_copy_ranks
+                    and kind
+                    is self.originals["flag_gems.ops.index_copy_"].IndexCopyFunction
+                ):
+                    found.overloads = {
+                        int(rank): self.modules[name]._index_copy_wrapper
+                        for rank, name in self.index_copy_ranks.items()
+                    }
             else:
                 return value
         self.objects[id(value)] = found
@@ -350,39 +480,147 @@ class Hosts:
             owner, "_native_pointwise_module", "flag_gems.utils.pointwise_dynamic"
         )
         pointwise = self.originals[provider]
+        cambricon = provider in {
+            "_cambricon.utils.pointwise_dynamic",
+            "flag_gems.runtime.backend._cambricon.utils.pointwise_dynamic",
+        } and hashlib.sha256(Path(pointwise.__file__).read_bytes()).hexdigest() == (
+            "d7ba2e471aa41b638c70b0ffa635e59aa4ce43ab7e4da8a00f95bf557ff5cd8f"
+        )
+        tsingmicro = (
+            provider.removeprefix("flag_gems.runtime.backend.")
+            == "_tsingmicro.utils.pointwise_dynamic"
+            and (
+                owner._scalar_fn.__module__.removeprefix("flag_gems.runtime.backend."),
+                owner._scalar_fn.__name__,
+            )
+            in {
+                ("_tsingmicro.ops.add", "add_func"),
+                ("_tsingmicro.ops.add", "add_func_tensor_scalar"),
+                ("_tsingmicro.ops.copy", "_copy_kernel"),
+                ("_tsingmicro.ops.mul", "mul_func"),
+                ("_tsingmicro.ops.mul", "mul_func_scalar"),
+                ("_tsingmicro.ops.pow", "pow_func_tensor_scalar"),
+                ("_tsingmicro.ops.rsqrt", "rsqrt_func"),
+            }
+            and hashlib.sha256(Path(pointwise.__file__).read_bytes()).hexdigest()
+            == "c75ec27aab2176c1a85fa023137513073a11b950741741feaf679c1ec01c3276"
+        )
+        if cambricon or tsingmicro:
+            # Keep the published scalar kernel and generate its host-facing
+            # device entry with the shared pointwise ABI.
+            scalar_provider = provider
+            provider = "flag_gems.utils.pointwise_dynamic"
+            pointwise = self.originals[provider]
+        kunlunxin = provider in {
+            "_kunlunxin.utils.pointwise_dynamic",
+            "flag_gems.runtime.backend._kunlunxin.utils.pointwise_dynamic",
+        } and hashlib.sha256(Path(pointwise.__file__).read_bytes()).hexdigest() == (
+            "4a6edc2c57e3a8f1772430ad3cccbac55560d502c8520d0e4336826cfedebf56"
+        )
+        owner._native_pointwise_kunlunxin = kunlunxin
+        single_kernel = (
+            provider == "flag_gems.utils.pointwise_dynamic"
+            or getattr(owner, "_native_pointwise_hygon", False)
+            or kunlunxin
+        )
 
         name = f"{owner._scalar_fn.__name__}_kernel_rank_{ndim}"
-        generator = pointwise.ModuleGenerator(
-            owner.fx, owner._scalar_fn, ndim, name, "unused_host", owner.config
+        from torch_fl.native_host.device_artifacts import (
+            PointwiseArtifactLoader,
+            pointwise_key,
         )
-        code = pointwise.IndentedBuffer()
-        generator.generate_imports(code)
-        if provider != "flag_gems.utils.pointwise_dynamic":
-            helpers = [
-                node.module
-                for node in ast.walk(ast.parse(code.getvalue()))
-                if isinstance(node, ast.ImportFrom)
-                and any(
-                    alias.name == "heuristics_for_tile_size_with_mmu_constraint"
-                    for alias in node.names
+
+        key = None
+        if _device_artifacts is not None or self.pointwise_build_outputs is not None:
+            original_provider = getattr(
+                owner, "_native_pointwise_module", "flag_gems.utils.pointwise_dynamic"
+            )
+            key = pointwise_key(owner, original_provider, ndim)
+        artifact = (
+            None
+            if _device_artifacts is None
+            else _device_artifacts.pointwise_module(key)
+        )
+        if artifact is None:
+            config = owner.config
+            if tsingmicro and not hasattr(config, "balance_grid"):
+                config = types.SimpleNamespace(**vars(config), balance_grid=False)
+            generator = pointwise.ModuleGenerator(
+                owner.fx, owner._scalar_fn, ndim, name, "unused_host", config
+            )
+            code = pointwise.IndentedBuffer()
+            generator.generate_imports(code)
+            if not single_kernel:
+                helpers = [
+                    node.module
+                    for node in ast.walk(ast.parse(code.getvalue()))
+                    if isinstance(node, ast.ImportFrom)
+                    and any(
+                        alias.name == "heuristics_for_tile_size_with_mmu_constraint"
+                        for alias in node.names
+                    )
+                ]
+                if len(helpers) != 1:
+                    raise RuntimeError(
+                        f"unsupported published pointwise host ABI: {provider}"
+                    )
+                owner._native_pointwise_helpers = helpers[0]
+            if owner.config.prefer_1d_tile:
+                generator.kernel_gen.codegen_1d_tile(code)
+            else:
+                generator.kernel_gen.codegen_nd_tile(code)
+            text = code.getvalue()
+            if cambricon or tsingmicro:
+                text = text.replace(
+                    "from utils.pointwise_dynamic import ",
+                    f"from {scalar_provider} import ",
                 )
-            ]
-            if len(helpers) != 1:
-                raise RuntimeError("unsupported published vendor pointwise host ABI")
-            owner._native_pointwise_helpers = helpers[0]
-        if owner.config.prefer_1d_tile:
-            generator.kernel_gen.codegen_1d_tile(code)
+            for source in self.manifest.get("source_variants", {}).get("entries", ()):
+                if (
+                    source.get("shared_pointwise")
+                    and source["module"] == owner._scalar_fn.__module__
+                ):
+                    # The published generator drops the relative-import level when
+                    # collecting this provider's dependencies. Use the same shared
+                    # pointwise module that loaded the verified scalar functions.
+                    text = text.replace(
+                        "from utils.pointwise_dynamic import pointwise_dynamic\n",
+                        "from flag_gems.utils.pointwise_dynamic import pointwise_dynamic\n",
+                    )
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            path = pointwise.code_cache_dir() / f"native_host_kernel_{digest}.py"
+            cache_writer = (
+                self.originals["flag_gems.utils.pointwise_dynamic"]
+                if kunlunxin
+                else pointwise
+            )
+            cache_writer.write_atomic(str(path), text)
+            spec = importlib.util.spec_from_file_location(f"_fg_device_{digest}", path)
+            if self.pointwise_build_outputs is not None:
+                self.pointwise_build_outputs[key] = {
+                    "path": str(path),
+                    "sha256": digest,
+                    "helpers": getattr(owner, "_native_pointwise_helpers", None),
+                }
         else:
-            generator.kernel_gen.codegen_nd_tile(code)
-        text = code.getvalue()
-        digest = hashlib.sha256(text.encode()).hexdigest()
-        path = pointwise.code_cache_dir() / f"native_host_kernel_{digest}.py"
-        pointwise.write_atomic(str(path), text)
-        spec = importlib.util.spec_from_file_location(f"_fg_device_{digest}", path)
+            path, helpers = artifact
+            if helpers is not None:
+                owner._native_pointwise_helpers = helpers
+            digest = path.stem.rsplit("_", 1)[1]
+            module_name = f"_fg_device_{digest}"
+            spec = importlib.util.spec_from_file_location(
+                module_name,
+                path,
+                loader=PointwiseArtifactLoader(module_name, str(path)),
+            )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         module.__dict__.update(owner._scalar_fn.__globals__)
         module.__dict__[owner._scalar_fn.__name__] = owner._scalar_fn
+        reuse_runtime_floats = self.manifest["backend"]["vendor"] == "hygon" and (
+            owner._scalar_fn.__name__
+            in {"true_div_func_tensor_scalar", "addcdiv_kernel"}
+        )
         entries = []
         for kernel_name in (name, name + "_stride_constexpr"):
             if not hasattr(module, kernel_name):
@@ -401,13 +639,18 @@ class Hosts:
                 }
             )
             _admitted_kernels[id(entry.jit_function)] = self.provenance[-1]
-            entries.append(self.runtime.KernelEntry(entry, entry))
+            entries.append(
+                self.runtime.KernelEntry(
+                    entry,
+                    entry,
+                    reuse_runtime_floats,
+                    compile_before_enqueue=self.manifest["backend"]["vendor"]
+                    in _COMPILE_BEFORE_ENQUEUE,
+                    permit_single_config=_verified_singleton_tuner(),
+                )
+            )
         # Generated device code is admitted only through the wheel's generator.
-        return (
-            entries[0]
-            if provider == "flag_gems.utils.pointwise_dynamic"
-            else tuple(entries)
-        )
+        return entries[0] if single_kernel else tuple(entries)
 
     def op(self, name):
         return self.resolve(self.original_ops[name])
@@ -442,6 +685,10 @@ class Hosts:
             )(),
             "source_variant_hits": hits,
             "subprocess_commands": _native_commands,
+            "pointwise_sources": self.pointwise_build_outputs or {},
+            "device_artifacts": None
+            if _device_artifacts is None
+            else _device_artifacts.audit(),
             "launched_kernels": _launched_kernels,
             "enqueued_kernels": _launcher_module.enqueue_stats()
             if hasattr(_launcher_module, "enqueue_stats")
@@ -460,6 +707,8 @@ class Hosts:
             )
         if getattr(_build_config, "NATIVE_HOSTS", False):
             torch.ops.flagos.strict_host_routes(True)
+        if _device_artifacts is not None and _device_artifacts.required:
+            _device_artifacts.block_tuning_writes()
         for name in self.manifest["ops"]:
             function = self.op(name)
             setattr(flag_gems, name, function)

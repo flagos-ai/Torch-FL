@@ -704,3 +704,33 @@ steps:
       python -m pytest tests/integration/ops/test_hygon_native_hosts.py
       tests/integration/ops/test_hygon_native_routes.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"
+
+  - id: native_source_hosts_mthreads_bmm
+    name: Native Moore Threads BF16 BMM regression
+    platforms: [mthreads]
+    min_passed: 1
+    command: >-
+      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
+      python -m pytest tests/integration/ops/test_bmm_dispatch.py
+      -k bmm_bfloat16_attention_preserves_dtype -v --tb=short
+
+  - id: native_source_hosts_thead_matmul_and_copy
+    name: Native T-Head matmul, copy, and precision regressions
+    platforms: [thead]
+    min_passed: 5
+    command: >-
+      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
+      python -m pytest tests/integration/ops/test_mm_dispatch.py
+      tests/integration/ops/test_dtype_cast_copy.py
+      tests/integration/ops/test_thead_vendor_precision.py
+      -k "ppu_empty_matmul or thead_native_clone or thead_mul_preserves or thead_cat_preserves"
+      -v --tb=short
+
+  - id: kunlunxin_precision
+    name: Kunlunxin SDK arithmetic precision
+    platforms: [kunlunxin]
+    min_passed: 4
+    command: >-
+      python -m pytest tests/integration/ops/test_kunlunxin_linear_precision.py
+      tests/integration/ops/test_mul_scalar_dispatch.py
+      tests/integration/ops/test_pow_dispatch.py -m kunlunxin -v --tb=short

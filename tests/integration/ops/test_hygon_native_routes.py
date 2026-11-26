@@ -126,13 +126,14 @@ def test_hcu_precision_entries_are_installed_without_boxing():
     assert "boxing" not in _build_config.KERNELS
     record = vendor.audit()
     assert record["vendor"] == "hygon"
-    assert {row["op"] for row in record["catalog"]} == {
+    assert {
         "bmm",
         "mm",
+        "cat",
         "_softmax",
         "mean.dim",
         "rsqrt",
-    }
+    } <= {row["op"] for row in record["catalog"]}
     assert all(row["vendor"] == "hygon" for row in record["catalog"])
 
 
@@ -252,6 +253,7 @@ def test_hcu_native_precision_restores_device_and_stream(other_device, new_strea
                 (lambda: fp.mean(-1), (a + 1).mean(-1)),
                 (lambda: fp.rsqrt(), (a + 1).rsqrt()),
                 (lambda: fp.softmax(-1), (a + 1).softmax(-1)),
+                (lambda: torch.cat([fp.T, fp.T], -1), torch.cat([(a + 1).T] * 2, -1)),
             )
             for call, expected in calls:
                 torch_fl.flagos.set_device(initial)
@@ -267,7 +269,7 @@ def test_hcu_native_precision_restores_device_and_stream(other_device, new_strea
         for result, expected in retained:
             torch.testing.assert_close(result.cpu(), expected, rtol=2e-5, atol=1e-6)
         after = vendor.audit()["hits"]
-        for name in ("mm", "bmm", "mean.dim", "rsqrt", "_softmax"):
+        for name in ("mm", "bmm", "cat", "mean.dim", "rsqrt", "_softmax"):
             assert after[name] == before[name] + 1
     finally:
         torch_fl.flagos.set_device(initial)

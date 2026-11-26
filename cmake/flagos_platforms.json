@@ -84,7 +84,8 @@
     "cuda": {
       "vendor": "nvidia",
       "registration": {
-        "flaggems": "generated/register_flaggems_nvidia.inc"
+        "flaggems": "generated/register_flaggems_nvidia.inc",
+        "native_host": "generated/register_native_vendor_nvidia.inc"
       },
       "_comment": [
         "NVIDIA CUDA. FlagGems serves the default operator routes. Optional",
@@ -114,7 +115,8 @@
     "ppu": {
       "vendor": "thead",
       "registration": {
-        "flaggems": "generated/register_flaggems_thead.inc"
+        "flaggems": "generated/register_flaggems_thead.inc",
+        "native_host": "generated/register_native_vendor_thead.inc"
       },
       "_comment": [
         "T-Head PPU uses the PPU SDK CUDA-compatible runtime and FlagGems.",
@@ -312,7 +314,9 @@
       "vendor": "tsingmicro",
       "registration": {
         "flaggems": "generated/register_flaggems_tsingmicro.inc",
-        "base": "generated/register_tsingmicro.inc"
+        "base": "generated/register_tsingmicro.inc",
+        "vendor": "backends/tsingmicro/generated/txdnn_register.inc",
+        "native_host": "generated/register_flaggems_tsingmicro_native_host.inc"
       },
       "_comment": [
         "TsingMicro Kuiper uses FlagGems Python for its operator routes.",
@@ -355,7 +359,8 @@
     "dcu": {
       "vendor": "hygon",
       "registration": {
-        "flaggems": "generated/register_flaggems_hygon.inc"
+        "flaggems": "generated/register_flaggems_hygon.inc",
+        "native_host": "generated/register_native_vendor_hygon.inc"
       },
       "_comment": [
         "Hygon uses the DTK device runtime and FlagGems with the official",

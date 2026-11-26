@@ -80,7 +80,7 @@ def test_registered_backend_must_implement_the_adapter_interface(monkeypatch):
         ("abi_version", 0),
         ("vendor", "unregistered"),
         ("compiler_backend", "foreign"),
-        ("capabilities", 0),
+        ("capabilities", 1 << 15),
         ("compiler_distribution", {"name": "flagtree", "version": "0.8.0"}),
     ],
 )
@@ -89,6 +89,35 @@ def test_changed_contract_is_rejected(contract, field, value):
     record[field] = value
     with pytest.raises(RuntimeError, match="contract|ABI"):
         backend.validate_record(record, adapter, root, compiled)
+
+
+def test_tsingmicro_launch_uses_word_slots_and_promotes_half_scalars():
+    adapter = import_native_host("backends.tsingmicro")
+    signature = {0: "*bf16", 1: ("bf16", "i16"), 2: "constexpr", 3: "i64"}
+    normalized, widths = adapter._launcher_signature(signature)
+    assert normalized == {0: "*bf16", 1: ("fp32", "i16"), 2: "constexpr", 3: "i64"}
+    assert widths == [0, 4, 2, 8]
+
+
+def test_tsingmicro_launch_preserves_the_admitted_source(monkeypatch):
+    adapter = import_native_host("backends.tsingmicro")
+    factories = []
+
+    def bind(module, symbols, utilities, create, stream, **options):
+        factories.append(create)
+
+    monkeypatch.setattr(adapter, "bind_driver", bind)
+    adapter.Backend().bind_driver(None, None, lambda src, meta: (src, meta), None)
+    original = SimpleNamespace(
+        fn=object(), signature={"input": "*bf16", "value": "bf16"}
+    )
+    metadata = SimpleNamespace(_asdict=lambda: {"name": "published"})
+
+    source, fields = factories[0](original, metadata)
+
+    assert source.fn is original.fn
+    assert source.signature == {"input": "*bf16", "value": "fp32"}
+    assert fields.argument_widths == [0, 4]
 
 
 @pytest.mark.parametrize("kind", ["driver", "adapter", "shared_binding", "native"])
@@ -143,6 +172,9 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
     ]
     assert str(NATIVE_SOURCE) in launcher.include_dirs
     assert str(NATIVE_SOURCE / "backend_api.h") in launcher.depends
+    stamp = source_dir / "launcher.sha256"
+    assert str(stamp) in launcher.depends
+    assert stamp.read_text() == record["native_source_sha256"] + "\n"
     for header in adapter.config.shared_headers:
         assert str(NATIVE_SOURCE / header) in launcher.depends
         assert f"csrc/{header}" in record["native_sources"]
@@ -229,13 +261,23 @@ def test_shared_launch_parameters_are_part_of_the_backend_contract(contract):
         backend.validate_record(record, adapter, root, compiled)
 
 
-def test_musa_launcher_packs_the_published_target_and_descriptors():
+@pytest.mark.parametrize("descriptor_width_in_metadata", [True, False])
+def test_musa_launcher_packs_the_published_target_and_descriptors(
+    monkeypatch, descriptor_width_in_metadata
+):
     musa = import_native_host("backends.mthreads")
     signature = {"descriptor": "tensordesc<fp16[16,32]>", "length": "i32"}
     source = SimpleNamespace(
         fn=SimpleNamespace(arg_names=("length", "descriptor")), signature=signature
     )
-    entry = {"block_size": (16, 32), "elem_size": 2}
+    entry = {"block_size": (16, 32)}
+    if descriptor_width_in_metadata:
+        entry["elem_size"] = 2
+    monkeypatch.setitem(
+        sys.modules,
+        "triton.language",
+        SimpleNamespace(dtype=lambda name: SimpleNamespace(primitive_bitwidth=16)),
+    )
     metadata = SimpleNamespace(
         target=SimpleNamespace(warp_size=128), tensordesc_meta=[entry]
     )
@@ -249,7 +291,7 @@ def test_musa_launcher_packs_the_published_target_and_descriptors():
     assert parameters.warp_size == 128
     assert parameters.global_scratch_size == parameters.profile_scratch_size == 0
     assert parameters.tensordesc_meta == (
-        {**entry, "elem_type": 4, "nan_fill": 0x7E00},
+        {**entry, "elem_size": 2, "elem_type": 4, "nan_fill": 0x7E00},
     )
     metadata.debug_launch_hidden_arg = True
     with pytest.raises(RuntimeError, match="debugger arguments"):

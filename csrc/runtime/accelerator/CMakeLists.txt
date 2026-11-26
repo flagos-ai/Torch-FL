@@ -105,7 +105,8 @@ if(_flagos_is_ascend)
       ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${CANN_INCLUDE_DIR})
   # memory.cc drains the shared default ACL stream (acl_stream.h) before any
   # host-visible memcpy now that ops dispatch asynchronously.
-  target_link_libraries(${LIBRARY_NAME} PRIVATE ${ACL_LIB})
+  find_package(Threads REQUIRED)
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${ACL_LIB} Threads::Threads)
 elseif(_flagos_is_metax)
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
@@ -205,6 +206,14 @@ else()
 
   find_package(CUDAToolkit REQUIRED)
   target_link_libraries(${LIBRARY_NAME} PRIVATE CUDA::cudart)
+  if(FLAGOS_NATIVE_HOSTS AND
+      (FLAGOS_PLATFORM_VENDOR STREQUAL "nvidia" OR FLAGOS_PLATFORM_VENDOR STREQUAL "thead"))
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_CUDA_CONTEXT=1)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE CUDA::cuda_driver)
+    if(FLAGOS_PLATFORM_VENDOR STREQUAL "thead")
+      target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_ACCEL_PPU=1)
+    endif()
+  endif()
 endif()
 
 # libflagos.so needs no torch symbols at all (only the vendor runtime), so the

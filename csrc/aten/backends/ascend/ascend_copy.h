@@ -12,6 +12,11 @@ namespace at::native::flagos::ascend {
 
 #if defined(USE_ASCEND)
 
+// Enqueue a contiguous same-device copy when both storages can be kept live
+// by the stream-aware allocator. The caller handles unsupported copies.
+bool TryAsyncContiguousCopy(const at::Tensor& dst, const at::Tensor& src,
+                            size_t nbytes);
+
 // Copy `src` into `dst` entirely on the NPU via aclnnInplaceCopy, which handles
 // differing strides/offsets and dtype casts on-device. `dst` must be an
 // allocated PrivateUse1 tensor with matching sizes; `src` may be non-contiguous.

@@ -388,24 +388,24 @@ def test_requires_python_is_the_platforms_pinned_interpreter():
             assert declared == ">=3.8", (platform, declared)
 
 
-def test_only_an_sdk_segment_comes_with_an_interpreter_pin():
-    """The two travel together: both describe the one published artifact.
+def test_sdk_segments_and_interpreter_pins_describe_published_artifacts():
+    """An SDK segment requires a pin. A wheel tag can be known on its own.
 
-    An SDK segment (``+cuda13.3``) names the FlagTree build the wheel links, so
-    it must come with that build's interpreter. A platform-id segment (``+mps``)
-    names the wheel's platform and nothing else -- MPS links no FlagTree -- so it
-    must not borrow a pin it does not have; ``Requires-Python`` then falls back
-    to the base builds' range.
+    The TsingMicro FlagTree wheel publishes a cp310 tag while the TX SDK
+    release is unknown. Platform-only wheel segments such as mps identify a
+    build without FlagTree.
     """
     pins = _pins()
     for platform in _platforms_in_the_table():
         segment = _wheel_local(platform)
+        interpreter = pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
         if segment == platform:
-            assert f"FLAGTREE_PYTHON_VERSION_{platform}" not in pins, platform
-        else:
-            assert bool(segment) == bool(
-                pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
-            ), platform
+            assert interpreter is None, platform
+            continue
+        if segment:
+            assert interpreter, platform
+        elif interpreter:
+            assert pins.get(f"FLAGTREE_VERSION_{platform}"), platform
 
 
 def test_torch_fl_and_flagcx_use_the_same_sdk_segment():

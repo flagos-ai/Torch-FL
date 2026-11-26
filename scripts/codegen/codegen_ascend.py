@@ -293,6 +293,7 @@ OPS = {
     # ---- reduce_max_dim: (Tensor, int64_t dim, bool keepdim) -> (values, indices) ----
     "max.dim": ("reduce_max_dim", "MaxDim"),
     "min.dim": ("reduce_max_dim", "MinDim"),
+    "argmax": ("arg_reduce", "ArgMax"),
     # ---- more unary_scalar activations ----
     "celu": ("unary_scalar", None),
     "softshrink": ("unary_scalar", None),
@@ -585,7 +586,7 @@ OPS = {
     "sum": ("reduce_sum_all", "ReduceSum"),
     "max": ("reduce_minmax_all", "Max"),
     "min": ("reduce_minmax_all", "Min"),
-    "mean.dim": ("reduce_mean_dtype", "MeanV2"),
+    "mean.dim": ("reduce_mean_dtype", "Mean"),
     "mean": ("mean_all", "Mean"),
     "clamp": ("clamp", "Clamp"),
     "clamp.Tensor": ("clamp_tensor", "ClampTensor"),
@@ -650,10 +651,8 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
 # argument to (e.g. `x - 3.0` -> aten::sub.Tensor with a CPU scalar tensor),
 # so `other` may live on CPU. Building an aclTensor over CPU storage as if it
 # were NPU memory yields garbage/nan, so we must migrate it to self's device
-# first (mirrors the handwritten add.cc). Both operands are then expanded +
-# materialized to the broadcast shape so aclnn (which does not always
-# broadcast) sees matching ND-contiguous inputs. All steps are no-ops when
-# device/dtype/shape already match.
+# first (mirrors the handwritten add.cc). The output uses the broadcast shape,
+# and aclnn reads the original operand strides.
 # The prologue body (everything after the `namespace ascend` alias). Split out
 # so the cached templates can inject a scalar fast-path branch before it while
 # still sharing one namespace alias.
@@ -665,7 +664,12 @@ _BINARY_PROLOGUE_BODY = """\
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {{
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }}
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -691,7 +695,8 @@ _BINARY_PROLOGUE = (
 # does a per-call H2D copy (~22us measured -- the single biggest torch_fl vs
 # torch_npu host gap: add.Tensor 49us vs 13us). Diverting to the aclnn scalar
 # variant (aclnn<Name>s, which takes an aclScalar* by value) skips the H2D
-# entirely. Only emitted for ops that actually ship an <Name>s symbol
+# entirely. Allocate scalar descriptors only while building an executor.
+# Only emitted for ops that actually ship an <Name>s symbol
 # (add/sub/mul/div); the scalar value is folded into the executor-cache key.
 _SCALAR_FASTPATH_NOALPHA = """\
   if (self.is_privateuseone() && !other.is_privateuseone() && other.numel() == 1) {{
@@ -701,16 +706,17 @@ _SCALAR_FASTPATH_NOALPHA = """\
     // Match the vendor BF16 scalar path without rounding the scalar to BF16.
     auto scalar_dtype = self.scalar_type() == at::kBFloat16
         ? at::kFloat : self.scalar_type();
-    ascend::AclScalarWrapper acl_sc(sc, scalar_dtype);
+    std::optional<ascend::AclScalarWrapper> acl_sc;
     static void* sOpAddr = nullptr; static void* sWsAddr = nullptr;
     ascend::SigHasher hsh; hsh.tensor(self);
     {{ double sv = sc.toDouble(); hsh.val(sv); }}
     ascend::ExecAscendCached(
         "{aclnn_s}", "{aclnn_s}GetWorkspaceSize", sOpAddr, sWsAddr, hsh.h,
         {{&self}}, {{&out}},
-        [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-            std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {{
-          return gws(in[0].acl_tensor, acl_sc.get(), out_t[0].acl_tensor, pws, pex);
+        [&](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+            ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {{
+          acl_sc.emplace(sc, scalar_dtype);
+          return gws(in[0].acl_tensor, acl_sc->get(), out_t[0].acl_tensor, pws, pex);
         }});
     return out;
   }}
@@ -721,17 +727,18 @@ _SCALAR_FASTPATH_ALPHA = """\
     at::Scalar sc = other.item();
     auto out = ascend::OpPreparation::apply_tensor_without_format(
         self.sizes(), self.options());
-    ascend::AclScalarWrapper acl_sc(sc, self.scalar_type());
-    ascend::AclScalarWrapper acl_alpha_s(alpha, self.scalar_type());
+    std::optional<ascend::AclScalarWrapper> acl_sc, acl_alpha_s;
     static void* sOpAddr = nullptr; static void* sWsAddr = nullptr;
     ascend::SigHasher hsh; hsh.tensor(self);
     {{ double sv = sc.toDouble(); hsh.val(sv); double av = alpha.toDouble(); hsh.val(av); }}
     ascend::ExecAscendCached(
         "{aclnn_s}", "{aclnn_s}GetWorkspaceSize", sOpAddr, sWsAddr, hsh.h,
         {{&self}}, {{&out}},
-        [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-            std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {{
-          return gws(in[0].acl_tensor, acl_sc.get(), acl_alpha_s.get(), out_t[0].acl_tensor, pws, pex);
+        [&](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+            ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {{
+          acl_sc.emplace(sc, self.scalar_type());
+          acl_alpha_s.emplace(alpha, self.scalar_type());
+          return gws(in[0].acl_tensor, acl_sc->get(), acl_alpha_s->get(), out_t[0].acl_tensor, pws, pex);
         }});
     return out;
   }}
@@ -1063,18 +1070,18 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& s) {{
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
-  ascend::AclScalarWrapper acl_s(s, self.scalar_type());
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self);
-  {{ double sv = s.toDouble(); hsh.val(sv); }}
-  ascend::ExecAscendCached(
+  hsh.scalar(s);
+  ascend::ExecAscendCached<true>(
       "{aclnn}", "{aclnn}GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {{&self}}, {{&out}},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {{
-        return gws(in[0].acl_tensor, acl_s.get(), out_t[0].acl_tensor, pws, pex);
+      [s, input_dtype = self.scalar_type(), acl_s = std::shared_ptr<ascend::AclScalarWrapper>{{}}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {{
+        acl_s = std::make_shared<ascend::AclScalarWrapper>(s, input_dtype);
+        return gws(in[0].acl_tensor, acl_s->get(), out_t[0].acl_tensor, pws, pex);
       }});
   return out;
 }}
@@ -1226,6 +1233,40 @@ at::Tensor {kernel}(const at::Scalar& self, const at::Tensor& exponent) {{
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
 """
+
+# arg_reduce: (Tensor, optional dim, keepdim) -> int64 indices.
+T_ARG_REDUCE = """\
+at::Tensor {kernel}(const at::Tensor& self, std::optional<int64_t> dim, bool keepdim) {{
+  namespace ascend = at::native::flagos::ascend;
+  if (self.scalar_type() != at::kFloat && self.scalar_type() != at::kHalf) {{
+    return {disp}.DispatchBackend(Backend::kFlagGems, self, dim, keepdim);
+  }}
+  auto options = self.options().dtype(at::kLong);
+  if (!self.dim()) {{
+    if (dim) c10::maybe_wrap_dim(*dim, self.dim());
+    return at::zeros({{}}, options);
+  }}
+  if (!dim) TORCH_CHECK(self.numel(), "argmax: an empty tensor requires a dimension");
+  const auto input = dim ? self : self.reshape({{-1}});
+  const auto axis = c10::maybe_wrap_dim(dim.value_or(0), input.dim());
+  TORCH_CHECK_INDEX(input.size(axis), "argmax: expected a non-empty reduction dimension");
+  auto shape = input.sizes().vec();
+  if (keepdim) shape[axis] = 1;
+  else shape.erase(shape.begin() + axis);
+  auto out = ascend::OpPreparation::apply_tensor_without_format(shape, options);
+  if (out.numel()) {{
+    ascend::AclTensorWrapper in(input), result(out);
+    EXEC_ASCEND_CMD_SIG({aclnn},
+        (const aclTensor*, int64_t, bool, aclTensor*, uint64_t*, aclOpExecutor**),
+        in.get(), axis, keepdim, result.acl_tensor);
+  }}
+  if (!dim && keepdim) return out.reshape(c10::SmallVector<int64_t, 8>(self.dim(), 1));
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
+
 
 # reduce_max_dim: (Tensor, int64_t dim, bool keepdim) -> tuple(values, indices).
 #   aclnn<Name>(self, dim, keepdim, valuesOut, indicesOut)   e.g. max.dim/min.dim
@@ -1537,18 +1578,17 @@ T_CAT = """\
 at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
   namespace ascend = at::native::flagos::ascend;
 
-  auto materialized = tensors.materialize();
-  TORCH_CHECK(!materialized.empty(), "cat: expected a non-empty list of tensors");
+  TORCH_CHECK(!tensors.empty(), "cat: expected a non-empty list of tensors");
 
-  std::vector<at::Tensor> valid_tensors;
-  for (const auto& t : materialized) {{
-    if (t.get().numel() > 0) {{
-      valid_tensors.push_back(t.get());
+  c10::SmallVector<at::Tensor, 4> valid_tensors;
+  for (const auto& t : tensors) {{
+    if (t.numel() > 0) {{
+      valid_tensors.push_back(t);
     }}
   }}
 
   if (valid_tensors.empty()) {{
-    return materialized[0].get().clone();
+    return (*tensors.begin()).clone();
   }}
   if (valid_tensors.size() == 1) {{
     return valid_tensors[0].clone();
@@ -1558,7 +1598,7 @@ at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
   auto ndim = first.dim();
   if (dim < 0) dim += ndim;
 
-  std::vector<int64_t> out_sizes(first.sizes().begin(), first.sizes().end());
+  c10::SmallVector<int64_t, 8> out_sizes(first.sizes().begin(), first.sizes().end());
   for (size_t i = 1; i < valid_tensors.size(); ++i) {{
     out_sizes[dim] += valid_tensors[i].size(dim);
   }}
@@ -1566,13 +1606,35 @@ at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       out_sizes, first.options());
 
-  std::vector<ascend::AclTensorWrapper> wrappers;
+#if defined(FLAGOS_NATIVE_HOSTS)
+  if (valid_tensors.size() == 2) {{
+    static void* opApiFuncAddr = nullptr;
+    static void* getWsFuncAddr = nullptr;
+    ascend::SigHasher hash;
+    hash.val(dim);
+    hash.tensor(valid_tensors[0]);
+    hash.tensor(valid_tensors[1]);
+    ascend::ExecAscendCached<true>(
+        "{aclnn}", "{aclnn}GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hash.h,
+        {{&valid_tensors[0], &valid_tensors[1]}}, {{&out}},
+        [dim, list = std::array<const aclTensor*, 2>{{}}](
+            ascend::GwsFunc gws, ascend::AclTensorArgs& in, ascend::AclTensorArgs& out_t,
+            uint64_t* workspace, aclOpExecutor** executor) mutable {{
+          list = {{in[0].get(), in[1].get()}};
+          auto* tensors = aclCreateTensorList(list.data(), list.size());
+          return gws(tensors, dim, out_t[0].get(), workspace, executor);
+        }});
+    return out;
+  }}
+#endif
+
+  c10::SmallVector<ascend::AclTensorWrapper, 4> wrappers;
   wrappers.reserve(valid_tensors.size());
   for (auto& t : valid_tensors) {{
     wrappers.emplace_back(t);
   }}
 
-  std::vector<const aclTensor*> acl_tensors;
+  c10::SmallVector<const aclTensor*, 4> acl_tensors;
   acl_tensors.reserve(valid_tensors.size());
   for (auto& w : wrappers) {{
     acl_tensors.push_back(w.get());
@@ -1884,9 +1946,8 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
 """
 
 # _foreach_div_.ScalarList / _foreach_addcdiv_.ScalarList: per-tensor scalar
-# list. aclnn's ScalarList variant takes an aclScalarList (div), while its
-# addcdiv counterpart's "scalars" param is (per the header) an aclTensor* —
-# both are boxed as a plain list of aclScalar* built from the ArrayRef<Scalar>.
+# list. aclnn's div takes an aclScalarList. Addcdiv takes a device tensor
+# unless every entry can use the same host scalar through the V2 API.
 T_FOREACH_INPLACE_DIV_SCALARLIST = """\
 static void {kernel}Chunk(at::TensorList self, at::ArrayRef<at::Scalar> scalars) {{
   namespace ascend = at::native::flagos::ascend;
@@ -1952,6 +2013,42 @@ static void {kernel}Chunk(at::TensorList self, at::TensorList tensor1, at::Tenso
   aclTensorList* self_list = aclCreateTensorList(self_ptrs.data(), self_ptrs.size());
   aclTensorList* t1_list = aclCreateTensorList(t1_ptrs.data(), t1_ptrs.size());
   aclTensorList* t2_list = aclCreateTensorList(t2_ptrs.data(), t2_ptrs.size());
+
+#if defined(FLAGOS_NATIVE_HOSTS)
+  if (self.front().scalar_type() == at::kBFloat16 && scalars.front().isFloatingPoint()) {{
+    // Match the BF16 rounding of the scalar-list input while using the
+    // FP32 scalar descriptor supported by CANN for BF16 tensors.
+    const auto value = scalars.front().toDouble();
+    if (std::isfinite(value) && value != 0.0 &&
+        std::all_of(scalars.begin(), scalars.end(), [value](const at::Scalar& scalar) {{
+          return scalar.isFloatingPoint() && scalar.toDouble() == value;
+        }})) {{
+      bool dense = true;
+      for (size_t i = 0; i < self.size() && dense; ++i) {{
+        for (const auto* tensor : {{&self[i], &tensor1[i], &tensor2[i]}}) {{
+          dense &= tensor->device() == self.front().device() &&
+              tensor->scalar_type() == at::kBFloat16 && tensor->is_contiguous() &&
+              tensor->numel() > 0 && tensor->dim() <= 8 &&
+              tensor->sizes() == self[i].sizes();
+        }}
+      }}
+      static const bool scalar_v2_available = [] {{
+        void* launch = nullptr;
+        void* workspace = nullptr;
+        ascend::GetApiFunc("aclnnForeachAddcdivScalarV2",
+            "aclnnForeachAddcdivScalarV2GetWorkspaceSize", launch, workspace);
+        return launch && workspace;
+      }}();
+      if (dense && scalar_v2_available) {{
+        const auto rounded = scalars.front().to<at::BFloat16>();
+        ascend::AclScalarWrapper scalar(static_cast<float>(rounded), at::kFloat);
+        EXEC_ASCEND_CMD(aclnnForeachAddcdivScalarV2,
+            self_list, t1_list, t2_list, scalar.get(), self_list);
+        return;
+      }}
+    }}
+  }}
+#endif
 
   // aclnnForeachAddcdivScalarList's "scalars" param is a plain device aclTensor
   // (1-D, one element per list entry), NOT an aclScalarList -- unlike div's
@@ -2780,8 +2877,8 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool half_to_float) {{
   ascend::ExecAscendCached(
       "{aclnn}", "{aclnn}GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {{&self}}, {{&out}},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {{
+      [&](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {{
         return gws(in[0].acl_tensor, dim, out_t[0].acl_tensor, pws, pex);
       }});
   return out;
@@ -2819,29 +2916,27 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
 # handwritten sum.cc dim-normalization and reduced-shape logic. The `out_dtype`
 # initializer differs between the two and is supplied by _reduce_dtype_prologue.
 _REDUCE_DTYPE_PROLOGUE_BODY = """\
-  int64_t ndim = self.dim();
-  std::vector<int64_t> norm_dims;
-  if (dim.has_value() && !dim.value().empty()) {{
+  const int64_t ndim = self.dim();
+  const auto dim_mask = at::native::make_dim_mask(dim, ndim);
+  c10::SmallVector<int64_t, 8> norm_dims;
+  if (ndim != 0 && dim.has_value() && !dim.value().empty()) {{
     for (int64_t d : dim.value()) norm_dims.push_back(d < 0 ? d + ndim : d);
   }} else {{
     for (int64_t d = 0; d < ndim; ++d) norm_dims.push_back(d);
   }}
-  auto out_shape = self.sizes().vec();
-  std::vector<int64_t> sorted_dims(norm_dims);
-  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
-  for (int64_t d : sorted_dims) {{
-    if (keepdim) out_shape[d] = 1;
-    else out_shape.erase(out_shape.begin() + d);
-  }}
+  const auto out_shape = at::native::shape_from_dim_mask(self, dim_mask, keepdim);
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       out_shape, self.options().dtype(out_dtype));
+"""
+
+_REDUCE_DTYPE_DESCRIPTORS = """\
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclTensorWrapper acl_out(out);
   ascend::AclIntArrayWrapper acl_dim(norm_dims);
 """
 
 
-def _reduce_dtype_prologue(promote_integral=False):
+def _reduce_dtype_prologue(promote_integral=False, *, cached=False):
     """Prologue for the dtype-aware reduce categories.
 
     ``promote_integral`` selects torch's no-dtype promotion rule for the
@@ -2869,6 +2964,7 @@ def _reduce_dtype_prologue(promote_integral=False):
         "  namespace ascend = at::native::flagos::ascend;\n"
         + dtype_init
         + _REDUCE_DTYPE_PROLOGUE_BODY
+        + ("" if cached else _REDUCE_DTYPE_DESCRIPTORS)
     )
 
 
@@ -2897,9 +2993,10 @@ T_REDUCE_SUM_DTYPE_CACHED = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim, std::optional<at::ScalarType> dtype) {{
 """
-    + _reduce_dtype_prologue(promote_integral=True)
+    + _reduce_dtype_prologue(promote_integral=True, cached=True)
     + """\
   aclDataType acl_dtype = ascend::ToAclDataType(out_dtype);
+  std::optional<ascend::AclIntArrayWrapper> acl_dim;
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
@@ -2910,9 +3007,10 @@ at::Tensor {kernel}(const at::Tensor& self, at::OptionalIntArrayRef dim, bool ke
   ascend::ExecAscendCached(
       "{aclnn}", "{aclnn}GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {{&self}}, {{&out}},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {{
-        return gws(in[0].acl_tensor, acl_dim.get(), keepdim, acl_dtype, out_t[0].acl_tensor, pws, pex);
+      [&](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {{
+        acl_dim.emplace(norm_dims);
+        return gws(in[0].acl_tensor, acl_dim->get(), keepdim, acl_dtype, out_t[0].acl_tensor, pws, pex);
       }});
   return out;
 }}
@@ -2993,16 +3091,19 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
 """
 
 # reduce_mean_dtype: mean.dim(self, int[]? dim, keepdim, ScalarType? dtype).
-#   aclnnMeanV2(self, dims, keepdim, int32 dtype, out)  -- MeanV2 for CANN 8.5.
+# aclnnMean accepts the requested output dtype. The fourth argument of
+# aclnnMeanV2 is the Boolean noopWithEmptyAxes flag.
 T_REDUCE_MEAN_DTYPE = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim, std::optional<at::ScalarType> dtype) {{
 """
     + _reduce_dtype_prologue()
     + """\
-  auto acl_dtype = static_cast<int32_t>(ascend::ToAclDataType(out_dtype));
-
-  EXEC_ASCEND_CMD({aclnn}, acl_self.get(), acl_dim.get(), keepdim, acl_dtype, acl_out.get());
+  const auto acl_dtype = ascend::ToAclDataType(out_dtype);
+  EXEC_ASCEND_CMD_SIG(
+      {aclnn}, (const aclTensor*, const aclIntArray*, bool, aclDataType,
+                aclTensor*, uint64_t*, aclOpExecutor**),
+      acl_self.get(), acl_dim.get(), keepdim, acl_dtype, acl_out.acl_tensor);
   return out;
 }}
 
@@ -3017,9 +3118,9 @@ T_REDUCE_MEAN_DTYPE_CACHED = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim, std::optional<at::ScalarType> dtype) {{
 """
-    + _reduce_dtype_prologue()
+    + _reduce_dtype_prologue(cached=True)
     + """\
-  auto acl_dtype = static_cast<int32_t>(ascend::ToAclDataType(out_dtype));
+  const auto acl_dtype = ascend::ToAclDataType(out_dtype);
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
@@ -3027,12 +3128,18 @@ at::Tensor {kernel}(const at::Tensor& self, at::OptionalIntArrayRef dim, bool ke
   for (int64_t d : norm_dims) hsh.val(d);
   hsh.val(keepdim);
   hsh.val(acl_dtype);
-  ascend::ExecAscendCached(
+  ascend::ExecAscendCached<true>(
       "{aclnn}", "{aclnn}GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {{&self}}, {{&out}},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {{
-        return gws(in[0].acl_tensor, acl_dim.get(), keepdim, acl_dtype, out_t[0].acl_tensor, pws, pex);
+      [dims = std::move(norm_dims), keepdim, acl_dtype,
+       acl_dim = std::shared_ptr<ascend::AclIntArrayWrapper>{{}}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {{
+        acl_dim = std::make_shared<ascend::AclIntArrayWrapper>(dims);
+        using GetWorkspaceSize = int (*)(const aclTensor*, const aclIntArray*, bool,
+                                         aclDataType, aclTensor*, uint64_t*, aclOpExecutor**);
+        auto prepare = reinterpret_cast<GetWorkspaceSize>(gws);
+        return prepare(in[0].get(), acl_dim->get(), keepdim, acl_dtype,
+                       out_t[0].acl_tensor, pws, pex);
       }});
   return out;
 }}
@@ -4464,8 +4571,8 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   ascend::ExecAscendCached(
       "{aclnn}", "{aclnn}GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {{&self}}, {{&out}},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {{
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {{
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       }});
   return out;
@@ -4490,8 +4597,8 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   ascend::ExecAscendCached(
       "{aclnn}", "{aclnn}GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {{&self_b, &other_b}}, {{&out}},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {{
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {{
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       }});
   return out;
@@ -4510,18 +4617,18 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::S
     + """\
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       out_shape, result_options);
-  ascend::AclScalarWrapper acl_alpha(alpha, result_dtype);
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self_b); hsh.tensor(other_b);
-  {{ double av = alpha.toDouble(); hsh.val(av); }}
-  ascend::ExecAscendCached(
+  hsh.scalar(alpha);
+  ascend::ExecAscendCached<true>(
       "{aclnn}", "{aclnn}GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {{&self_b, &other_b}}, {{&out}},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {{
-        return gws(in[0].acl_tensor, in[1].acl_tensor, acl_alpha.get(), out_t[0].acl_tensor, pws, pex);
+      [alpha, result_dtype, acl_alpha = std::shared_ptr<ascend::AclScalarWrapper>{{}}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {{
+        acl_alpha = std::make_shared<ascend::AclScalarWrapper>(alpha, result_dtype);
+        return gws(in[0].acl_tensor, in[1].acl_tensor, acl_alpha->get(), out_t[0].acl_tensor, pws, pex);
       }});
   return out;
 }}
@@ -4545,8 +4652,8 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   ascend::ExecAscendCached(
       "{aclnn}", "{aclnn}GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {{&self_b, &other_b}}, {{&out}},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {{
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {{
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       }});
   return out;
@@ -4670,6 +4777,7 @@ CATEGORIES = {
     "threshold_backward": T_THRESHOLD_BACKWARD,
     "pow_scalar_tensor": T_POW_SCALAR_TENSOR,
     "reduce_max_dim": T_REDUCE_MAX_DIM,
+    "arg_reduce": T_ARG_REDUCE,
     "elu": T_ELU,
     "loss": T_LOSS,
     "cummax_cummin": T_CUMMAX_CUMMIN,
@@ -4855,7 +4963,9 @@ FILE_HEADER = """\
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ATen.h>
+#include <array>
 #include <ATen/WrapDimUtils.h>
+#include <ATen/native/ReduceOpsUtils.h>
 #include <ATen/ops/_conj_native.h>
 #include <ATen/ops/_neg_view_native.h>
 #include <ATen/ops/diagonal_native.h>
@@ -4902,6 +5012,7 @@ FILE_HEADER = """\
 #include <ATen/ops/trunc.h>
 #include <c10/core/Scalar.h>
 #include <c10/core/DefaultDtype.h>
+#include <c10/util/SmallVector.h>
 #include <algorithm>
 #include <cmath>
 #include <limits>

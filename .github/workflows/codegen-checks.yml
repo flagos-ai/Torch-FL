@@ -107,7 +107,9 @@ jobs:
           set -euo pipefail
           python3 scripts/codegen/codegen_native_vendor.py --check
           python3 scripts/codegen/codegen_native_vendor.py --vendor hygon --check
+          python3 scripts/codegen/codegen_native_vendor.py --vendor thead --check
           python3 scripts/codegen/codegen_metax_native_precision.py --check
+          python3 scripts/codegen/codegen_metax_native_precision.py --vendor thead --check
           python3 scripts/codegen/codegen_metax_native_vendor.py --check
           python3 scripts/codegen/codegen_ops.py --check-native-routes
           python3 scripts/codegen/codegen_ops.py --check-out-adapters
@@ -146,6 +148,12 @@ jobs:
           # toolkit and no built torch_fl -- only the CPU torchgen above.
           echo "=== codegen_iluvatar.py --check ==="
           python3 scripts/codegen/codegen_iluvatar.py --check
+          echo "=== codegen_native_foreach.py --check ==="
+          python3 scripts/codegen/codegen_native_foreach.py --check
+          python3 scripts/codegen/codegen_iluvatar_fp32.py --check
+          python3 scripts/codegen/codegen_metax_fp32.py --check
+          python3 scripts/codegen/codegen_metax_cat.py --check
+          python3 scripts/codegen/codegen_cambricon.py --check
           # The Apple Metal (MPSGraph) operator layer. Reads only committed
           # sources (generated/register.inc to cross-check the op names) and
           # imports codegen_ops for the dispatcher naming, so --check needs no

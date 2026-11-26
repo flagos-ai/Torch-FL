@@ -24,7 +24,7 @@
 // cannot be reached at all.
 // Excluded ops, left to cpu_fallback:
 //
-// Total: 628 ops registered here, 12 further FlagGems ops already claimed by cambricon_register.inc.
+// Total: 588 ops registered here, 52 further FlagGems ops already claimed by cambricon_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -52,8 +52,6 @@
   m.impl("_fused_rms_norm_backward", WrapperPrivFusedRmsNormBackward);
   m.impl("_is_all_true", WrapperPrivIsAllTrue);
   m.impl("_linalg_eigvals", WrapperPrivLinalgEigvals);
-  m.impl("_log_softmax", WrapperPrivLogSoftmax);
-  m.impl("_log_softmax_backward_data", WrapperPrivLogSoftmaxBackwardData);
   m.impl("_masked_scale", WrapperPrivMaskedScale);
   m.impl("_native_batch_norm_legit", WrapperPrivNativeBatchNormLegit);
   m.impl("_native_batch_norm_legit.no_stats", WrapperPrivNativeBatchNormLegitNoStats);
@@ -67,14 +65,11 @@
   m.impl("_scaled_dot_product_efficient_attention", WrapperPrivScaledDotProductEfficientAttention);
   m.impl("_scaled_dot_product_efficient_attention_backward", WrapperPrivScaledDotProductEfficientAttentionBackward);
   m.impl("_scaled_dot_product_flash_attention_backward", WrapperPrivScaledDotProductFlashAttentionBackward);
-  m.impl("_softmax", WrapperPrivSoftmax);
-  m.impl("_softmax_backward_data", WrapperPrivSoftmaxBackwardData);
   m.impl("_sparse_semi_structured_addmm", WrapperPrivSparseSemiStructuredAddmm);
   m.impl("_sparse_semi_structured_mm", WrapperPrivSparseSemiStructuredMm);
   m.impl("_thnn_fused_lstm_cell", WrapperPrivThnnFusedLstmCell);
   m.impl("_thnn_fused_lstm_cell_backward_impl", WrapperPrivThnnFusedLstmCellBackwardImpl);
   m.impl("_unique2", WrapperPrivUnique2);
-  m.impl("_unsafe_view", WrapperPrivUnsafeView);
   m.impl("_upsample_bicubic2d_aa_backward", WrapperPrivUpsampleBicubic2dAaBackward);
   m.impl("_upsample_bilinear2d_aa_backward", WrapperPrivUpsampleBilinear2dAaBackward);
   m.impl("_upsample_nearest_exact1d_backward", WrapperPrivUpsampleNearestExact1dBackward);
@@ -91,13 +86,10 @@
   m.impl("adaptive_max_pool2d", WrapperAdaptiveMaxPool2d);
   m.impl("adaptive_max_pool2d_backward", WrapperAdaptiveMaxPool2dBackward);
   m.impl("adaptive_max_pool3d", WrapperAdaptiveMaxPool3d);
-  m.impl("add_.Tensor", WrapperAddInplaceTensor);
   m.impl("addbmm", WrapperAddbmm);
   m.impl("addbmm_", WrapperAddbmmInplace);
   m.impl("addcdiv", WrapperAddcdiv);
-  m.impl("addcdiv_", WrapperAddcdivInplace);
   m.impl("addcmul", WrapperAddcmul);
-  m.impl("addcmul_", WrapperAddcmulInplace);
   m.impl("addmm", WrapperAddmm);
   m.impl("addmm.dtype", WrapperAddmmDtype);
   m.impl("addmm.dtype_out", WrapperAddmmDtypeOut);
@@ -109,8 +101,6 @@
   m.impl("addr", WrapperAddr);
   m.impl("addr_", WrapperAddrInplace);
   m.impl("affine_grid_generator", WrapperAffineGridGenerator);
-  m.impl("alias", WrapperAlias);
-  m.impl("all", WrapperAll);
   m.impl("all.dim", WrapperAllDim);
   m.impl("all.dims", WrapperAllDims);
   m.impl("amax", WrapperAmax);
@@ -120,10 +110,7 @@
   m.impl("any", WrapperAny);
   m.impl("any.dim", WrapperAnyDim);
   m.impl("any.dims", WrapperAnyDims);
-  m.impl("arange", WrapperArange);
-  m.impl("arange.start", WrapperArangeStart);
   m.impl("arange.start_step", WrapperArangeStartStep);
-  m.impl("argmax", WrapperArgmax);
   m.impl("argmin", WrapperArgmin);
   m.impl("asin", WrapperAsin);
   m.impl("asin_", WrapperAsinInplace);
@@ -169,7 +156,6 @@
   m.impl("blackman_window.periodic", WrapperBlackmanWindowPeriodic);
   m.impl("bmm.out", WrapperBmmOut);
   m.impl("bucketize.Tensor", WrapperBucketizeTensor);
-  m.impl("cat", WrapperCat);
   m.impl("ceil", WrapperCeil);
   m.impl("ceil.out", WrapperCeilOut);
   m.impl("ceil_", WrapperCeilInplace);
@@ -189,7 +175,6 @@
   m.impl("clamp_min_", WrapperClampMinInplace);
   m.impl("col2im", WrapperCol2im);
   m.impl("conj_physical_", WrapperConjPhysicalInplace);
-  m.impl("constant_pad_nd", WrapperConstantPadNd);
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
   m.impl("convolution_overrideable.out", WrapperConvolutionOverrideableOut);
   m.impl("copysign.out", WrapperCopysignOut);
@@ -206,7 +191,6 @@
   m.impl("cummin", WrapperCummin);
   m.impl("cumprod", WrapperCumprod);
   m.impl("cumprod_", WrapperCumprodInplace);
-  m.impl("cumsum", WrapperCumsum);
   m.impl("cumsum.out", WrapperCumsumOut);
   m.impl("cumsum_", WrapperCumsumInplace);
   m.impl("deg2rad", WrapperDeg2rad);
@@ -217,12 +201,10 @@
   m.impl("digamma", WrapperDigamma);
   m.impl("digamma_", WrapperDigammaInplace);
   m.impl("dist", WrapperDist);
-  m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Scalar_mode", WrapperDivScalarMode);
   m.impl("div.Tensor", WrapperDivTensor);
   m.impl("div.Tensor_mode", WrapperDivTensorMode);
   m.impl("div.out", WrapperDivOut);
-  m.impl("div_.Scalar", WrapperDivInplaceScalar);
   m.impl("div_.Scalar_mode", WrapperDivInplaceScalarMode);
   m.impl("div_.Tensor", WrapperDivInplaceTensor);
   m.impl("div_.Tensor_mode", WrapperDivInplaceTensorMode);
@@ -230,7 +212,6 @@
   m.impl("elu", WrapperElu);
   m.impl("elu_", WrapperEluInplace);
   m.impl("elu_backward", WrapperEluBackward);
-  m.impl("embedding", WrapperEmbedding);
   m.impl("embedding_renorm_", WrapperEmbeddingRenormInplace);
   m.impl("empty_permuted", WrapperEmptyPermuted);
   m.impl("eq.Scalar", WrapperEqScalar);
@@ -260,7 +241,6 @@
   m.impl("fill.Scalar_out", WrapperFillScalarOut);
   m.impl("fill.Tensor", WrapperFillTensor);
   m.impl("fill.Tensor_out", WrapperFillTensorOut);
-  m.impl("fill_.Scalar", WrapperFillInplaceScalar);
   m.impl("fill_.Tensor", WrapperFillInplaceTensor);
   m.impl("flip", WrapperFlip);
   m.impl("floor", WrapperFloor);
@@ -282,7 +262,6 @@
   m.impl("frac_", WrapperFracInplace);
   m.impl("fractional_max_pool2d", WrapperFractionalMaxPool2d);
   m.impl("fractional_max_pool2d_backward", WrapperFractionalMaxPool2dBackward);
-  m.impl("full", WrapperFull);
   m.impl("full_like", WrapperFullLike);
   m.impl("gcd_", WrapperGcdInplace);
   m.impl("ge.Scalar", WrapperGeScalar);
@@ -351,7 +330,6 @@
   m.impl("leaky_relu_backward", WrapperLeakyReluBackward);
   m.impl("lerp.Scalar", WrapperLerpScalar);
   m.impl("lerp.Tensor", WrapperLerpTensor);
-  m.impl("lerp_.Scalar", WrapperLerpInplaceScalar);
   m.impl("lerp_.Tensor", WrapperLerpInplaceTensor);
   m.impl("lgamma", WrapperLgamma);
   m.impl("lgamma_", WrapperLgammaInplace);
@@ -412,7 +390,6 @@
   m.impl("lt_.Tensor", WrapperLtInplaceTensor);
   m.impl("lu_unpack", WrapperLuUnpack);
   m.impl("lu_unpack.out", WrapperLuUnpackOut);
-  m.impl("masked_fill.Scalar", WrapperMaskedFillScalar);
   m.impl("masked_fill.Tensor", WrapperMaskedFillTensor);
   m.impl("masked_fill_.Scalar", WrapperMaskedFillInplaceScalar);
   m.impl("masked_fill_.Tensor", WrapperMaskedFillInplaceTensor);
@@ -420,7 +397,6 @@
   m.impl("masked_scatter_", WrapperMaskedScatterInplace);
   m.impl("masked_scatter_backward", WrapperMaskedScatterBackward);
   m.impl("masked_select", WrapperMaskedSelect);
-  m.impl("max", WrapperMax);
   m.impl("max.dim", WrapperMaxDim);
   m.impl("max_pool2d_with_indices", WrapperMaxPool2dWithIndices);
   m.impl("max_pool2d_with_indices_backward", WrapperMaxPool2dWithIndicesBackward);
@@ -459,7 +435,6 @@
   m.impl("ne_.Scalar", WrapperNeInplaceScalar);
   m.impl("ne_.Tensor", WrapperNeInplaceTensor);
   m.impl("neg_", WrapperNegInplace);
-  m.impl("new_ones", WrapperNewOnes);
   m.impl("nextafter", WrapperNextafter);
   m.impl("nextafter.out", WrapperNextafterOut);
   m.impl("nextafter_", WrapperNextafterInplace);
@@ -471,7 +446,6 @@
   m.impl("nonzero_static", WrapperNonzeroStatic);
   m.impl("norm.Scalar", WrapperNormScalar);
   m.impl("norm.ScalarOpt_dim", WrapperNormScalaroptDim);
-  m.impl("ones", WrapperOnes);
   m.impl("ormqr", WrapperOrmqr);
   m.impl("pixel_unshuffle.out", WrapperPixelUnshuffleOut);
   m.impl("polar", WrapperPolar);
@@ -479,7 +453,6 @@
   m.impl("polygamma.out", WrapperPolygammaOut);
   m.impl("polygamma_", WrapperPolygammaInplace);
   m.impl("pow.Scalar", WrapperPowScalar);
-  m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
   m.impl("pow.Tensor_Tensor", WrapperPowTensorTensor);
   m.impl("pow_.Scalar", WrapperPowInplaceScalar);
   m.impl("pow_.Tensor", WrapperPowInplaceTensor);
@@ -533,7 +506,6 @@
   m.impl("rsqrt_", WrapperRsqrtInplace);
   m.impl("rsub.Scalar", WrapperRsubScalar);
   m.impl("rsub.Tensor", WrapperRsubTensor);
-  m.impl("scalar_tensor", WrapperScalarTensor);
   m.impl("scatter.reduce", WrapperScatterReduce);
   m.impl("scatter.src", WrapperScatterSrc);
   m.impl("scatter_.reduce", WrapperScatterInplaceReduce);
@@ -553,17 +525,13 @@
   m.impl("sign.out", WrapperSignOut);
   m.impl("signbit", WrapperSignbit);
   m.impl("signbit.out", WrapperSignbitOut);
-  m.impl("silu", WrapperSilu);
   m.impl("silu_", WrapperSiluInplace);
-  m.impl("silu_backward", WrapperSiluBackward);
   m.impl("sin", WrapperSin);
   m.impl("sin_", WrapperSinInplace);
   m.impl("sinc", WrapperSinc);
   m.impl("sinc_", WrapperSincInplace);
   m.impl("sinh", WrapperSinh);
   m.impl("sinh_", WrapperSinhInplace);
-  m.impl("slice.Tensor", WrapperSliceTensor);
-  m.impl("slice_backward", WrapperSliceBackward);
   m.impl("soft_margin_loss", WrapperSoftMarginLoss);
   m.impl("soft_margin_loss_backward", WrapperSoftMarginLossBackward);
   m.impl("softplus", WrapperSoftplus);
@@ -604,11 +572,8 @@
   m.impl("special_shifted_chebyshev_polynomial_v", WrapperSpecialShiftedChebyshevPolynomialV);
   m.impl("special_shifted_chebyshev_polynomial_w", WrapperSpecialShiftedChebyshevPolynomialW);
   m.impl("special_xlog1py", WrapperSpecialXlog1py);
-  m.impl("sqrt", WrapperSqrt);
   m.impl("sqrt_", WrapperSqrtInplace);
   m.impl("std.correction", WrapperStdCorrection);
-  m.impl("sub.Tensor", WrapperSubTensor);
-  m.impl("sub_.Tensor", WrapperSubInplaceTensor);
   m.impl("sum.IntList_out", WrapperSumIntlistOut);
   m.impl("sum.out", WrapperSumOut);
   m.impl("take", WrapperTake);
@@ -623,7 +588,6 @@
   m.impl("threshold_backward", WrapperThresholdBackward);
   m.impl("topk", WrapperTopk);
   m.impl("trace", WrapperTrace);
-  m.impl("transpose.int", WrapperTransposeInt);
   m.impl("tril", WrapperTril);
   m.impl("tril.out", WrapperTrilOut);
   m.impl("tril_", WrapperTrilInplace);
@@ -641,7 +605,6 @@
   m.impl("var_mean.correction", WrapperVarMeanCorrection);
   m.impl("vdot", WrapperVdot);
   m.impl("view_as_complex", WrapperViewAsComplex);
-  m.impl("where.self", WrapperWhereSelf);
   m.impl("where.self_out", WrapperWhereSelfOut);
   m.impl("xlogy.OutScalar_Other", WrapperXlogyOutscalarOther);
   m.impl("xlogy.OutScalar_Self", WrapperXlogyOutscalarSelf);
@@ -651,6 +614,3 @@
   m.impl("xlogy.Tensor", WrapperXlogyTensor);
   m.impl("xlogy_.Scalar_Other", WrapperXlogyInplaceScalarOther);
   m.impl("xlogy_.Tensor", WrapperXlogyInplaceTensor);
-  m.impl("zero_", WrapperZeroInplace);
-  m.impl("zeros", WrapperZeros);
-  m.impl("zeros_like", WrapperZerosLike);

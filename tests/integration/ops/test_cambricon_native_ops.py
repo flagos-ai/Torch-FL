@@ -67,6 +67,34 @@ def test_int32_mul_is_exact():
     torch.testing.assert_close(got.cpu(), a * b, rtol=0, atol=0)
 
 
+def test_bf16_mul_preserves_host_scalar_precision():
+    values = torch.linspace(-60, 60, 4096).bfloat16()
+    scale = 128**-0.5
+    expected = (values.float() * scale).bfloat16()
+    got = values.to("flagos") * scale
+    torch.testing.assert_close(got.cpu(), expected, rtol=0, atol=0)
+
+
+def test_bf16_lerp_keeps_optimizer_weight_in_fp32():
+    values = torch.linspace(-3, 3, 4096).bfloat16()
+    expected = (values.float() * 0.1).bfloat16()
+    incoming = values.to("flagos")
+    moment = torch.zeros_like(incoming)
+    moment.lerp_(incoming, 0.1)
+    torch.testing.assert_close(moment.cpu(), expected, rtol=0, atol=0)
+
+
+def test_blocking_scalar_read_waits_for_device_queue():
+    matrix = torch.ones((2048, 2048), dtype=torch.bfloat16, device="flagos")
+    unfinished = torch.ones((1,), dtype=torch.int64, device="flagos")
+    for expected in (True, False) * 5:
+        # Keep device work ahead of the stopping predicate so its host read
+        # has to wait for the queue that produces the comparison.
+        for _ in range(12):
+            matrix.mm(matrix)
+        assert bool(unfinished.max() == int(expected)) == expected
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("case", ["same", "broadcast", "cpu_scalar", "empty_out"])
 def test_mul_out(dtype, case):

@@ -25,7 +25,7 @@
 namespace py = pybind11;
 
 inline at::Tensor HostContiguous(const at::Tensor& tensor, at::MemoryFormat format) {
-#if defined(FLAGOS_HYGON_NATIVE_HOST_FAST_ALLOC)
+#if defined(FLAGOS_NATIVE_HOST_FAST_ALLOC)
   if (!c10::GradMode::is_enabled() && tensor.device().is_privateuseone() &&
       tensor.layout() == at::kStrided && !tensor.has_names() &&
       !tensor.unsafeGetTensorImpl()->has_symbolic_sizes_strides() &&
@@ -40,7 +40,7 @@ inline at::Tensor HostContiguous(const at::Tensor& tensor, at::MemoryFormat form
 inline at::Tensor HostEmpty(c10::SymIntArrayRef size, std::optional<at::ScalarType> dtype,
                             std::optional<at::Layout> layout, std::optional<at::Device> device,
                             std::optional<bool> pinned, std::optional<at::MemoryFormat> format) {
-#if defined(FLAGOS_HYGON_NATIVE_HOST_FAST_ALLOC)
+#if defined(FLAGOS_NATIVE_HOST_FAST_ALLOC)
   if (device && device->is_privateuseone() && device->has_index() &&
       (!layout || *layout == at::kStrided) && !pinned.value_or(false)) {
     c10::impl::VirtualGuardImpl implementation(at::kPrivateUse1);
@@ -289,16 +289,23 @@ inline at::Tensor TensorValue(const HostIntList& value, std::optional<int64_t> d
   return TensorValue(value.vec(), dtype, device, requires_grad);
 }
 using HostGridMeta = flagos::native_host::GridMetadata;
-inline int64_t Get(const HostGridMeta& meta, const std::string& key) {
-  if (meta.constants->contains(key)) return meta.constants->at(key);
+inline std::optional<int64_t> FindGridMetadata(const HostGridMeta& meta,
+                                               const std::string& key) {
+  const auto constant = meta.constants->find(key);
+  if (constant != meta.constants->end()) return constant->value();
   auto integer = [](const c10::IValue& value) {
     return value.isBool() ? int64_t(value.toBool()) : value.toInt();
   };
-  if (meta.kwargs.contains(key)) return integer(meta.kwargs.at(key));
+  if (const auto* keyword = meta.kwargs.find(key)) return integer(*keyword);
   if (meta.names)
     for (size_t i = 0; i < meta.args.size(); ++i)
       if (meta.names->at(i) == key) return integer(meta.args.get(i));
-  TORCH_CHECK(false, "missing grid metadata: ", key);
+  return std::nullopt;
+}
+inline int64_t Get(const HostGridMeta& meta, const std::string& key) {
+  const auto value = FindGridMetadata(meta, key);
+  TORCH_CHECK(value.has_value(), "missing grid metadata: ", key);
+  return *value;
 }
 template <class T>
 c10::IValue Box(const T& value) {

@@ -79,12 +79,33 @@ FILE_HEADER = """\
 #ifdef USE_CAMBRICON
 
 #include <ATen/Dispatch.h>
+#include "../../../foreach_utils.h"
+#include <ATen/ops/_foreach_add_native.h>
+#include <ATen/ops/_foreach_div_native.h>
+#include <ATen/ops/_foreach_lerp_native.h>
+#include <ATen/ops/_foreach_mul_native.h>
+#include <ATen/ops/_foreach_sqrt_native.h>
+#include <ATen/ops/empty_like.h>
+#include <ATen/record_function.h>
+#include <ATen/native/TensorShape.h>
+#include <ATen/ops/_log_softmax_backward_data.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/full.h>
+#include <ATen/ops/full_native.h>
+#include <ATen/ops/ones.h>
+#include <ATen/ops/result_type.h>
+#include <ATen/ops/scalar_tensor.h>
 #include <ATen/ops/zeros.h>
+#include <c10/core/InferenceMode.h>
+#include <c10/util/ScopeExit.h>
+#include <flagos.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -151,13 +172,16 @@ at::Tensor Widen(const at::Tensor& input, cnnlHandle_t handle) {
   if (input.scalar_type() == at::kFloat) {
     return input;
   }
-  auto output = at::empty(input.sizes(), input.options().dtype(at::kFloat));
+  // cnnlCastDataType reads a dense descriptor. Materialize sliced or
+  // transposed BF16 inputs before the cast, including the RoPE half views.
+  const auto source = input.contiguous();
+  auto output = at::empty(source.sizes(), source.options().dtype(at::kFloat));
   TensorDesc from, to;
-  from.Set(input);
+  from.Set(source);
   to.Set(output);
   CheckCnnl(
-      cnnlCastDataType(handle, from.get(), input.const_data_ptr(),
-                       CastToFloat(input.scalar_type()), to.get(),
+      cnnlCastDataType(handle, from.get(), source.const_data_ptr(),
+                       CastToFloat(source.scalar_type()), to.get(),
                        output.mutable_data_ptr()),
       "cnnlCastDataType (widen)");
   return output;
@@ -216,7 +240,82 @@ at::Tensor NarrowIndices(const at::Tensor& indices, cnnlHandle_t handle) {
 // embedding backward appends has to be representable in an int32 index.
 constexpr int64_t kMaxNumWeights = int64_t{1} << 24;
 
+at::Tensor ReduceFlat(const at::Tensor& self, cnnlReduceOp_t reduce,
+                      cnnlNanPropagation_t nan_policy) {
+  if (self.numel() == 1) return self.clone().reshape({});
+  CambriconDeviceGuard guard(self);
+  const auto handle = HandleForDevice(self.device().index());
+  const auto input = self.contiguous().reshape({self.numel()});
+  auto output = at::empty({1}, self.options());
+  TensorDesc in_desc, out_desc;
+  in_desc.Set(input);
+  out_desc.Set(output);
+  cnnlReduceDescriptor_t desc = nullptr;
+  CheckCnnl(cnnlCreateReduceDescriptor(&desc), "cnnlCreateReduceDescriptor");
+  auto destroy = c10::make_scope_exit([&] { cnnlDestroyReduceDescriptor(desc); });
+  int axis = 0;
+  CheckCnnl(cnnlSetReduceDescriptor_v3(desc, &axis, 1, reduce,
+      ToCnnlDtype(self.scalar_type()), nan_policy, CNNL_REDUCE_NO_INDICES,
+      CNNL_32BIT_INDICES, 0.0f, false), "cnnlSetReduceDescriptor_v3");
+  size_t bytes = 0;
+  CheckCnnl(cnnlGetReduceOpWorkspaceSize_v2(handle, in_desc.get(), out_desc.get(),
+      nullptr, desc, &bytes), "cnnlGetReduceOpWorkspaceSize_v2");
+  auto workspace = at::empty({static_cast<int64_t>(bytes)},
+      self.options().dtype(at::kByte));
+  CheckCnnl(cnnlReduce_v2(handle, desc, in_desc.get(), input.const_data_ptr(),
+      nullptr, nullptr, workspace.mutable_data_ptr(), bytes, out_desc.get(),
+      output.mutable_data_ptr(), nullptr, nullptr), "cnnlReduce_v2");
+  return output.reshape({});
+}
+
 } // namespace
+
+at::Tensor DtypeCast(const at::Tensor& input, at::ScalarType dtype,
+                     const at::Tensor& destination) {
+  struct Conversion {
+    at::ScalarType input;
+    at::ScalarType output;
+    cnnlCastDataType_t mode;
+  };
+  constexpr Conversion conversions[] = {
+      {at::kLong, at::kInt, CNNL_CAST_INT64_TO_INT32},
+      {at::kInt, at::kLong, CNNL_CAST_INT32_TO_INT64},
+      {at::kLong, at::kFloat, CNNL_CAST_INT64_TO_FLOAT},
+      {at::kInt, at::kFloat, CNNL_CAST_INT32_TO_FLOAT},
+      {at::kBool, at::kLong, CNNL_CAST_BOOL_TO_INT64},
+      {at::kBool, at::kInt, CNNL_CAST_BOOL_TO_INT32},
+      {at::kBool, at::kFloat, CNNL_CAST_BOOL_TO_FLOAT},
+      {at::kLong, at::kBool, CNNL_CAST_INT64_TO_BOOL},
+      {at::kInt, at::kBool, CNNL_CAST_INT32_TO_BOOL},
+      {at::kFloat, at::kBool, CNNL_CAST_FLOAT_TO_BOOL},
+      {at::kBFloat16, at::kFloat, CNNL_CAST_BFLOAT16_TO_FLOAT},
+      {at::kFloat, at::kBFloat16, CNNL_CAST_FLOAT_TO_BFLOAT16},
+      {at::kHalf, at::kFloat, CNNL_CAST_HALF_TO_FLOAT},
+      {at::kFloat, at::kHalf, CNNL_CAST_FLOAT_TO_HALF},
+  };
+  if (input.is_neg() || !input.is_contiguous() ||
+      input.numel() > std::numeric_limits<int>::max()) return {};
+  if (destination.defined() &&
+      (destination.device() != input.device() || destination.sizes() != input.sizes() ||
+       destination.scalar_type() != dtype || !destination.is_contiguous() ||
+       destination.is_neg() || destination.is_alias_of(input))) return {};
+  const auto* conversion = std::find_if(
+      std::begin(conversions), std::end(conversions), [&](const auto& entry) {
+        return entry.input == input.scalar_type() && entry.output == dtype;
+      });
+  if (conversion == std::end(conversions)) return {};
+  const CambriconDeviceGuard guard(input);
+  auto output = destination.defined() ? destination
+      : at::empty(input.sizes(), input.options().dtype(dtype));
+  if (input.numel() == 0) return output;
+  TensorDesc from, to;
+  from.Set(input.view({input.numel()}));
+  to.Set(output.view({output.numel()}));
+  CheckCnnl(cnnlCastDataType(
+      HandleForDevice(input.device().index()), from.get(), input.const_data_ptr(),
+      conversion->mode, to.get(), output.mutable_data_ptr()), "cnnlCastDataType");
+  return output;
+}
 
 """
 
@@ -262,6 +361,7 @@ OPS = {
     "fill_.Scalar": "fill",
     "zero_": "zero_inplace",
     "ones": "ones",
+    "full": "full",
     "zeros": "zeros",
     "zeros_like": "zeros_like",
     "scalar_tensor": "host_built",
@@ -271,8 +371,15 @@ OPS = {
     "embedding": "embedding",
     "cumsum": "cumsum",
     "cat": "cat",
+    "argmax": "arg_reduce",
+    "max": "max_all",
     "pow.Tensor_Scalar": "pow",
     "sqrt": "sqrt",
+    "_foreach_mul_.Scalar": "foreach_scalar",
+    "_foreach_add_.Scalar": "foreach_scalar",
+    "_foreach_div_.ScalarList": "foreach_div",
+    "_foreach_sqrt": "foreach_sqrt",
+    "_foreach_lerp_.Scalar": "foreach_lerp",
     "lerp_.Scalar": "lerp_scalar",
     "addcmul_": "addcmul_fused",
     "addcdiv_": "addcdiv_fused",
@@ -285,9 +392,15 @@ OPS = {
     "new_ones": "new_ones",
     "silu": "silu",
     "silu_backward": "silu_backward",
+    "le.Tensor": "long_compare",
     "where.self": "where",
+    "all": "all_bool",
+    "masked_fill.Scalar": "masked_fill",
+    "constant_pad_nd": "constant_pad",
     "_softmax": "softmax_forward",
     "_softmax_backward_data": "softmax_backward",
+    "_log_softmax_backward_data": "softmax_backward",
+    "_log_softmax_backward_data.out": "log_softmax_backward_out",
     "slice_backward": "slice_backward",
     "_unsafe_view": "metadata",
     "transpose.int": "metadata",
@@ -375,10 +488,15 @@ _BINARY_BODY = """\
         "flagos cambricon: {op} only accepts CPU tensors as scalars");
   }}
   CambriconDeviceGuard guard(self.is_cpu() ? other : self);
-  auto a = self.to(device, dtype);
-  auto b = other.to(device, dtype);
+  const bool integral = dtype == at::kInt;
+  const bool widen = !integral && ComputesInFloat32(dtype);
+  // Preserve host scalar precision until the FP32 operation. Casting a
+  // wrapped scalar to BF16 first changes attention scaling before the
+  // product is rounded to the result dtype.
+  auto a = self.to(device, self.is_cpu() && widen ? at::kFloat : dtype);
+  auto b = other.to(device, other.is_cpu() && widen ? at::kFloat : dtype);
   const auto shape = at::infer_size(self.sizes(), other.sizes());
-  auto result = at::empty(shape, a.options());
+  auto result = at::empty(shape, a.options().dtype(dtype));
   if (result.numel() == 0) {{
     return result;
   }}
@@ -388,8 +506,6 @@ _BINARY_BODY = """\
     full.push_back(1);
   }}
   const auto handle = HandleForDevice(static_cast<int>(device.index()));
-  const bool integral = dtype == at::kInt;
-  const bool widen = !integral && ComputesInFloat32(dtype);
   // cnnlOpTensor broadcasts on its own: given [2,4,8] against [2,4,1] it
   // produces the [2,4,8] product (verified against a C probe), and it rejects a
   // reduced-rank or flattened descriptor with status 7. So each operand is
@@ -748,20 +864,20 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 """
 
-# ones_like is a fill of a freshly allocated result. The 1.3 ms the FlagGems
-# path costs is its Python dispatch, not the fill.
 T_ZERO_INPLACE = """\
 at::Tensor& {kernel}(at::Tensor& self) {{
-  // zero_ is fill_(0) and nothing more, so it goes through the native fill_ the
-  // generator already emits rather than duplicating the cnnlFill_v3 call. One
-  // extra dispatch, still on the vendor path.
-  //
-  // Worth doing because FlagGems' zero_ is a Python wrapper, and it measured
-  // 3.95 ms against 0.35-1.0 ms for every other foreach op the optimizer issues
-  // over the same 226 MB -- 57 GB/s against roughly 650 GB/s. AdamW reaches it
-  // through _foreach_zero_, which decomposes to one zero_ per parameter, so the
-  // wrapper is paid 47 times a step.
-  return self.fill_(at::Scalar(0));
+  if (self.numel() == 0) return self;
+  if (!self.is_non_overlapping_and_dense() || self.is_quantized() ||
+      self.is_neg() || self.is_conj()) {{
+    return self.fill_(at::Scalar(0));
+  }}
+  CambriconDeviceGuard guard(self);
+  const auto stream = ::GetCurrentStreamForDevice(self.device().index());
+  TORCH_CHECK(
+      ::MemsetAsync(self.mutable_data_ptr(), 0, self.numel() * self.element_size(),
+                    stream) == Success,
+      "flagos cambricon: cnrtMemsetAsync ({op}) failed");
+  return self;
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
@@ -850,6 +966,28 @@ at::Tensor {kernel}(
   // (512,512) causal mask each attention layer builds.
   result.fill_(1);
   return result;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_FULL = """\
+at::Tensor {kernel}(
+    at::IntArrayRef size, const at::Scalar& value,
+    std::optional<at::ScalarType> dtype_opt, std::optional<at::Layout> layout_opt,
+    std::optional<at::Device> device_opt, std::optional<bool> pin_memory_opt) {{
+  const auto dtype = dtype_opt.value_or(
+      value.isBoolean() ? at::kBool : value.isIntegral(false) ? at::kLong
+      : c10::get_default_dtype_as_scalartype());
+  if ((!dtype_opt && value.isComplex()) ||
+      !(SupportedFloatDtype(dtype) || dtype == at::kBool ||
+        dtype == at::kInt || dtype == at::kLong)) {{
+    return {disp}.DispatchBackend(
+        Backend::kFlagGems, size, value, dtype_opt, layout_opt, device_opt, pin_memory_opt);
+  }}
+  // Use ATen's factory and the same CNNL fill as ones and zeros.
+  return at::native::full(size, value, dtype_opt, layout_opt, device_opt, pin_memory_opt);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
@@ -1013,37 +1151,32 @@ at::Tensor {kernel}(const c10::IListRef<at::Tensor>& tensors, int64_t dim) {{
   // because its elements are std::reference_wrapper, not tensors.
   std::vector<at::Tensor> parts;
   parts.reserve(tensors.size());
+  const auto& initial = *tensors.begin();
+  auto dtype = initial.scalar_type();
   for (const auto& t : tensors) {{
-    parts.emplace_back(t);
+    TORCH_CHECK(t.device() == initial.device(),
+        "flagos cambricon: {op} needs one device");
+    dtype = at::promoteTypes(dtype, t.scalar_type());
+    if (!at::native::cat_should_skip_tensor(t)) parts.emplace_back(t);
   }}
-  const at::Tensor& first = parts[0];
+  const auto& first = parts.empty() ? initial : parts[0];
   TORCH_CHECK(
       first.device().type() == c10::DeviceType::PrivateUse1,
       "flagos cambricon: {op} requires device tensors");
   const int64_t rank = first.dim();
   const int64_t axis = dim < 0 ? dim + rank : dim;
   TORCH_CHECK(axis >= 0 && axis < rank, "flagos cambricon: {op} got dim ", dim);
-  for (const auto& t : parts) {{
-    TORCH_CHECK(
-        t.device() == first.device() && t.scalar_type() == first.scalar_type(),
-        "flagos cambricon: {op} needs one device and one dtype");
-  }}
-  if (!SupportedFloatDtype(first.scalar_type())) {{
-    std::vector<at::Tensor> host;
-    host.reserve(parts.size());
-    for (const auto& t : parts) {{
-      host.push_back(t.to(at::kCPU));
-    }}
-    return at::cat(at::TensorList(host), dim).to(first.device());
-  }}
-
+  if (!(SupportedFloatDtype(dtype) || dtype == at::kLong || dtype == at::kInt ||
+        dtype == at::kShort || dtype == at::kChar || dtype == at::kBool))
+    return {disp}.DispatchBackend(Backend::kFlagGems, tensors, dim);
   auto sizes = first.sizes().vec();
   int64_t joined = 0;
-  for (const auto& t : parts) {{
-    joined += t.size(axis);
+  for (size_t i = 0; i < parts.size(); ++i) {{
+    at::native::check_cat_shape_except_dim(first, parts[i], axis, i);
+    joined += parts[i].size(axis);
   }}
   sizes[axis] = joined;
-  auto output = at::empty(sizes, first.options());
+  auto output = at::empty(sizes, first.options().dtype(dtype));
   if (output.numel() == 0) {{
     return output;
   }}
@@ -1055,7 +1188,7 @@ at::Tensor {kernel}(const c10::IListRef<at::Tensor>& tensors, int64_t dim) {{
     if (t.numel() == 0) {{
       continue;
     }}
-    const auto src = t.contiguous();
+    const auto src = t.to(dtype).contiguous();
     // Each input lands in a slice of the result. The slice keeps the result's
     // stride on every axis, so cnnlCopy_v2 is given a strided destination
     // descriptor and writes exactly the elements the slice covers.
@@ -1282,18 +1415,22 @@ at::Tensor& {kernel}(
   }}
   const auto handle =
       HandleForDevice(static_cast<int>(self.device().index()));
+  // Keep the scalar and recurrence in FP32, then round once into the BF16
+  // moment. Materializing the weight in BF16 changes the AdamW first moment.
+  const bool widen = self.scalar_type() == at::kBFloat16 &&
+      end.scalar_type() == at::kBFloat16 && end.device() == self.device();
+  auto left = widen ? Widen(self, handle) : self;
+  const auto right = widen ? Widen(end, handle) : end;
   // cnnlLerp takes the weight as a tensor, not a host scalar, so the scalar is
   // materialised once. cnnlSetTensorDescriptor cannot describe rank zero, hence
   // the one-element reshape.
   auto weight_tensor =
-      at::scalar_tensor(weight, self.options()).reshape({{1}});
+      at::scalar_tensor(weight, left.options()).reshape({{1}});
   TensorDesc ad, bd, wd, od;
-  ad.Set(self);
-  bd.Set(end);
+  ad.Set(left);
+  bd.Set(right);
   wd.Set(weight_tensor);
-  // Written into self's buffer: for the in-place form the destination is the
-  // first operand, which is what the vendor's wrapper passes too.
-  od.Set(self);
+  od.Set(left);
   size_t workspace_size = 0;
   CheckCnnl(
       cnnlGetLerpWorkspaceSize(
@@ -1307,11 +1444,12 @@ at::Tensor& {kernel}(
   }}
   CheckCnnl(
       cnnlLerp(
-          handle, ad.get(), self.const_data_ptr(), bd.get(),
-          end.const_data_ptr(), wd.get(), weight_tensor.const_data_ptr(),
+          handle, ad.get(), left.const_data_ptr(), bd.get(),
+          right.const_data_ptr(), wd.get(), weight_tensor.const_data_ptr(),
           workspace_size > 0 ? workspace.mutable_data_ptr() : nullptr,
-          workspace_size, od.get(), self.mutable_data_ptr()),
+          workspace_size, od.get(), left.mutable_data_ptr()),
       "cnnlLerp ({op})");
+  if (widen) Narrow(left, self, handle);
   return self;
 }}
 
@@ -1377,9 +1515,7 @@ at::Tensor {kernel}(
   auto result = at::empty(
       size, at::TensorOptions().dtype(c10::dtype_or_default(dtype_opt))
                 .device(device));
-  if (result.numel() > 0) {{
-    result.fill_(0);
-  }}
+  result.zero_();
   return result;
 }}
 
@@ -1403,15 +1539,9 @@ at::Tensor {kernel}(
   TORCH_CHECK(
       !pin_memory_opt.has_value() || !*pin_memory_opt,
       "flagos cambricon: {op} does not serve pinned memory");
-  // The same pair `ones_like` uses, so the options the aten schema asks for are
-  // honoured in one place.
-  auto result = at::empty_like(self);
-  if (dtype_opt.has_value()) {{
-    result = result.to(*dtype_opt);
-  }}
-  if (result.numel() > 0) {{
-    result.fill_(0);
-  }}
+  auto result = at::empty_like(
+      self, dtype_opt, layout_opt, device_opt, pin_memory_opt, memory_format_opt);
+  result.zero_();
   return result;
 }}
 
@@ -1540,6 +1670,218 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 
 """
 
+T_ALL_BOOL = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (self.scalar_type() != at::kBool) {{
+    return {disp}.DispatchBackend(Backend::kFlagGems, self);
+  }}
+  if (!self.numel()) return at::ones({{}}, self.options());
+  return ReduceFlat(self, CNNL_REDUCE_AND, CNNL_NOT_PROPAGATE_NAN);
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_MAX_ALL = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  const auto dtype = self.scalar_type();
+  if (!(SupportedFloatDtype(dtype) || dtype == at::kBool ||
+        dtype == at::kInt || dtype == at::kLong)) {{
+    return {disp}.DispatchBackend(Backend::kFlagGems, self);
+  }}
+  TORCH_CHECK(self.numel(), "max(): specify a reduction dimension for an empty tensor");
+  return ReduceFlat(self, CNNL_REDUCE_MAX, CNNL_PROPAGATE_NAN);
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_ARG_REDUCE = """\
+at::Tensor {kernel}(const at::Tensor& self, std::optional<int64_t> dim, bool keepdim) {{
+  if (!SupportedFloatDtype(self.scalar_type())) {{
+    return {disp}.DispatchBackend(Backend::kFlagGems, self, dim, keepdim);
+  }}
+  const auto options = self.options().dtype(at::kLong);
+  if (!self.dim()) {{
+    if (dim) c10::maybe_wrap_dim(*dim, self.dim());
+    return at::zeros({{}}, options);
+  }}
+  if (!dim) TORCH_CHECK(self.numel(), "argmax: an empty tensor requires a dimension");
+  int axis = dim ? c10::maybe_wrap_dim(*dim, self.dim()) : 0;
+  TORCH_CHECK_INDEX(!dim || self.size(axis),
+      "argmax: expected a non-empty reduction dimension");
+  auto input = self.contiguous();
+  if (!dim) input = input.reshape({{-1}});
+  auto shape = input.sizes().vec();
+  shape[axis] = 1;
+  auto indices = at::empty(shape, options);
+  if (indices.numel()) {{
+    CambriconDeviceGuard guard(self);
+    const auto handle = HandleForDevice(self.device().index());
+    TensorDesc in_desc, indices_desc;
+    in_desc.Set(input);
+    indices_desc.Set(indices);
+    cnnlReduceDescriptor_t desc = nullptr;
+    CheckCnnl(cnnlCreateReduceDescriptor(&desc), "cnnlCreateReduceDescriptor");
+    auto destroy = c10::make_scope_exit([&] {{ cnnlDestroyReduceDescriptor(desc); }});
+    CheckCnnl(cnnlSetReduceDescriptor_v3(desc, &axis, 1, CNNL_REDUCE_MAX,
+        ToCnnlDtype(self.scalar_type()), CNNL_PROPAGATE_NAN,
+        CNNL_REDUCE_ONLY_INDICES, CNNL_64BIT_INDICES, 0.0f, false),
+        "cnnlSetReduceDescriptor_v3 (argmax)");
+    size_t bytes = 0;
+    CheckCnnl(cnnlGetReduceOpWorkspaceSize_v2(
+        handle, in_desc.get(), nullptr, indices_desc.get(), desc, &bytes),
+        "cnnlGetReduceOpWorkspaceSize_v2 (argmax)");
+    auto workspace = at::empty({{static_cast<int64_t>(bytes)}},
+        self.options().dtype(at::kByte));
+    CheckCnnl(cnnlReduce_v2(handle, desc, in_desc.get(), input.const_data_ptr(),
+        nullptr, nullptr, workspace.mutable_data_ptr(), bytes, nullptr, nullptr,
+        indices_desc.get(), indices.mutable_data_ptr()), "cnnlReduce_v2 (argmax)");
+  }}
+  if (!keepdim) return indices.squeeze(axis);
+  if (!dim) return indices.reshape(c10::SmallVector<int64_t, 8>(self.dim(), 1));
+  return indices;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_MASKED_FILL = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mask,
+                    const at::Scalar& fill) {{
+  const auto dtype = self.scalar_type();
+  if (!(SupportedFloatDtype(dtype) || dtype == at::kLong || dtype == at::kInt ||
+        dtype == at::kShort || dtype == at::kChar || dtype == at::kBool) ||
+      mask.device() != self.device() || mask.scalar_type() != at::kBool) {{
+    return {disp}.DispatchBackend(Backend::kFlagGems, self, mask, fill);
+  }}
+  CambriconDeviceGuard guard(self);
+  const auto shape = at::infer_size(self.sizes(), mask.sizes());
+  auto output = at::empty(shape, self.options());
+  if (!output.numel()) return output;
+  auto input = self.contiguous();
+  auto predicate = mask.contiguous();
+  if (!input.dim()) input = input.unsqueeze(0);
+  if (!predicate.dim()) predicate = predicate.unsqueeze(0);
+  auto result = output.dim() ? output : output.unsqueeze(0);
+  auto value = at::scalar_tensor(fill, self.options()).reshape({{1}});
+  TensorDesc in_desc, mask_desc, value_desc, out_desc;
+  in_desc.Set(input);
+  mask_desc.Set(predicate);
+  value_desc.Set(value);
+  out_desc.Set(result);
+  const auto handle = HandleForDevice(self.device().index());
+  size_t bytes = 0;
+  CheckCnnl(cnnlGetMaskedWorkspaceSize(handle, CNNL_MASKED_FILL, in_desc.get(),
+      mask_desc.get(), value_desc.get(), out_desc.get(), &bytes),
+      "cnnlGetMaskedWorkspaceSize (masked_fill)");
+  auto workspace = at::empty({{static_cast<int64_t>(bytes)}},
+      self.options().dtype(at::kByte));
+  CheckCnnl(cnnlMasked_v5(handle, CNNL_MASKED_FILL, in_desc.get(),
+      input.const_data_ptr(), mask_desc.get(), predicate.const_data_ptr(),
+      value_desc.get(), value.const_data_ptr(), workspace.mutable_data_ptr(), bytes,
+      out_desc.get(), result.mutable_data_ptr(), nullptr), "cnnlMasked_v5 (masked_fill)");
+  return output;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_CONSTANT_PAD = """\
+at::Tensor {kernel}(const at::Tensor& self, at::IntArrayRef pad,
+                    const at::Scalar& fill) {{
+  const auto dtype = self.scalar_type();
+  if (pad.size() % 2 || pad.size() / 2 > static_cast<size_t>(self.dim()) ||
+      !(SupportedFloatDtype(dtype) || dtype == at::kLong || dtype == at::kInt ||
+        dtype == at::kShort || dtype == at::kChar || dtype == at::kBool) ||
+      std::any_of(pad.begin(), pad.end(), [](int64_t value) {{
+        return value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max();
+      }})) {{
+    return {disp}.DispatchBackend(Backend::kFlagGems, self, pad, fill);
+  }}
+  if (pad.empty()) return self.clone();
+  auto shape = self.sizes().vec();
+  std::vector<int> bounds(self.dim() * 2, 0);
+  for (size_t i = 0; i < pad.size(); i += 2) {{
+    const auto axis = self.dim() - 1 - i / 2;
+    const auto left = pad[i];
+    const auto right = pad[i + 1];
+    if (left < 0 || right < 0 ||
+        shape[axis] > std::numeric_limits<int>::max() - left - right) {{
+      return {disp}.DispatchBackend(Backend::kFlagGems, self, pad, fill);
+    }}
+    shape[axis] += left + right;
+    bounds[2 * axis] = left;
+    bounds[2 * axis + 1] = right;
+  }}
+  CambriconDeviceGuard guard(self);
+  if (!self.numel()) return at::full(shape, fill, self.options());
+  auto input = self.contiguous();
+  auto result = at::empty(shape, self.options());
+  auto value = at::scalar_tensor(fill, self.options().device(at::kCPU));
+  TensorDesc x, y;
+  x.Set(input);
+  y.Set(result);
+  CheckCnnl(cnnlPad(HandleForDevice(self.device().index()), x.get(),
+      input.const_data_ptr(), bounds.data(), value.const_data_ptr(), y.get(),
+      result.mutable_data_ptr()), "cnnlPad");
+  return result;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+LONG_COMPARISONS = {"le.Tensor": "CNNL_LOGIC_OP_LE"}
+
+T_LONG_COMPARE = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
+  if (at::result_type(self, other) != at::kLong) {{
+    return {disp}.DispatchBackend(Backend::kFlagGems, self, other);
+  }}
+  const auto& device_tensor = self.device().is_cpu() ? other : self;
+  const auto device = device_tensor.device();
+  TORCH_CHECK(
+      (self.device() == device || (self.device().is_cpu() && self.dim() == 0)) &&
+      (other.device() == device || (other.device().is_cpu() && other.dim() == 0)),
+      "flagos cambricon: {op} expected inputs on one device");
+  CambriconDeviceGuard guard(device_tensor);
+  const auto shape = at::infer_size(self.sizes(), other.sizes());
+  auto output = at::empty(shape, device_tensor.options().dtype(at::kBool));
+  if (output.numel() == 0) return output;
+
+  const size_t rank = std::max<size_t>(shape.size(), 1);
+  const auto align = [rank](const at::Tensor& tensor) {{
+    std::vector<int64_t> sizes(rank - tensor.dim(), 1);
+    sizes.insert(sizes.end(), tensor.sizes().begin(), tensor.sizes().end());
+    return tensor.view(sizes);
+  }};
+  const auto left = align(self.to(device, at::kLong).contiguous());
+  const auto right = align(other.to(device, at::kLong).contiguous());
+  const auto result = align(output);
+  TensorDesc ld, rd, od;
+  ld.Set(left);
+  rd.Set(right);
+  od.Set(result);
+  const auto handle = HandleForDevice(device.index());
+  size_t bytes = 0;
+  CheckCnnl(cnnlGetLogicOpWorkspaceSize(handle, ld.get(), rd.get(), od.get(), &bytes),
+            "cnnlGetLogicOpWorkspaceSize ({op})");
+  auto workspace = at::empty({{static_cast<int64_t>(bytes)}}, output.options().dtype(at::kByte));
+  CheckCnnl(cnnlLogicOp(handle, {logic_op}, ld.get(), left.const_data_ptr(),
+                        rd.get(), right.const_data_ptr(), workspace.mutable_data_ptr(),
+                        bytes, od.get(), output.mutable_data_ptr()), "cnnlLogicOp ({op})");
+  return output;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
 T_WHERE = """\
 at::Tensor {kernel}(
     const at::Tensor& condition, const at::Tensor& self,
@@ -1638,7 +1980,9 @@ at::Tensor {kernel}(
   xd.Set(input);
   gd.Set(grad);
   yd.Set(output);
-  ActivationDesc act(CNNL_ACTIVATION_SILU);
+  // torch_mlu uses the fast SiLU derivative and propagates NaNs.
+  ActivationDesc act(
+      CNNL_ACTIVATION_SILU, CNNL_ACTIVATION_FAST, CNNL_PROPAGATE_NAN);
   CheckCnnl(
       cnnlActivationBackward(
           handle, act.get(), nullptr, /*y_desc=*/nullptr, /*y=*/nullptr,
@@ -1838,7 +2182,7 @@ at::Tensor {kernel}(
   CambriconDeviceGuard guard(y);
   auto result = at::empty_like(y);
   if (result.numel() == 0) {{
-    return result;
+    return result.view(sizes).to(input_dtype);
   }}
   const auto handle =
       HandleForDevice(static_cast<int>(y.device().index()));
@@ -1848,16 +2192,31 @@ at::Tensor {kernel}(
   od.Set(result);
   CheckCnnl(
       cnnlSoftmaxBackward(
-          handle, CNNL_SOFTMAX_ACCURATE, mode, nullptr, yd.get(),
+          handle, {algorithm}, mode, nullptr, yd.get(),
           y.const_data_ptr(), gd.get(), g.const_data_ptr(), nullptr, od.get(),
           result.mutable_data_ptr()),
       "cnnlSoftmaxBackward ({op})");
-  return result.view(sizes);
+  return result.view(sizes).to(input_dtype);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 
 """
+T_LOG_SOFTMAX_BACKWARD_OUT = """\
+at::Tensor& {kernel}(const at::Tensor& grad_output, const at::Tensor& output,
+                     int64_t dim, at::ScalarType input_dtype, at::Tensor& out) {{
+  TORCH_CHECK(out.scalar_type() == input_dtype,
+      "_log_softmax_backward_data.out requires the input dtype");
+  const auto result = at::_log_softmax_backward_data(grad_output, output, dim, input_dtype);
+  out.resize_(result.sizes());
+  out.copy_(result);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
 T_POW = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& exponent) {{
   TORCH_CHECK(
@@ -1871,6 +2230,22 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& exponent) {{
   }}
   CambriconDeviceGuard guard(self);
   const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
+  // The inference FP32 square needs only the input descriptor. General powers
+  // still materialize a device exponent for CNNL's binary power operation.
+  if (c10::InferenceMode::is_enabled() && self.scalar_type() == at::kFloat &&
+      self.dim() > 0 && self.dim() <= 8 && self.numel() > 0 &&
+      self.numel() <= std::numeric_limits<int>::max() && self.is_contiguous() &&
+      !self.has_names() && !self.is_neg() && !self.is_conj() &&
+      !exponent.isComplex() && !exponent.isSymbolic() && exponent.toDouble() == 2.0) {{
+    auto result = at::empty(self.sizes(), self.options());
+    TensorDesc desc;
+    desc.Set(self);
+    CheckCnnl(
+        cnnlSquare(handle, desc.get(), self.const_data_ptr(), desc.get(),
+            result.mutable_data_ptr()),
+        "cnnlSquare");
+    return result;
+  }}
   // A CNNL descriptor cannot express rank zero, so a scalar input is treated as
   // one element and reshaped back at the end.
   const bool flat = self.dim() == 0;
@@ -2289,7 +2664,8 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
       "flagos cambricon: mm needs both operands on one device");
   CambriconDeviceGuard guard(self);
   const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
-  const bool widen = ComputesInFloat32(dtype);
+  // Keep BF16 matrix operands on the same accumulation path as torch_mlu.
+  const bool widen = dtype == at::kHalf;
   // A transposed operand is described, not copied. `x @ w.t()` is how every
   // Linear layer spells its product, and materialising that view copies the
   // whole weight on every call: measured at 1024x3072, mm(x, w.t()) took 9027 us
@@ -2325,8 +2701,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   bd.Set(bw);
   cd.Set(wide);
 
-  // alpha and beta are the compute dtype's 1 and 0: the operands were widened
-  // to that dtype above, and CNNL reads the scale in the operand dtype.
+  // CNNL reads the floating-point scales as FP32, including with BF16 inputs.
   const float one_f = 1.0f;
   const float zero_f = 0.0f;
   const void* alpha = static_cast<const void*>(&one_f);
@@ -2450,7 +2825,8 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
       "flagos cambricon: bmm expects two 3-D operands with one batch size");
   CambriconDeviceGuard guard(self);
   const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
-  const bool widen = ComputesInFloat32(dtype);
+  // Keep BF16 matrix operands on the same accumulation path as torch_mlu.
+  const bool widen = dtype == at::kHalf;
   // A transposed operand is described, not copied. `x @ w.t()` is how every
   // Linear layer spells its product, and materialising that view copies the
   // whole weight on every call: measured at 1024x3072, mm(x, w.t()) took 9027 us
@@ -3091,7 +3467,228 @@ __attribute__((constructor)) void InstallCloneHook() {{
 """
 
 
+# Homogeneous BF16 foreach kernels call the published CNNL list APIs once per
+# operation. ATen's sequential implementations retain layout, promotion, alias
+# and autograd semantics for inputs outside the measured CNNL contract.
+T_FOREACH_SUPPORT = """\
+namespace {
+
+bool CanRunForeach(at::TensorList self, at::TensorList end = {}) {
+  constexpr auto max_int = std::numeric_limits<int>::max();
+  if (at::GradMode::is_enabled() || self.empty() || self.size() > max_int ||
+      !self.front().defined() || self.front().scalar_type() != at::kBFloat16 ||
+      !CanBatchForeach(self, end, {}, max_int)) {
+    return false;
+  }
+  for (size_t index = 0; index < self.size(); ++index) {
+    const auto& input = self[index];
+    if (input.numel() == 0 || input.dim() < 1 || input.dim() > 8 ||
+        input.has_names() || (!end.empty() &&
+            (end[index].has_names() || end[index].is_alias_of(input)))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool SupportedForeachScalar(const at::Scalar& scalar) {
+  return scalar.isFloatingPoint() && !scalar.isSymbolic() &&
+      std::abs(scalar.toDouble()) <= std::numeric_limits<float>::max();
+}
+
+struct ForeachDescriptors {
+  explicit ForeachDescriptors(at::TensorList tensors)
+      : descriptors(tensors.size()), handles(tensors.size()) {
+    for (size_t index = 0; index < tensors.size(); ++index) {
+      descriptors[index].Set(tensors[index]);
+      handles[index] = descriptors[index].get();
+    }
+  }
+
+  std::vector<TensorDesc> descriptors;
+  std::vector<cnnlTensorDescriptor_t> handles;
+};
+
+std::vector<const void*> ForeachInputs(at::TensorList tensors) {
+  std::vector<const void*> pointers;
+  pointers.reserve(tensors.size());
+  for (const auto& tensor : tensors) pointers.push_back(tensor.const_data_ptr());
+  return pointers;
+}
+
+std::vector<void*> ForeachOutputs(at::TensorList tensors) {
+  std::vector<void*> pointers;
+  pointers.reserve(tensors.size());
+  for (const auto& tensor : tensors) pointers.push_back(tensor.mutable_data_ptr());
+  return pointers;
+}
+
+at::Tensor ForeachWorkspace(const at::Tensor& input, size_t bytes) {
+  if (bytes == 0) return {};
+  return at::empty({static_cast<int64_t>(bytes)}, input.options().dtype(at::kByte));
+}
+
+void BumpForeachVersions(at::TensorList tensors) {
+  for (const auto& tensor : tensors) tensor.unsafeGetTensorImpl()->bump_version();
+}
+
+void RunForeachBinary(at::TensorList self, cnnlForeachOpMode_t op,
+                      cnnlForeachBinaryMode_t mode, at::ArrayRef<float> scalars) {
+  CambriconDeviceGuard device_guard(self.front());
+  const auto handle = HandleForDevice(self.front().device().index());
+  const ForeachDescriptors batch(self);
+  const auto inputs = ForeachInputs(self);
+  auto outputs = ForeachOutputs(self);
+  const auto* descriptors = batch.handles.data();
+  const auto count = static_cast<int64_t>(self.size());
+
+  TensorDesc scalar_desc;
+  const int elements = static_cast<int>(scalars.size());
+  CheckCnnl(
+      cnnlSetTensorDescriptor(scalar_desc.get(), CNNL_LAYOUT_ARRAY,
+          CNNL_DTYPE_FLOAT, 1, &elements),
+      "cnnlSetTensorDescriptor (foreach scalar)");
+  size_t bytes = 0;
+  CheckCnnl(
+      cnnlGetForeachBinaryOpWorkspaceSize(handle, count, descriptors, &bytes),
+      "cnnlGetForeachBinaryOpWorkspaceSize");
+  auto workspace = ForeachWorkspace(self.front(), bytes);
+  const float one = 1.0f;
+  CheckCnnl(
+      cnnlForeachBinaryOp(handle, op, mode, count, descriptors, inputs.data(),
+          nullptr, nullptr, scalar_desc.get(), scalars.data(), &one,
+          workspace.defined() ? workspace.mutable_data_ptr() : nullptr, bytes,
+          descriptors, outputs.data()),
+      "cnnlForeachBinaryOp");
+  BumpForeachVersions(self);
+}
+
+}  // namespace
+
+"""
+
+FOREACH_SCALAR_OPS = {
+    "_foreach_mul_.Scalar": (
+        "CNNL_FOREACH_MUL",
+        "foreach_tensor_mul_scalar_kernel_slow_",
+    ),
+    "_foreach_add_.Scalar": (
+        "CNNL_FOREACH_ADD",
+        "foreach_tensor_add_scalar_kernel_slow_",
+    ),
+}
+
+T_FOREACH_SCALAR = """\
+void {kernel}(at::TensorList self, const at::Scalar& scalar) {{
+  if (!CanRunForeach(self) || !SupportedForeachScalar(scalar))
+    return at::native::{fallback}(self, scalar);
+  RECORD_FUNCTION("flagos::cambricon::{op}", std::vector<c10::IValue>());
+  const float value = scalar.toFloat();
+  RunForeachBinary(self, {cnnl_op}, FOREACH_BINARY_SCALAR, {{value}});
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+"""
+
+T_FOREACH_DIV = """\
+void {kernel}(at::TensorList self, at::ArrayRef<at::Scalar> scalars) {{
+  if (!CanRunForeach(self) || self.size() != scalars.size() ||
+      !std::all_of(scalars.begin(), scalars.end(), [](const at::Scalar& scalar) {{
+        return SupportedForeachScalar(scalar) &&
+            std::abs(scalar.toDouble()) >= std::numeric_limits<float>::denorm_min();
+      }})) {{
+    return at::native::foreach_tensor_div_scalarlist_kernel_slow_(self, scalars);
+  }}
+  RECORD_FUNCTION("flagos::cambricon::{op}", std::vector<c10::IValue>());
+  std::vector<float> values;
+  values.reserve(scalars.size());
+  for (const auto& scalar : scalars) values.push_back(scalar.toFloat());
+  RunForeachBinary(self, CNNL_FOREACH_DIV, FOREACH_BINARY_SCALAR_LIST, values);
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+"""
+
+T_FOREACH_SQRT = """\
+std::vector<at::Tensor> {kernel}(at::TensorList self) {{
+  if (!CanRunForeach(self)) return at::native::foreach_tensor_sqrt_slow(self);
+  RECORD_FUNCTION("flagos::cambricon::{op}", std::vector<c10::IValue>());
+  CambriconDeviceGuard device_guard(self.front());
+  const auto handle = HandleForDevice(self.front().device().index());
+  const ForeachDescriptors batch(self);
+  const auto inputs = ForeachInputs(self);
+  std::vector<at::Tensor> results;
+  results.reserve(self.size());
+  for (const auto& tensor : self) results.push_back(at::empty_like(tensor));
+  auto outputs = ForeachOutputs(results);
+  const auto* descriptors = batch.handles.data();
+
+  size_t bytes = 0;
+  CheckCnnl(
+      cnnlGetForeachUnaryOpWorkspaceSize(handle, self.size(), descriptors, &bytes),
+      "cnnlGetForeachUnaryOpWorkspaceSize");
+  auto workspace = ForeachWorkspace(self.front(), bytes);
+  CheckCnnl(
+      cnnlForeachUnaryOp(handle, CNNL_FOREACH_SQRT, self.size(), descriptors,
+          inputs.data(), workspace.defined() ? workspace.mutable_data_ptr() : nullptr,
+          bytes, descriptors, outputs.data()),
+      "cnnlForeachUnaryOp");
+  return results;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+"""
+
+T_FOREACH_LERP = """\
+void {kernel}(at::TensorList self, at::TensorList end, const at::Scalar& weight) {{
+  if (self.size() != end.size() || !CanRunForeach(self, end) ||
+      !SupportedForeachScalar(weight)) {{
+    return at::native::foreach_tensor_lerp_list_kernel_slow_(self, end, weight);
+  }}
+  RECORD_FUNCTION("flagos::cambricon::{op}", std::vector<c10::IValue>());
+  CambriconDeviceGuard device_guard(self.front());
+  const auto handle = HandleForDevice(self.front().device().index());
+  const ForeachDescriptors batch(self);
+  const auto inputs = ForeachInputs(self);
+  const auto others = ForeachInputs(end);
+  auto outputs = ForeachOutputs(self);
+  const auto* descriptors = batch.handles.data();
+  const int count = static_cast<int>(self.size());
+
+  size_t bytes = 0;
+  CheckCnnl(
+      cnnlGetForeachLerpExtraInputSize(handle, FOREACH_LERP_SCALAR, count,
+          descriptors, &bytes),
+      "cnnlGetForeachLerpExtraInputSize");
+  at::Tensor workspace;
+  if (bytes > 0) {{
+    auto metadata = at::empty({{static_cast<int64_t>(bytes)}},
+        at::TensorOptions().dtype(at::kByte));
+    CheckCnnl(
+        cnnlInitForeachLerpExtraInput(handle, FOREACH_LERP_SCALAR, count,
+            descriptors, inputs.data(), others.data(), nullptr, descriptors,
+            outputs.data(), metadata.mutable_data_ptr()),
+        "cnnlInitForeachLerpExtraInput");
+    workspace = metadata.to(self.front().device());
+  }}
+  const float value = weight.toFloat();
+  const void* scalar = &value;
+  CheckCnnl(
+      cnnlForeachLerp(handle, FOREACH_LERP_SCALAR, count, descriptors,
+          inputs.data(), descriptors, others.data(), nullptr, &scalar,
+          workspace.defined() ? workspace.mutable_data_ptr() : nullptr, bytes,
+          descriptors, outputs.data()),
+      "cnnlForeachLerp");
+  BumpForeachVersions(self);
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+"""
+
 CATEGORIES = {
+    "arg_reduce": T_ARG_REDUCE,
+    "full": T_FULL,
+    "max_all": T_MAX_ALL,
     "reduce_all": T_REDUCE_ALL,
     "ones_like": T_ONES_LIKE,
     "unary_op": T_UNARY_OP,
@@ -3103,6 +3700,9 @@ CATEGORIES = {
     "embedding_backward": T_EMBEDDING_BACKWARD,
     "softmax": T_SOFTMAX,
     "clone": T_CLONE,
+    "foreach_div": T_FOREACH_DIV,
+    "foreach_sqrt": T_FOREACH_SQRT,
+    "foreach_lerp": T_FOREACH_LERP,
 }
 
 
@@ -3158,15 +3758,34 @@ def render():
         elif category == "softmax_forward":
             body = T_SOFTMAX_FORWARD.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "softmax_backward":
-            body = T_SOFTMAX_BACKWARD.format(kernel=kernel, fn=fn, disp=disp, op=op)
+            algorithm = "LOG" if op.startswith("_log_softmax") else "ACCURATE"
+            body = T_SOFTMAX_BACKWARD.format(
+                kernel=kernel,
+                fn=fn,
+                disp=disp,
+                op=op,
+                algorithm=f"CNNL_SOFTMAX_{algorithm}",
+            )
+        elif category == "log_softmax_backward_out":
+            body = T_LOG_SOFTMAX_BACKWARD_OUT.format(kernel=kernel, fn=fn, disp=disp)
         elif category == "slice_backward":
             body = T_SLICE_BACKWARD.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "silu":
             body = T_SILU.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "silu_backward":
             body = T_SILU_BACKWARD.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "long_compare":
+            body = T_LONG_COMPARE.format(
+                kernel=kernel, fn=fn, disp=disp, op=op, logic_op=LONG_COMPARISONS[op]
+            )
         elif category == "where":
             body = T_WHERE.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "all_bool":
+            body = T_ALL_BOOL.format(kernel=kernel, fn=fn, disp=disp)
+        elif category == "masked_fill":
+            body = T_MASKED_FILL.format(kernel=kernel, fn=fn, disp=disp)
+        elif category == "constant_pad":
+            body = T_CONSTANT_PAD.format(kernel=kernel, fn=fn, disp=disp)
         elif category == "unary_op":
             body = T_UNARY_OP.format(
                 kernel=kernel,
@@ -3265,6 +3884,16 @@ def render():
                 cnnl_op=cnnl_op,
                 extra=extra,
             )
+        elif category == "foreach_scalar":
+            cnnl_op, fallback = FOREACH_SCALAR_OPS[op]
+            body = T_FOREACH_SCALAR.format(
+                kernel=kernel,
+                fn=fn,
+                disp=disp,
+                op=op,
+                cnnl_op=cnnl_op,
+                fallback=fallback,
+            )
         elif category == "binary_out":
             base_op = OUT_FORWARDS_TO[op]
             base_fn, _ = schema_to_cpp_name(base_op)
@@ -3287,6 +3916,7 @@ def render():
         covered.append((op, category))
     return (
         FILE_HEADER
+        + T_FOREACH_SUPPORT
         + "\n".join(bodies)
         + FILE_FOOTER
         # The clone hook has to sit outside the namespace, so it is appended to

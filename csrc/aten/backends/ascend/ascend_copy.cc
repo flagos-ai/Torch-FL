@@ -11,6 +11,37 @@
 
 namespace at::native::flagos::ascend {
 
+bool TryAsyncContiguousCopy(const at::Tensor& dst, const at::Tensor& src,
+                            size_t nbytes) {
+  if (dst.device() != src.device() || src.is_alias_of(dst) ||
+      !c10::flagos::CachingDeviceAllocator::is_enabled()) {
+    return false;
+  }
+  auto* allocator = c10::flagos::GetCachingAllocator();
+  const auto& src_storage = src.storage().data_ptr();
+  const auto& dst_storage = dst.storage().data_ptr();
+  if (src_storage.get_deleter() != allocator->raw_deleter() ||
+      dst_storage.get_deleter() != allocator->raw_deleter()) {
+    return false;
+  }
+  OpDeviceGuard device_guard(DeviceOf(src));
+  auto stream = ::GetCurrentStreamForDevice(src.device().index());
+  if (!stream ||
+      ::MemcpyAsync(dst.data_ptr(), src.data_ptr(), nbytes, MemcpyDeviceToDevice,
+                    stream) != Success) {
+    return false;
+  }
+  try {
+    allocator->record_stream(src_storage, stream);
+    allocator->record_stream(dst_storage, stream);
+  } catch (...) {
+    // The transfer is already in flight. Keep both storages live on error.
+    ::StreamSynchronize(stream);
+    throw;
+  }
+  return true;
+}
+
 bool StridedCopy(const at::Tensor& dst, const at::Tensor& src) {
   if (!dst.defined() || !src.defined()) {
     return false;
@@ -44,6 +75,19 @@ bool StridedCopy(const at::Tensor& dst, const at::Tensor& src) {
   // `test_contiguous_matches_same_device_result` pins. The guard is kept for
   // the stream (and any future workspace), the two ambient reads left here.
   OpDeviceGuard device_guard_(DeviceOf(dst));
+
+#if defined(FLAGOS_NATIVE_HOSTS)
+  // ACLNN can cast a base-format FP32/BF16 view directly into the
+  // destination layout. No intermediate contiguous allocation is needed.
+  if (src.device() == dst.device() && src.dim() <= 8 && src.sizes() == dst.sizes() &&
+      !src.is_alias_of(dst) &&
+      ((src.scalar_type() == at::kBFloat16 && dst.scalar_type() == at::kFloat) ||
+       (src.scalar_type() == at::kFloat && dst.scalar_type() == at::kBFloat16))) {
+    AclTensorWrapper target(dst), input(src);
+    EXEC_ASCEND_CMD(aclnnInplaceCopy, const_cast<aclTensor*>(target.get()), input.get());
+    return true;
+  }
+#endif
 
   // aclnnInplaceCopy(selfRef, src): writes src into selfRef, honoring the
   // strides/offset recorded on each aclTensor. AclTensorWrapper preserves the
@@ -143,13 +187,13 @@ at::Tensor DtypeCast(const at::Tensor& src, at::ScalarType dtype) {
   hsh.tensor(src_c);
   hsh.tensor(out);
   hsh.val(static_cast<int32_t>(acl_dtype));
-  ExecAscendCached(
+  ExecAscendCached<true>(
       "aclnnCast", "aclnnCastGetWorkspaceSize",
       opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&src_c}, {&out},
-      [&](GwsFunc gws,
-          std::vector<AclTensorWrapper>& in,
-          std::vector<AclTensorWrapper>& out_t,
+      [acl_dtype](GwsFunc gws,
+          AclTensorArgs& in,
+          AclTensorArgs& out_t,
           uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, acl_dtype, out_t[0].acl_tensor, pws, pex);
       });

@@ -94,3 +94,24 @@ def test_contiguous_matches_cpu_after_the_on_device_gather():
     torch.flagos.synchronize()
     got = src.contiguous().cpu()
     assert torch.equal(got, expected)
+
+
+@pytest.mark.ppu
+@pytest.mark.native_source_host
+def test_thead_native_clone_uses_flaggems_for_offset_and_expanded_views():
+    from torch_fl import native_host
+
+    before = native_host.audit()["enqueued_kernels"]
+    tokens = torch.arange(128).reshape(1, 128)
+    values = torch.arange(256).reshape(1, 1, 2, 128).to(torch.bfloat16)
+    for base, view in (
+        (tokens, lambda value: value[:, 16:]),
+        (values, lambda value: value.expand(-1, 16, -1, -1)),
+    ):
+        actual = view(base.to(_device())).clone(memory_format=torch.contiguous_format)
+        torch.testing.assert_close(actual.cpu(), view(base))
+        assert actual.is_contiguous()
+    after = native_host.audit()["enqueued_kernels"]
+    for rank in (2, 4):
+        name = f"_copy_kernel_kernel_rank_{rank}"
+        assert after[name] > before.get(name, 0)

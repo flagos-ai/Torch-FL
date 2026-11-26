@@ -10,6 +10,12 @@ import json
 from pathlib import Path
 
 
+_TSINGMICRO_POINTWISE_BINDINGS = (
+    ("tsingmicro_bind_sqrt_out_slot", "flag_gems.ops.sqrt", "sqrt_func"),
+    ("tsingmicro_bind_strided_copy_slot", "_tsingmicro.ops.cat", "copy_func"),
+)
+
+
 def activate(hosts):
     """Install the wheel's source-generated callbacks without compiling code."""
     import torch
@@ -87,6 +93,17 @@ def activate(hosts):
                 raise RuntimeError(f"unknown typed host binding: {kind}")
             values.append(slot)
         slots[kind] = values
+
+    for binding, source, function in _TSINGMICRO_POINTWISE_BINDINGS:
+        bind = getattr(torch.ops.flagos, binding, None)
+        if bind is None:
+            continue
+        for record, slot in zip(
+            manifest["records"]["pointwise"], slots["pointwise"], strict=True
+        ):
+            if record["symbol"] == {"module": source, "path": [function]}:
+                bind(slot)
+                break
 
     module = importlib.import_module(hosts.package + ".typed._source_hosts")
     module.bind_globals(slots["global"])

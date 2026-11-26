@@ -88,17 +88,25 @@ def test_committed_bridges_match_their_catalog_and_faithful_schemas(functions):
 
 def test_out_adapters_preserve_storage_and_use_configured_functional_routes(functions):
     source = codegen.gen_flaggems_out_adapters(functions)
-    assert source.count("resize_output(") == 4
-    assert source.count("assert_no_internal_overlap(") == 4
+    assert source.count("resize_output(") == 10
+    assert source.count("assert_no_internal_overlap(") == 13
     assert "assert_no_overlap(out, input)" in source
     for call in (
         "add_tensor_dispatcher(self, other, alpha)",
+        "sub_tensor_dispatcher(self, other, alpha)",
         "mul_tensor_dispatcher(self, other)",
         "mean_dim_dispatcher(self, dim, keepdim, dtype.value_or(out.scalar_type()))",
         "cat_dispatcher(tensors, dim)",
     ):
         assert call in source
     assert "USE_DCU" in source
+    assert "Backend::kFlagGems, MeanOutIluvatar" in source
+    assert "Backend::kFlagGems, NllLossMeanForwardOutNvidia" in source
+    assert "Backend::kFlagGems, NllLossMeanBackwardOutNvidia" in source
+    assert "Backend::kFlagGems, LogSoftmaxBackwardOutNvidia" in source
+    assert "Backend::kFlagGems, SoftmaxBackwardOutNvidia" in source
+    assert "Backend::kFlagGems, SumIntlistOutNvidia" in source
+    assert "Backend::kFlagGems, MulOutFlagGems" in source
     assert "DeviceBoxingGuard" not in source and "redispatch" not in source
     committed = (ROOT / "csrc/aten/generated/flaggems_python_kernels.cc").read_text()
     assert committed.endswith(source)

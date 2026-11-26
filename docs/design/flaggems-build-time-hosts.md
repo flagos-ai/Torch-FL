@@ -80,6 +80,15 @@ KernelGenerator specializes device code for a new rank. No Python host wrapper
 is generated for that rank. The source-derived preparation code retains the
 wheel's schema, promotion, broadcasting and layout decisions.
 
+Constant padding uses the published FlagGems generator during wheel builds to
+produce and compile host wrappers for ranks 1 through 8. The installed bundle
+verifies each generated source before binding its original Triton kernel.
+
+The shared host can prepare the first C++ launch when the verified FlagGems
+tuner has a single legal configuration. This applies across accelerators with
+the same published tuner sources. Selections with multiple candidates and
+selections with hooks follow the published tuning policy.
+
 The common launcher and its selected backend adapter are compiled once. Signature,
 scalar widths, descriptor layout, shared memory, scratch requirements and cluster
 launch configuration are data provided by kernel compilation. The NVIDIA adapter

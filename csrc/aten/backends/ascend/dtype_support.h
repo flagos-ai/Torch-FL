@@ -6,6 +6,7 @@
 
 #include <ATen/core/Tensor.h>
 #include <ATen/ScalarOps.h>
+#include <ATen/ops/result_type_native.h>
 #include <c10/core/ScalarType.h>
 #include <string_view>
 #include <cstdio>
@@ -67,7 +68,13 @@ inline c10::ScalarType BinaryResultType(
     std::string_view op,
     const at::Tensor& self,
     const at::Tensor& other) {
-  auto dtype = at::result_type(self, other);
+  const auto self_dtype = self.scalar_type();
+  // Wrapped scalars can use the default floating or complex dtype.
+  const auto dtype = self_dtype == other.scalar_type() &&
+          !self.unsafeGetTensorImpl()->is_wrapped_number() &&
+          !other.unsafeGetTensorImpl()->is_wrapped_number()
+      ? self_dtype
+      : at::native::result_type(self, other);
   if (op == "aclnnDiv" && c10::isIntegralType(dtype, true)) {
     return at::get_default_dtype_as_scalartype();
   }

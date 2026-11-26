@@ -33,6 +33,10 @@
 
 namespace at::native::flagos::iluvatar {
 
+#if defined(FLAGOS_NATIVE_ILUVATAR_KERNELS)
+at::Tensor NativeBFloat16Cast(const at::Tensor& src, at::ScalarType dtype);
+#endif
+
 namespace dtype_cast_detail {
 
 // Which (source, target) pairs FlagGems' `to_copy` was measured exact for on a
@@ -106,6 +110,9 @@ inline at::Tensor DtypeCast(const at::Tensor& src, at::ScalarType dtype) {
   if (!dtype_cast_detail::DtypeCastSupported(src.scalar_type(), dtype)) {
     return at::Tensor();
   }
+#if defined(FLAGOS_NATIVE_ILUVATAR_KERNELS)
+  if (auto out = NativeBFloat16Cast(src, dtype); out.defined()) return out;
+#endif
   // The dotted qualname is resolved through flag_gems' package top level first
   // (see GetFunc in python_op_caller.cc), so a vendor-tuned `to_copy` wins over
   // the generic one without this call site knowing which backend is active.

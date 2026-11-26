@@ -8,11 +8,8 @@
 // allocated. Dispatchers are declared in generated/ops.h (shared with the CUDA
 // codegen); here we only fill the Backend::kKunlunxin slot.
 //
-// The op set is the ten ops of the hardware-agnostic runtime-conformance suite
-// (tests/integration/runtime/runtime_caps.py RUNTIME_OPS) -- the list every
-// platform in this repo is measured on. Whatever routes here without a kernel
-// falls through to the CPU fallback: the conf only names this backend for ops
-// in kunlunxin_register.inc.
+// Includes the hardware-agnostic runtime conformance ops and measured vendor
+// dtype routes. The conf only names this backend for registered operators.
 //
 // The CUDA-boxing path this replaces is gone. Nothing below dispatches to a
 // CUDA kernel, and the kKunlunxin slot is a plain one -- unlike the flaggems /
@@ -21,43 +18,369 @@
 
 #include "../../../generated/ops.h"
 #include <ATen/ExpandUtils.h>
+#include <ATen/MemoryOverlap.h>
+#include <ATen/core/LegacyTypeDispatch.h>
 #include <ATen/core/List.h>
 #include <ATen/core/Tensor.h>
+#include <ATen/native/CPUFallback.h>
+#include <ATen/native/ReduceOpsUtils.h>
+#include <ATen/native/Resize.h>
+#include <ATen/ops/_foreach_add_native.h>
+#include <ATen/ops/_foreach_addcdiv_native.h>
+#include <ATen/ops/_foreach_addcmul_native.h>
+#include <ATen/ops/_foreach_div_native.h>
+#include <ATen/ops/_foreach_mul_native.h>
+#include <ATen/ops/_foreach_sqrt_native.h>
 #include <ATen/ops/_softmax.h>
+#include <ATen/ops/_softmax_backward_data_ops.h>
+#include <ATen/ops/_log_softmax_backward_data_ops.h>
+#include <ATen/ops/slice_backward_native.h>
+#include <ATen/ops/_log_softmax_ops.h>
 #include <ATen/ops/add.h>
+#include <ATen/ops/argmax_ops.h>
+#include <ATen/ops/bitwise_and_ops.h>
+#include <ATen/ops/bitwise_not_ops.h>
+#include <ATen/ops/bitwise_or_ops.h>
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/cat.h>
 #include <ATen/ops/embedding.h>
+#include <ATen/ops/cumsum_ops.h>
+#include <ATen/ops/full_native.h>
+#include <ATen/ops/pow_ops.h>
+#include <ATen/ops/embedding_dense_backward_ops.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/eq_ops.h>
+#include <ATen/ops/le_ops.h>
+#include <ATen/ops/mean_ops.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
 #include <ATen/ops/neg.h>
+#include <ATen/ops/ne_ops.h>
+#include <ATen/ops/nll_loss_backward_ops.h>
+#include <ATen/ops/nll_loss_forward_ops.h>
 #include <ATen/ops/result_type.h>
+#include <ATen/ops/silu_backward_ops.h>
 #include <ATen/ops/sum.h>
 #include <ATen/ops/where.h>
 #include <c10/core/Scalar.h>
 #include <algorithm>
+#include <deque>
+#include <limits>
 #include <memory>
+#include <numeric>
 #include <optional>
+#include <unordered_map>
 #include <vector>
+#include "../../../fallback.h"
+#include "../../../foreach_utils.h"
 #include "../kunlunxin_common.h"
+#include <xpu/refactor/xpukernel_math.h>
+#if defined(FLAGOS_KUNLUNXIN_XBLASLT)
+#include <xblas_lt_api.h>
+#endif
+#if defined(FLAGOS_KUNLUNXIN_SCALED_LINEAR)
+#include <ATen/ops/linear_native.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include <torch/library.h>
+#include <newcontext.h>
+#include <xblas_legacy_api.h>
+
+namespace baidu::xpu::api {
+template <typename T>
+int findmax(Context*, const T*, float*, int64_t);
+int cast_te(Context*, const bfloat16*, const float*, float16*, float*, int64_t);
+}  // namespace baidu::xpu::api
+#endif
 
 namespace at::native::flagos {
 
 namespace kunlunxin = at::native::flagos::kunlunxin;
 
+namespace {
+struct XdnnTensorList {
+  explicit XdnnTensorList(at::TensorList members) {
+    tensors.reserve(members.size());
+    for (const auto& tensor : members) {
+      wrappers_.emplace_back(tensor);
+      tensors.emplace_back(wrappers_.back().get());
+    }
+  }
+
+  std::vector<xdnn_pytorch::Tensor> tensors;
+
+ private:
+  std::deque<kunlunxin::XdnnTensorWrapper> wrappers_;
+};
+
+bool CanBatchXdnn(at::TensorList self, at::TensorList first = {}, at::TensorList second = {}) {
+  return !self.empty() && self.front().defined() &&
+      self.front().scalar_type() == at::kBFloat16 &&
+      CanBatchForeach(self, first, second, std::numeric_limits<int32_t>::max()) &&
+      std::all_of(self.begin(), self.end(), [](const at::Tensor& tensor) {
+        return tensor.numel() > 0;
+      });
+}
+
+std::vector<xdnn_pytorch::Scalar> ToXdnnScalars(at::ArrayRef<at::Scalar> scalars) {
+  std::vector<xdnn_pytorch::Scalar> result;
+  result.reserve(scalars.size());
+  for (const auto& scalar : scalars) result.push_back(kunlunxin::ToXdnnScalar(scalar));
+  return result;
+}
+
+template <class Submit>
+void RunStreamOrderedXdnn(const at::Tensor& input, const char* operation, Submit submit) {
+  // The default Native Host queue orders both the SDK and FlagGems kernels.
+  // Requests using the SDK fallback queue still need fences across both queues.
+  const bool shared_queue =
+      kunlunxin::KunlunxinSubmissionStream(kunlunxin::XdnnDeviceIndex(input)) != nullptr;
+  if (!shared_queue) kunlunxin::DrainXpuStream();
+  const int status = submit();
+  TORCH_CHECK(status == 0, operation, " failed on the Kunlunxin XPU backend: ",
+      kunlunxin::KunlunxinStatusName(status));
+  if (!shared_queue) kunlunxin::DrainXpuStream();
+}
+
+template <typename Submit>
+at::Tensor TryXdnnScalarBinary(const at::Tensor& self, const at::Tensor& other,
+    const char* operation, Submit submit) {
+  const auto dtype = self.scalar_type();
+  if (!self.is_privateuseone() || (dtype != at::kBFloat16 && dtype != at::kFloat) ||
+      !other.device().is_cpu() || other.dim() != 0 || other.is_complex() ||
+      at::result_type(self, other) != dtype) {
+    return {};
+  }
+  const auto input = self.contiguous();
+  auto out = at::empty(input.sizes(), input.options());
+  if (!input.numel()) return out;
+  kunlunxin::KunlunxinDeviceGuard guard(input);
+  auto* context = kunlunxin::GetKunlunxinContext(input);
+  kunlunxin::XdnnTensorWrapper t_input(input), t_out(out);
+  // Preserve an FP32 scalar through the arithmetic before rounding to BF16.
+  const auto scalar = kunlunxin::ToXdnnScalar(other.item());
+  RunStreamOrderedXdnn(input, operation, [&] {
+    return submit(context, t_input.get(), scalar, t_out.get());
+  });
+  return out;
+}
+
+template <class Submit>
+at::Tensor TryXdnnBroadcast(const at::Tensor& self, const at::Tensor& other,
+    const char* operation, Submit submit) {
+  const auto dtype = self.scalar_type();
+  if (!self.is_privateuseone() || (dtype != at::kFloat && dtype != at::kBFloat16) ||
+      other.device() != self.device() || other.scalar_type() != dtype ||
+      !self.is_contiguous() || !other.is_contiguous() || self.is_neg() ||
+      other.is_neg() || self.dim() < 1 || other.dim() < 1 || self.dim() > 4 || other.dim() > 4) {
+    return {};
+  }
+  const auto sizes = at::infer_size_dimvector(self.sizes(), other.sizes());
+  auto result = at::empty(sizes, self.options());
+  if (!result.numel()) return result;
+  kunlunxin::KunlunxinDeviceGuard guard(self);
+  auto* context = kunlunxin::GetKunlunxinContext(self);
+  const auto xshape = self.sizes().vec();
+  const auto yshape = other.sizes().vec();
+  RunStreamOrderedXdnn(self, operation, [&] {
+    if (dtype == at::kFloat) {
+      return submit(context, self.const_data_ptr<float>(), other.const_data_ptr<float>(),
+          result.data_ptr<float>(), xshape, yshape);
+    }
+    return submit(context, static_cast<const bfloat16*>(self.const_data_ptr()),
+        static_cast<const bfloat16*>(other.const_data_ptr()),
+        static_cast<bfloat16*>(result.data_ptr()), xshape, yshape);
+  });
+  return result;
+}
+
+bool IsSameDeviceFloat(const at::Tensor& tensor, const at::Tensor& self) {
+  return tensor.scalar_type() == at::kFloat && tensor.device() == self.device();
+}
+
+bool SupportsMeanNll(const at::Tensor& self, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction) {
+  return reduction == 1 && (!weight || !weight->defined()) && self.scalar_type() == at::kFloat &&
+      self.dim() == 2 && self.numel() > 0 && target.dim() == 1 &&
+      target.size(0) == self.size(0) && target.scalar_type() == at::kLong &&
+      target.device() == self.device();
+}
+
+std::vector<int64_t> DenseStorageAxes(const at::Tensor& tensor) {
+  std::vector<int64_t> axes(tensor.dim());
+  std::iota(axes.begin(), axes.end(), 0);
+  std::stable_sort(axes.begin(), axes.end(),
+      [&](int64_t a, int64_t b) { return tensor.stride(a) > tensor.stride(b); });
+  return axes;
+}
+
+at::Tensor& StoreKunlunxinOut(at::Tensor& out, const at::Tensor& result) {
+  if (out.is_same(result) || !out.numel()) return out;
+  if (!out.is_contiguous() && out.is_non_overlapping_and_dense()) {
+    const auto axes = DenseStorageAxes(out);
+    out.permute(axes).copy_(result.permute(axes));
+    return out;
+  }
+  return out.copy_(result);
+}
+}  // namespace
+
+#if defined(FLAGOS_KUNLUNXIN_XBLASLT)
+namespace {
+
+void CheckXblasLt(xblasStatus_t status, const char* operation) {
+  TORCH_CHECK(status == CUBLAS_STATUS_SUCCESS, operation, " failed: ", static_cast<int>(status));
+}
+
+struct XblasLtHandle {
+  xblasLtHandle_t value{};
+  XblasLtHandle() { CheckXblasLt(xblasLtCreate(&value), "xblasLtCreate"); }
+  ~XblasLtHandle() { xblasLtDestroy(value); }
+  XblasLtHandle(const XblasLtHandle&) = delete;
+  XblasLtHandle& operator=(const XblasLtHandle&) = delete;
+};
+
+struct XblasLtOperation {
+  xblasLtMatmulDesc_t value{};
+  XblasLtOperation(xblasOperation_t a, xblasOperation_t b) {
+    CheckXblasLt(xblasLtMatmulDescCreate(&value, CUBLAS_COMPUTE_32F, CUDA_R_32F),
+        "xblasLtMatmulDescCreate");
+    const auto first = xblasLtMatmulDescSetAttribute(
+        value, CUBLASLT_MATMUL_DESC_TRANSA, &a, sizeof(a));
+    const auto second = xblasLtMatmulDescSetAttribute(
+        value, CUBLASLT_MATMUL_DESC_TRANSB, &b, sizeof(b));
+    if (first != CUBLAS_STATUS_SUCCESS || second != CUBLAS_STATUS_SUCCESS) {
+      xblasLtMatmulDescDestroy(value);
+      CheckXblasLt(first != CUBLAS_STATUS_SUCCESS ? first : second, "xblasLt transpose");
+    }
+  }
+  ~XblasLtOperation() { xblasLtMatmulDescDestroy(value); }
+  XblasLtOperation(const XblasLtOperation&) = delete;
+  XblasLtOperation& operator=(const XblasLtOperation&) = delete;
+};
+
+struct XblasLtLayout {
+  xblasLtMatrixLayout_t value{};
+  XblasLtLayout(cudaDataType_t dtype, int64_t rows, int64_t columns, int64_t leading,
+                int batches, int64_t batch_stride) {
+    CheckXblasLt(xblasLtMatrixLayoutCreate(&value, dtype, rows, columns, leading),
+        "xblasLtMatrixLayoutCreate");
+    if (batches > 1) {
+      const auto count = xblasLtMatrixLayoutSetAttribute(
+          value, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batches, sizeof(batches));
+      const auto stride = xblasLtMatrixLayoutSetAttribute(
+          value, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+          &batch_stride, sizeof(batch_stride));
+      if (count != CUBLAS_STATUS_SUCCESS || stride != CUBLAS_STATUS_SUCCESS) {
+        xblasLtMatrixLayoutDestroy(value);
+        CheckXblasLt(count != CUBLAS_STATUS_SUCCESS ? count : stride, "xblasLt batch layout");
+      }
+    }
+  }
+  ~XblasLtLayout() { xblasLtMatrixLayoutDestroy(value); }
+  XblasLtLayout(const XblasLtLayout&) = delete;
+  XblasLtLayout& operator=(const XblasLtLayout&) = delete;
+};
+
+struct XblasLtMatrix {
+  at::Tensor value;
+  bool row_major;
+  explicit XblasLtMatrix(const at::Tensor& tensor)
+      : value(tensor), row_major(tensor.stride(-1) == 1 && tensor.stride(-2) >= tensor.size(-1)) {
+    if (!row_major && !(tensor.stride(-2) == 1 && tensor.stride(-1) >= tensor.size(-2))) {
+      value = tensor.contiguous();
+      row_major = true;
+    }
+  }
+  xblasOperation_t operation() const { return row_major ? CUBLAS_OP_N : CUBLAS_OP_T; }
+  int64_t leading() const {
+    return std::max(rows(), row_major ? value.stride(-2) : value.stride(-1));
+  }
+  int64_t rows() const { return value.size(row_major ? -1 : -2); }
+  int64_t columns() const { return value.size(row_major ? -2 : -1); }
+};
+
+at::Tensor TryXblasLt(const at::Tensor& left, const at::Tensor& right, int rank) {
+  if (left.dim() != rank || right.dim() != rank || !left.is_privateuseone() ||
+      left.device() != right.device() || left.scalar_type() != at::kBFloat16 ||
+      right.scalar_type() != at::kBFloat16 || !left.numel() || !right.numel() ||
+      left.is_neg() || right.is_neg() || left.is_conj() || right.is_conj() ||
+      left.size(-1) != right.size(-2)) {
+    return {};
+  }
+  const bool batched = rank == 3;
+  if (batched && (left.size(0) != right.size(0) || left.size(0) > INT32_MAX)) return {};
+  const int batches = batched ? static_cast<int>(left.size(0)) : 1;
+  const auto device = kunlunxin::XdnnDeviceIndex(left);
+  const auto stream = kunlunxin::KunlunxinSubmissionStream(device);
+  if (!stream) return {};
+  kunlunxin::KunlunxinDeviceGuard guard(left);
+  // The batched BF16 path uses FP32 inputs to match the vendor's attention
+  // product; the rank-two entry uses BF16 input with FP32 accumulation.
+  const auto dtype = batched ? CUDA_R_32F : CUDA_R_16BF;
+  const auto options = batched ? left.options().dtype(at::kFloat) : left.options();
+  XblasLtMatrix a(batched ? left.to(at::kFloat) : left);
+  XblasLtMatrix b(batched ? right.to(at::kFloat) : right);
+  const auto m = left.size(-2);
+  const auto n = right.size(-1);
+  auto out = batched ? at::empty({batches, m, n}, options) : at::empty({m, n}, options);
+  XblasLtLayout al(dtype, b.rows(), b.columns(), b.leading(), batches,
+      batched ? b.value.stride(0) : 0);
+  XblasLtLayout bl(dtype, a.rows(), a.columns(), a.leading(), batches,
+      batched ? a.value.stride(0) : 0);
+  XblasLtLayout ol(dtype, n, m, n, batches, batched ? out.stride(0) : 0);
+  const XblasLtOperation operation(b.operation(), a.operation());
+  thread_local std::unordered_map<int, std::unique_ptr<XblasLtHandle>> handles;
+  auto& handle = handles[device];
+  if (!handle) handle = std::make_unique<XblasLtHandle>();
+  auto workspace = batched ? at::Tensor()
+      : at::empty({out.numel()}, out.options().dtype(at::kFloat));
+  constexpr float alpha = 1.0f;
+  constexpr float beta = 0.0f;
+  const auto status = xblasLtMatmul(handle->value, operation.value, &alpha,
+      b.value.const_data_ptr(), al.value, a.value.const_data_ptr(), bl.value, &beta,
+      out.const_data_ptr(), ol.value, out.mutable_data_ptr(), ol.value, nullptr,
+      workspace.defined() ? workspace.data_ptr() : nullptr,
+      workspace.defined() ? workspace.nbytes() : 0,
+      reinterpret_cast<cudaStream_t>(stream));
+  if (status == CUBLAS_STATUS_NOT_SUPPORTED || status == CUBLAS_STATUS_ARCH_MISMATCH) {
+    return {};
+  }
+  CheckXblasLt(status, "xblasLtMatmul");
+  return batched ? out.to(at::kBFloat16) : out;
+}
+}  // namespace
+#endif
+
 at::Tensor AddTensorKernelKunlunxin(
     const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  if (auto result = TryXdnnScalarBinary(self, other, "add_scalar",
+          [&](auto* context, const auto& input, const auto& scalar, auto& output) {
+            return xdnn_pytorch::add_scalar(
+                context, input, scalar, kunlunxin::ToXdnnScalar(alpha), output);
+          }); result.defined()) {
+    return result;
+  }
+  if (!alpha.isComplex() && alpha.toDouble() == 1.0) {
+    if (auto result = TryXdnnBroadcast(self, other, "broadcast_add",
+            [](auto* context, const auto* left, const auto* right, auto* output,
+               const auto& left_shape, const auto& right_shape) {
+              return xpytorch::xpu::api::broadcast_add(
+                  context, left, right, output, left_shape, right_shape);
+            }); result.defined()) {
+      return result;
+    }
+  }
   const at::ScalarType result_dtype = at::result_type(self, other);
   if (!kunlunxin::KunlunxinSupportsAddDtype(result_dtype)) {
     return at::add(self.cpu(), other.cpu(), alpha).to(self.device());
   }
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
-  const std::vector<int64_t> out_shape =
-      at::infer_size(self_c.sizes(), other_c.sizes());
-  at::Tensor self_b = self_c.expand(out_shape).contiguous();
-  at::Tensor other_b = other_c.expand(out_shape).contiguous();
+  auto other_c = other.device() == self.device() && other.scalar_type() == result_dtype
+      ? other : other.to(self.device(), result_dtype);
+  const auto sizes = at::infer_size_dimvector(self_c.sizes(), other_c.sizes());
+  const at::IntArrayRef out_shape(sizes);
+  const auto self_b = (self_c.sizes() == out_shape ? self_c : self_c.expand(out_shape)).contiguous();
+  const auto other_b = (other_c.sizes() == out_shape ? other_c : other_c.expand(out_shape)).contiguous();
   kunlunxin::KunlunxinDeviceGuard guard(self_b);
   xpytorch::xpu::api::Context* const context =
       kunlunxin::GetKunlunxinContext(self_b);
@@ -75,17 +398,63 @@ at::Tensor AddTensorKernelKunlunxin(
 
 REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kKunlunxin, AddTensorKernelKunlunxin)
 
+at::Tensor& AddInplaceTensorKernelKunlunxin(
+    at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  if (self.scalar_type() != at::kBFloat16 || other.scalar_type() != at::kBFloat16 ||
+      self.device() != other.device() || !self.sizes().equals(other.sizes()) ||
+      !self.is_non_overlapping_and_dense() || other.layout() != at::kStrided ||
+      self.is_alias_of(other) || self.is_neg() || other.is_neg() ||
+      self.dim() == 0 || self.dim() > 4 || self.numel() == 0 ||
+      self.numel() > INT32_MAX || alpha.isComplex() || alpha.toDouble() != 1.0) {
+    return add_inplace_tensor_dispatcher.DispatchBackend(Backend::kFlagGems, self, other, alpha);
+  }
+  auto left = self;
+  auto right = other;
+  if (!self.is_contiguous()) {
+    const auto axes = DenseStorageAxes(self);
+    left = self.permute(axes);
+    right = other.permute(axes);
+  }
+  right = right.contiguous();
+  kunlunxin::KunlunxinDeviceGuard guard(left);
+  auto* context = kunlunxin::GetKunlunxinContext(left);
+  const auto shape = left.sizes().vec();
+  auto* destination = static_cast<bfloat16*>(left.mutable_data_ptr());
+  RunStreamOrderedXdnn(left, "broadcast_add", [&] {
+    return xpytorch::xpu::api::broadcast_add(context, destination,
+        static_cast<const bfloat16*>(right.const_data_ptr()), destination, shape, shape);
+  });
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddInplaceTensorFn, add_inplace_tensor_dispatcher, Backend::kKunlunxin, AddInplaceTensorKernelKunlunxin)
+
 at::Tensor MulTensorKernelKunlunxin(const at::Tensor& self, const at::Tensor& other) {
+  if (auto result = TryXdnnScalarBinary(self, other, "mul_scalar",
+          [](auto* context, const auto& input, const auto& scalar, auto& output) {
+            return xdnn_pytorch::mul_scalar(context, input, scalar, output);
+          }); result.defined()) {
+    return result;
+  }
+  if (auto result = TryXdnnBroadcast(self, other, "broadcast_mul",
+          [](auto* context, const auto* left, const auto* right, auto* output,
+             const auto& left_shape, const auto& right_shape) {
+            return xpytorch::xpu::api::broadcast_mul(
+                context, left, right, output, left_shape, right_shape);
+          }); result.defined()) {
+    return result;
+  }
   const at::ScalarType result_dtype = at::result_type(self, other);
   if (!kunlunxin::KunlunxinSupportsMulDtype(result_dtype)) {
     return at::mul(self.cpu(), other.cpu()).to(self.device());
   }
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
-  const std::vector<int64_t> out_shape =
-      at::infer_size(self_c.sizes(), other_c.sizes());
-  at::Tensor self_b = self_c.expand(out_shape).contiguous();
-  at::Tensor other_b = other_c.expand(out_shape).contiguous();
+  auto other_c = other.device() == self.device() && other.scalar_type() == result_dtype
+      ? other : other.to(self.device(), result_dtype);
+  const auto sizes = at::infer_size_dimvector(self_c.sizes(), other_c.sizes());
+  const at::IntArrayRef out_shape(sizes);
+  const auto self_b = (self_c.sizes() == out_shape ? self_c : self_c.expand(out_shape)).contiguous();
+  const auto other_b = (other_c.sizes() == out_shape ? other_c : other_c.expand(out_shape)).contiguous();
   kunlunxin::KunlunxinDeviceGuard guard(self_b);
   xpytorch::xpu::api::Context* const context =
       kunlunxin::GetKunlunxinContext(self_b);
@@ -103,6 +472,11 @@ at::Tensor MulTensorKernelKunlunxin(const at::Tensor& self, const at::Tensor& ot
 REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kKunlunxin, MulTensorKernelKunlunxin)
 
 at::Tensor MmKernelKunlunxin(const at::Tensor& self, const at::Tensor& mat2) {
+#if defined(FLAGOS_KUNLUNXIN_XBLASLT)
+  if (auto result = TryXblasLt(self, mat2, 2); result.defined()) {
+    return result;
+  }
+#endif
   const at::ScalarType result_dtype = at::result_type(self, mat2);
   if (!kunlunxin::KunlunxinSupportsMatmulDtype(result_dtype)) {
     return at::mm(self.cpu(), mat2.cpu()).to(self.device());
@@ -129,6 +503,11 @@ at::Tensor MmKernelKunlunxin(const at::Tensor& self, const at::Tensor& mat2) {
 REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kKunlunxin, MmKernelKunlunxin)
 
 at::Tensor BmmKernelKunlunxin(const at::Tensor& self, const at::Tensor& mat2) {
+#if defined(FLAGOS_KUNLUNXIN_XBLASLT)
+  if (auto result = TryXblasLt(self, mat2, 3); result.defined()) {
+    return result;
+  }
+#endif
   const at::ScalarType result_dtype = at::result_type(self, mat2);
   if (!kunlunxin::KunlunxinSupportsMatmulDtype(result_dtype)) {
     return at::bmm(self.cpu(), mat2.cpu()).to(self.device());
@@ -229,6 +608,32 @@ at::Tensor NegKernelKunlunxin(const at::Tensor& self) {
 
 REGISTER_IMPL_TO_DISPATCHER(NegFn, neg_dispatcher, Backend::kKunlunxin, NegKernelKunlunxin)
 
+at::Tensor SiluBackwardKernelKunlunxin(const at::Tensor& grad, const at::Tensor& self) {
+  if (grad.scalar_type() != at::kBFloat16 || self.scalar_type() != at::kBFloat16 ||
+      grad.device() != self.device() || !grad.sizes().equals(self.sizes()) ||
+      grad.layout() != at::kStrided || self.layout() != at::kStrided ||
+      grad.is_neg() || self.is_neg()) {
+    if (auto published = silu_backward_dispatcher.KernelFor(Backend::kFlagGems)) {
+      return published(grad, self);
+    }
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::silu_backward>::call(
+        grad, self);
+  }
+  auto result = at::empty(self.sizes(), self.options());
+  if (result.numel() == 0) return result;
+  auto dy = grad.contiguous();
+  auto input = self.contiguous();
+  kunlunxin::KunlunxinDeviceGuard guard(input);
+  auto* context = kunlunxin::GetKunlunxinContext(input);
+  kunlunxin::XdnnTensorWrapper t_dy(dy), t_input(input), t_result(result);
+  RunStreamOrderedXdnn(input, "silu_backward", [&] {
+    return xdnn_pytorch::silu_backward(context, t_dy.get(), t_input.get(), t_result.get());
+  });
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kKunlunxin, SiluBackwardKernelKunlunxin)
+
 at::Tensor SumDimIntlistKernelKunlunxin(
     const at::Tensor& self,
     at::OptionalIntArrayRef dim,
@@ -289,17 +694,66 @@ at::Tensor SumDimIntlistKernelKunlunxin(
 
 REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kKunlunxin, SumDimIntlistKernelKunlunxin)
 
+at::Tensor MeanDimKernelKunlunxin(
+    const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim,
+    std::optional<at::ScalarType> dtype) {
+  const auto output_dtype = dtype.value_or(self.scalar_type());
+  if (self.scalar_type() != at::kFloat || output_dtype != at::kFloat) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::mean_dim>::call(
+        self, dim, keepdim, dtype);
+  }
+  auto dims = at::native::make_dim_vector(dim, self.dim());
+  at::maybe_wrap_dims(dims, self.dim());
+  auto shape = at::meta::get_reduction_shape(self, dims, keepdim);
+  kunlunxin::KunlunxinDeviceGuard guard(self);
+  auto out = at::empty(shape, self.options());
+  if (!out.numel()) return out;
+  if (!self.numel()) return out.fill_(std::numeric_limits<float>::quiet_NaN());
+  if (self.dim() == 0) return out.copy_(self);
+  auto input = self.contiguous();
+  auto* context = kunlunxin::GetKunlunxinContext(input);
+  kunlunxin::XdnnTensorWrapper t_input(input), t_out(out);
+  xdnn_pytorch::optional<std::vector<int64_t>> axes(
+      std::vector<int64_t>(dims.begin(), dims.end()));
+  KUNLUNXIN_EXEC(mean_dim, xdnn_pytorch::mean_dim(
+      context, t_input.get(), axes, keepdim,
+      kunlunxin::ToXdnnOptionalDtype(dtype), t_out.get()));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kKunlunxin, MeanDimKernelKunlunxin)
+
+at::Tensor& MeanOutKernelKunlunxin(
+    const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim,
+    std::optional<at::ScalarType> dtype, at::Tensor& out) {
+  TORCH_CHECK(out.device() == self.device(), "mean.out: output device mismatch");
+  TORCH_CHECK(!dtype || out.scalar_type() == *dtype, "mean.out: output dtype mismatch");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  auto result = mean_dim_dispatcher.DispatchBackend(
+      Backend::kKunlunxin, self, dim, keepdim, out.scalar_type());
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MeanOutFn, mean_out_dispatcher, Backend::kKunlunxin, MeanOutKernelKunlunxin)
+
 at::Tensor PrivSoftmaxKernelKunlunxin(
     const at::Tensor& self, int64_t dim, bool half_to_float) {
-  if (!kunlunxin::KunlunxinSupportsDtype(self.scalar_type())) {
-    return at::_softmax(self.cpu(), dim, half_to_float).to(self.device());
+  if (!at::isFloatingType(self.scalar_type()) ||
+      !kunlunxin::KunlunxinSupportsDtype(self.scalar_type())) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::_softmax>::call(
+        self, dim, half_to_float);
   }
-  const int64_t d = dim < 0 ? dim + self.dim() : dim;
+  const auto d = c10::maybe_wrap_dim(dim, self.dim());
   at::Tensor self_c = self.contiguous();
   kunlunxin::KunlunxinDeviceGuard guard(self_c);
+  auto options = self.options().dtype(half_to_float ? at::kFloat : self.scalar_type());
+  at::Tensor out = at::empty(self.sizes(), options);
+  if (!out.numel()) return out;
   xpytorch::xpu::api::Context* const context =
       kunlunxin::GetKunlunxinContext(self_c);
-  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
   kunlunxin::XdnnTensorWrapper t_self(self_c);
   kunlunxin::XdnnTensorWrapper t_out(out);
   KUNLUNXIN_EXEC(
@@ -310,6 +764,342 @@ at::Tensor PrivSoftmaxKernelKunlunxin(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kKunlunxin, PrivSoftmaxKernelKunlunxin)
+
+at::Tensor PrivSoftmaxBackwardDataKernelKunlunxin(const at::Tensor& grad_output, const at::Tensor& output,
+    int64_t dim, at::ScalarType input_dtype) {
+  auto result = at::empty({0}, output.options().dtype(input_dtype));
+  priv_softmax_backward_data_out_dispatcher.DispatchBackend(
+      Backend::kKunlunxin, grad_output, output, dim, input_dtype, result);
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataFn, priv_softmax_backward_data_dispatcher, Backend::kKunlunxin, PrivSoftmaxBackwardDataKernelKunlunxin)
+
+at::Tensor& PrivSoftmaxBackwardDataOutKernelKunlunxin(const at::Tensor& grad_output, const at::Tensor& output,
+    int64_t dim, at::ScalarType input_dtype, at::Tensor& out) {
+  if (input_dtype != at::kFloat || !IsSameDeviceFloat(grad_output, output) ||
+      !IsSameDeviceFloat(out, output) || output.scalar_type() != at::kFloat ||
+      !grad_output.sizes().equals(output.sizes())) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::_softmax_backward_data_out>::call(
+        grad_output, output, dim, input_dtype, out);
+  }
+  auto axis = c10::maybe_wrap_dim(dim, output.dim());
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, grad_output);
+  at::assert_no_overlap(out, output);
+  kunlunxin::KunlunxinDeviceGuard guard(output);
+  auto grad = grad_output.contiguous();
+  auto values = output.contiguous();
+  at::native::resize_output(out, output.sizes());
+  if (!out.numel()) return out;
+  auto result = out.is_contiguous() ? out : at::empty(out.sizes(), out.options());
+  auto* context = kunlunxin::GetKunlunxinContext(output);
+  kunlunxin::XdnnTensorWrapper t_grad(grad), t_values(values), t_result(result);
+  KUNLUNXIN_EXEC(_softmax_backward_data, xdnn_pytorch::_softmax_backward_data(context, t_grad.get(), t_values.get(),
+      axis, kunlunxin::ToXdnnScalarType(input_dtype), t_result.get()));
+  return StoreKunlunxinOut(out, result);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataOutFn, priv_softmax_backward_data_out_dispatcher, Backend::kKunlunxin, PrivSoftmaxBackwardDataOutKernelKunlunxin)
+
+at::Tensor PrivLogSoftmaxKernelKunlunxin(
+    const at::Tensor& self, int64_t dim, bool half_to_float) {
+  if (!at::isFloatingType(self.scalar_type()) ||
+      !kunlunxin::KunlunxinSupportsDtype(self.scalar_type())) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::_log_softmax>::call(
+        self, dim, half_to_float);
+  }
+  const auto d = c10::maybe_wrap_dim(dim, self.dim());
+  at::Tensor self_c = self.contiguous();
+  kunlunxin::KunlunxinDeviceGuard guard(self_c);
+  auto options = self.options().dtype(half_to_float ? at::kFloat : self.scalar_type());
+  at::Tensor out = at::empty(self.sizes(), options);
+  if (!out.numel()) return out;
+  xpytorch::xpu::api::Context* const context =
+      kunlunxin::GetKunlunxinContext(self_c);
+  kunlunxin::XdnnTensorWrapper t_self(self_c);
+  kunlunxin::XdnnTensorWrapper t_out(out);
+  KUNLUNXIN_EXEC(
+      _log_softmax,
+      xdnn_pytorch::_log_softmax(
+          context, t_self.get(), d, half_to_float, t_out.get()));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxFn, priv_log_softmax_dispatcher, Backend::kKunlunxin, PrivLogSoftmaxKernelKunlunxin)
+
+at::Tensor& PrivLogSoftmaxOutKernelKunlunxin(
+    const at::Tensor& self, int64_t dim, bool half_to_float, at::Tensor& out) {
+  const auto dtype = half_to_float ? at::kFloat : self.scalar_type();
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == dtype,
+      "_log_softmax.out: output device or dtype mismatch");
+  at::assert_no_internal_overlap(out);
+  auto result = priv_log_softmax_dispatcher.DispatchBackend(
+      Backend::kKunlunxin, self, dim, half_to_float);
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxOutFn, priv_log_softmax_out_dispatcher, Backend::kKunlunxin, PrivLogSoftmaxOutKernelKunlunxin)
+
+at::Tensor PrivLogSoftmaxBackwardDataKernelKunlunxin(const at::Tensor& grad_output, const at::Tensor& output,
+    int64_t dim, at::ScalarType input_dtype) {
+  auto result = at::empty({0}, output.options().dtype(input_dtype));
+  priv_log_softmax_backward_data_out_dispatcher.DispatchBackend(
+      Backend::kKunlunxin, grad_output, output, dim, input_dtype, result);
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxBackwardDataFn, priv_log_softmax_backward_data_dispatcher, Backend::kKunlunxin, PrivLogSoftmaxBackwardDataKernelKunlunxin)
+
+at::Tensor& PrivLogSoftmaxBackwardDataOutKernelKunlunxin(const at::Tensor& grad_output, const at::Tensor& output,
+    int64_t dim, at::ScalarType input_dtype, at::Tensor& out) {
+  if (input_dtype != at::kFloat || !IsSameDeviceFloat(grad_output, output) ||
+      !IsSameDeviceFloat(out, output) || output.scalar_type() != at::kFloat ||
+      !grad_output.sizes().equals(output.sizes())) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::_log_softmax_backward_data_out>::call(
+        grad_output, output, dim, input_dtype, out);
+  }
+  auto axis = c10::maybe_wrap_dim(dim, output.dim());
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, grad_output);
+  at::assert_no_overlap(out, output);
+  kunlunxin::KunlunxinDeviceGuard guard(output);
+  auto grad = grad_output.contiguous();
+  auto values = output.contiguous();
+  at::native::resize_output(out, output.sizes());
+  if (!out.numel()) return out;
+  auto result = out.is_contiguous() ? out : at::empty(out.sizes(), out.options());
+  auto* context = kunlunxin::GetKunlunxinContext(output);
+  kunlunxin::XdnnTensorWrapper t_grad(grad), t_values(values), t_result(result);
+  KUNLUNXIN_EXEC(_log_softmax_backward_data, xdnn_pytorch::_log_softmax_backward_data(context, t_grad.get(), t_values.get(),
+      axis, kunlunxin::ToXdnnScalarType(input_dtype), t_result.get()));
+  return StoreKunlunxinOut(out, result);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxBackwardDataOutFn, priv_log_softmax_backward_data_out_dispatcher, Backend::kKunlunxin, PrivLogSoftmaxBackwardDataOutKernelKunlunxin)
+
+at::Tensor ArgmaxKernelKunlunxin(
+    const at::Tensor& self, std::optional<int64_t> dim, bool keepdim) {
+  if (!dim || self.scalar_type() != at::kFloat || self.dim() == 0) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::argmax>::call(
+        self, dim, keepdim);
+  }
+  const auto axis = c10::maybe_wrap_dim(*dim, self.dim());
+  TORCH_CHECK(self.size(axis) > 0, "argmax: reduction dimension must be nonempty");
+  auto shape = at::meta::get_reduction_shape(self, {axis}, keepdim);
+  kunlunxin::KunlunxinDeviceGuard guard(self);
+  auto out = at::empty(shape, self.options().dtype(at::kLong));
+  if (!out.numel()) return out;
+  auto input = self.contiguous();
+  auto* context = kunlunxin::GetKunlunxinContext(input);
+  kunlunxin::XdnnTensorWrapper t_input(input), t_out(out);
+  KUNLUNXIN_EXEC(argmax, xdnn_pytorch::argmax(
+      context, t_input.get(), xdnn_pytorch::optional<int64_t>(axis), keepdim, t_out.get()));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ArgmaxFn, argmax_dispatcher, Backend::kKunlunxin, ArgmaxKernelKunlunxin)
+
+at::Tensor& ArgmaxOutKernelKunlunxin(
+    const at::Tensor& self, std::optional<int64_t> dim, bool keepdim,
+    at::Tensor& out) {
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == at::kLong,
+      "argmax.out requires an int64 output on the input device");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  auto result = argmax_dispatcher.DispatchBackend(Backend::kKunlunxin, self, dim, keepdim);
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ArgmaxOutFn, argmax_out_dispatcher, Backend::kKunlunxin, ArgmaxOutKernelKunlunxin)
+
+at::Tensor& BitwiseAndTensorOutKernelKunlunxin(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
+  const auto lhs = self.scalar_type();
+  const auto rhs = other.scalar_type();
+  const bool boolean = lhs == at::kBool && rhs == at::kBool;
+  const bool int64_mask = true &&
+      ((lhs == at::kLong && rhs == at::kBool) || (lhs == at::kBool && rhs == at::kLong));
+  const auto dtype = int64_mask ? at::kLong : at::kBool;
+  if ((!boolean && !int64_mask) || out.scalar_type() != dtype ||
+      out.device() != self.device() || other.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::bitwise_and_Tensor_out>::call(
+        self, other, out);
+  }
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  at::assert_no_partial_overlap(out, other);
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  TORCH_CHECK((!out.is_same(self) && !out.is_same(other)) || out.sizes().equals(shape),
+      "cannot resize an aliased bitwise output");
+  kunlunxin::KunlunxinDeviceGuard guard(self);
+  auto left = self.to(dtype).expand(shape).contiguous();
+  auto right = other.to(dtype).expand(shape).contiguous();
+  auto result = at::empty(shape, out.options());
+  if (result.numel()) {
+    auto* context = kunlunxin::GetKunlunxinContext(self);
+    kunlunxin::XdnnTensorWrapper t_left(left), t_right(right), t_result(result);
+    KUNLUNXIN_EXEC(logical_and, int64_mask
+        ? xdnn_pytorch::bitwise_and_tensor(context, t_left.get(), t_right.get(), t_result.get())
+        : xdnn_pytorch::logical_and(context, t_left.get(), t_right.get(), t_result.get()));
+  }
+  at::native::resize_output(out, shape);
+  return StoreKunlunxinOut(out, result);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseAndTensorOutFn, bitwise_and_tensor_out_dispatcher, Backend::kKunlunxin, BitwiseAndTensorOutKernelKunlunxin)
+
+at::Tensor& BitwiseOrTensorOutKernelKunlunxin(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
+  const auto lhs = self.scalar_type();
+  const auto rhs = other.scalar_type();
+  const bool boolean = lhs == at::kBool && rhs == at::kBool;
+  const bool int64_mask = false &&
+      ((lhs == at::kLong && rhs == at::kBool) || (lhs == at::kBool && rhs == at::kLong));
+  const auto dtype = int64_mask ? at::kLong : at::kBool;
+  if ((!boolean && !int64_mask) || out.scalar_type() != dtype ||
+      out.device() != self.device() || other.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::bitwise_or_Tensor_out>::call(
+        self, other, out);
+  }
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  at::assert_no_partial_overlap(out, other);
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  TORCH_CHECK((!out.is_same(self) && !out.is_same(other)) || out.sizes().equals(shape),
+      "cannot resize an aliased bitwise output");
+  kunlunxin::KunlunxinDeviceGuard guard(self);
+  auto left = self.to(dtype).expand(shape).contiguous();
+  auto right = other.to(dtype).expand(shape).contiguous();
+  auto result = at::empty(shape, out.options());
+  if (result.numel()) {
+    auto* context = kunlunxin::GetKunlunxinContext(self);
+    kunlunxin::XdnnTensorWrapper t_left(left), t_right(right), t_result(result);
+    KUNLUNXIN_EXEC(logical_or, int64_mask
+        ? xdnn_pytorch::bitwise_and_tensor(context, t_left.get(), t_right.get(), t_result.get())
+        : xdnn_pytorch::logical_or(context, t_left.get(), t_right.get(), t_result.get()));
+  }
+  at::native::resize_output(out, shape);
+  return StoreKunlunxinOut(out, result);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseOrTensorOutFn, bitwise_or_tensor_out_dispatcher, Backend::kKunlunxin, BitwiseOrTensorOutKernelKunlunxin)
+
+at::Tensor& BitwiseNotOutKernelKunlunxin(const at::Tensor& self, at::Tensor& out) {
+  if (self.scalar_type() != at::kBool || out.scalar_type() != at::kBool ||
+      out.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::bitwise_not_out>::call(self, out);
+  }
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  auto input = self.contiguous();
+  kunlunxin::KunlunxinDeviceGuard guard(self);
+  auto result = at::empty(self.sizes(), self.options());
+  if (result.numel()) {
+    auto* context = kunlunxin::GetKunlunxinContext(self);
+    kunlunxin::XdnnTensorWrapper t_input(input), t_result(result);
+    KUNLUNXIN_EXEC(logical_not, xdnn_pytorch::logical_not(context, t_input.get(), t_result.get()));
+  }
+  at::native::resize_output(out, self.sizes());
+  return StoreKunlunxinOut(out, result);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseNotOutFn, bitwise_not_out_dispatcher, Backend::kKunlunxin, BitwiseNotOutKernelKunlunxin)
+
+std::tuple<at::Tensor, at::Tensor> NllLossForwardKernelKunlunxin(
+    const at::Tensor& self, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction, int64_t ignore_index) {
+  auto output = at::empty({0}, self.options());
+  auto total_weight = at::empty({0}, self.options());
+  nll_loss_forward_output_dispatcher.DispatchBackend(Backend::kKunlunxin,
+      self, target, weight, reduction, ignore_index, output, total_weight);
+  return {output, total_weight};
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NllLossForwardFn, nll_loss_forward_dispatcher, Backend::kKunlunxin, NllLossForwardKernelKunlunxin)
+
+std::tuple<at::Tensor&, at::Tensor&> NllLossForwardOutputKernelKunlunxin(
+    const at::Tensor& self, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction,
+    int64_t ignore_index, at::Tensor& output, at::Tensor& total_weight) {
+  if (!SupportsMeanNll(self, target, weight, reduction) ||
+      !IsSameDeviceFloat(output, self) || !IsSameDeviceFloat(total_weight, self)) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::nll_loss_forward_output>::call(
+        self, target, weight, reduction, ignore_index, output, total_weight);
+  }
+  at::assert_no_internal_overlap(output);
+  at::assert_no_internal_overlap(total_weight);
+  at::assert_no_overlap(output, self);
+  at::assert_no_overlap(output, target);
+  at::assert_no_overlap(total_weight, self);
+  at::assert_no_overlap(total_weight, target);
+  at::assert_no_overlap(output, total_weight);
+  kunlunxin::KunlunxinDeviceGuard guard(self);
+  auto input = self.contiguous();
+  auto labels = target.contiguous();
+  auto loss = at::empty({}, self.options());
+  auto total = at::empty({}, self.options());
+  auto* context = kunlunxin::GetKunlunxinContext(self);
+  kunlunxin::XdnnTensorWrapper t_input(input), t_labels(labels), t_loss(loss), t_total(total);
+  KUNLUNXIN_EXEC(nll_loss_forward, xdnn_pytorch::nll_loss_forward(context, t_input.get(), t_labels.get(),
+      xdnn_pytorch::optional<xdnn_pytorch::Tensor>(), reduction, ignore_index,
+      t_loss.get(), t_total.get()));
+  at::native::resize_output(output, {});
+  at::native::resize_output(total_weight, {});
+  output.copy_(loss);
+  total_weight.copy_(total);
+  return {output, total_weight};
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NllLossForwardOutputFn, nll_loss_forward_output_dispatcher, Backend::kKunlunxin, NllLossForwardOutputKernelKunlunxin)
+
+at::Tensor NllLossBackwardKernelKunlunxin(
+    const at::Tensor& grad_output, const at::Tensor& self, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction, int64_t ignore_index,
+    const at::Tensor& total_weight) {
+  auto grad_input = at::empty({0}, self.options());
+  nll_loss_backward_grad_input_dispatcher.DispatchBackend(Backend::kKunlunxin,
+      grad_output, self, target, weight, reduction, ignore_index, total_weight, grad_input);
+  return grad_input;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NllLossBackwardFn, nll_loss_backward_dispatcher, Backend::kKunlunxin, NllLossBackwardKernelKunlunxin)
+
+at::Tensor& NllLossBackwardGradInputKernelKunlunxin(
+    const at::Tensor& grad_output, const at::Tensor& self, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction, int64_t ignore_index,
+    const at::Tensor& total_weight, at::Tensor& grad_input) {
+  if (!SupportsMeanNll(self, target, weight, reduction) ||
+      !IsSameDeviceFloat(grad_output, self) || grad_output.numel() != 1 ||
+      !IsSameDeviceFloat(total_weight, self) || total_weight.numel() != 1 ||
+      !IsSameDeviceFloat(grad_input, self)) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::nll_loss_backward_grad_input>::call(
+        grad_output, self, target, weight, reduction, ignore_index, total_weight, grad_input);
+  }
+  at::assert_no_internal_overlap(grad_input);
+  at::assert_no_overlap(grad_input, self);
+  at::assert_no_overlap(grad_input, target);
+  at::assert_no_overlap(grad_input, grad_output);
+  at::assert_no_overlap(grad_input, total_weight);
+  kunlunxin::KunlunxinDeviceGuard guard(self);
+  auto input = self.contiguous();
+  auto labels = target.contiguous();
+  auto grad = grad_output.contiguous();
+  auto total = total_weight.contiguous();
+  at::native::resize_output(grad_input, self.sizes());
+  auto result = grad_input.is_contiguous() ? grad_input : at::empty(self.sizes(), self.options());
+  auto* context = kunlunxin::GetKunlunxinContext(self);
+  kunlunxin::XdnnTensorWrapper t_input(input), t_labels(labels), t_grad(grad),
+      t_total(total), t_result(result);
+  KUNLUNXIN_EXEC(nll_loss_backward, xdnn_pytorch::nll_loss_backward(context, t_grad.get(), t_input.get(),
+      t_labels.get(), xdnn_pytorch::optional<xdnn_pytorch::Tensor>(), reduction, ignore_index,
+      t_total.get(), t_result.get()));
+  return StoreKunlunxinOut(grad_input, result);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NllLossBackwardGradInputFn, nll_loss_backward_grad_input_dispatcher, Backend::kKunlunxin, NllLossBackwardGradInputKernelKunlunxin)
 
 at::Tensor EmbeddingKernelKunlunxin(
     const at::Tensor& weight,
@@ -351,6 +1141,159 @@ at::Tensor EmbeddingKernelKunlunxin(
 
 REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kKunlunxin, EmbeddingKernelKunlunxin)
 
+at::Tensor EmbeddingDenseBackwardKernelKunlunxin(const at::Tensor& grad_output, const at::Tensor& indices,
+    int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq) {
+  if (grad_output.scalar_type() != at::kBFloat16 || indices.scalar_type() != at::kLong ||
+      grad_output.device() != indices.device() || grad_output.dim() < 2 ||
+      grad_output.layout() != at::kStrided || indices.layout() != at::kStrided ||
+      grad_output.is_neg() || indices.is_neg() ||
+      !grad_output.sizes().slice(0, grad_output.dim() - 1).equals(indices.sizes()) ||
+      grad_output.numel() == 0 || grad_output.numel() > INT32_MAX || num_weights <= 0 ||
+      num_weights > INT32_MAX / grad_output.size(-1) || padding_idx != -1 || scale_grad_by_freq) {
+    if (auto published = embedding_dense_backward_dispatcher.KernelFor(Backend::kFlagGems)) {
+      return published(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
+    }
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::embedding_dense_backward>::call(
+        grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
+  }
+  auto grad = grad_output.contiguous();
+  auto index = indices.contiguous();
+  auto out = at::empty({num_weights, grad.size(-1)}, grad.options());
+  kunlunxin::KunlunxinDeviceGuard guard(grad);
+  auto* context = kunlunxin::GetKunlunxinContext(grad);
+  kunlunxin::XdnnTensorWrapper t_grad(grad), t_index(index), t_out(out);
+  KUNLUNXIN_EXEC(embedding_dense_backward, xdnn_pytorch::embedding_dense_backward(
+      context, t_grad.get(), t_index.get(), num_weights, padding_idx, scale_grad_by_freq, t_out.get()));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardFn, embedding_dense_backward_dispatcher, Backend::kKunlunxin, EmbeddingDenseBackwardKernelKunlunxin)
+
+at::Tensor CumsumKernelKunlunxin(const at::Tensor& self, int64_t dim,
+    std::optional<at::ScalarType> dtype) {
+  const auto axis = c10::maybe_wrap_dim(dim, self.dim());
+  const auto input_dtype = self.scalar_type();
+  if ((input_dtype != at::kLong && input_dtype != at::kBool) ||
+      (dtype && *dtype != at::kLong) ||
+      self.dim() == 0 || self.dim() > 2 || axis != self.dim() - 1 ||
+      self.size(axis) > 512 || !self.is_contiguous() || self.is_neg()) {
+    if (auto published = cumsum_dispatcher.KernelFor(Backend::kFlagGems)) {
+      return published(self, dim, dtype);
+    }
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::cumsum>::call(
+        self, dim, dtype);
+  }
+  kunlunxin::KunlunxinDeviceGuard guard(self);
+  auto out = at::empty(self.sizes(), self.options().dtype(at::kLong));
+  if (self.numel()) {
+    auto* context = kunlunxin::GetKunlunxinContext(self);
+    kunlunxin::XdnnTensorWrapper input(self), result(out);
+    KUNLUNXIN_EXEC(cumsum, xdnn_pytorch::cumsum(
+        context, input.get(), axis, kunlunxin::ToXdnnOptionalDtype(dtype), result.get()));
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kKunlunxin, CumsumKernelKunlunxin)
+
+at::Tensor FullKernelKunlunxin(at::IntArrayRef sizes, const at::Scalar& value,
+    std::optional<at::ScalarType> dtype, std::optional<at::Layout> layout,
+    std::optional<at::Device> device, std::optional<bool> pin_memory) {
+  return at::native::full(sizes, value, dtype, layout, device, pin_memory);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(FullFn, full_dispatcher, Backend::kKunlunxin, FullKernelKunlunxin)
+
+at::Tensor PowTensorScalarKernelKunlunxin(const at::Tensor& self, const at::Scalar& exponent) {
+  if (self.scalar_type() == at::kFloat &&
+      (exponent.isFloatingPoint() || exponent.isIntegral(false))) {
+    const auto value = exponent.toDouble();
+    if (value == 1.0) return self.clone();
+    if (value == 2.0) return at::mul(self, self);
+    if (value == 3.0) return at::mul(at::mul(self, self), self);
+  }
+  if (auto published = pow_tensor_scalar_dispatcher.KernelFor(Backend::kFlagGems)) {
+    return published(self, exponent);
+  }
+  return at::native::call_fallback_fn<&cpu_fallback, at::_ops::pow_Tensor_Scalar>::call(
+      self, exponent);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PowTensorScalarFn, pow_tensor_scalar_dispatcher, Backend::kKunlunxin, PowTensorScalarKernelKunlunxin)
+
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(FLAGOS_NATIVE_HOSTS)
+bool TryKunlunxinLerpInplaceHost(at::Tensor& self, const at::Tensor& end,
+                               const at::Scalar& weight);
+#endif
+
+at::Tensor& LerpInplaceScalarKernelKunlunxin(at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {
+  if (self.scalar_type() != at::kBFloat16 || end.scalar_type() != at::kBFloat16 ||
+      self.device() != end.device() || !self.sizes().equals(end.sizes()) ||
+      !self.is_contiguous() || !end.is_contiguous() || self.is_alias_of(end) ||
+      self.is_neg() || end.is_neg() || weight.isComplex()) {
+    return lerp_inplace_scalar_dispatcher.DispatchBackend(Backend::kFlagGems, self, end, weight);
+  }
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(FLAGOS_NATIVE_HOSTS)
+  const auto scalar = weight.isFloatingPoint() ? weight.toDouble() : 0.0;
+  if (scalar > 0.0 && scalar < 0.5 &&
+      static_cast<float>(scalar) > 0.0f && static_cast<float>(scalar) < 0.5f &&
+      self.numel() != 0 && !self.is_conj() && !end.is_conj() &&
+      !self.has_names() && !end.has_names() &&
+      TryKunlunxinLerpInplaceHost(self, end, weight)) {
+    return self;
+  }
+#endif
+  at::AutoDispatchBelowADInplaceOrView guard;
+  auto input = self.to(at::kFloat);
+  input.lerp_(end.to(at::kFloat), weight);
+  self.copy_(input.to(at::kBFloat16));
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LerpInplaceScalarFn, lerp_inplace_scalar_dispatcher, Backend::kKunlunxin, LerpInplaceScalarKernelKunlunxin)
+
+at::Tensor SliceBackwardKernelKunlunxin(const at::Tensor& grad_output, at::IntArrayRef input_sizes,
+    int64_t dim, int64_t start, int64_t end, int64_t step) {
+  const auto dtype = grad_output.scalar_type();
+  const auto stock = [&] {
+    return at::native::slice_backward(grad_output, input_sizes, dim, start, end, step);
+  };
+  if (step != 1 || input_sizes.empty() ||
+      grad_output.dim() != static_cast<int64_t>(input_sizes.size()) ||
+      (dtype != at::kFloat && dtype != at::kHalf && dtype != at::kBFloat16)) {
+    return stock();
+  }
+  const auto axis = c10::maybe_wrap_dim(dim, grad_output.dim());
+  const auto extent = input_sizes[axis];
+  if (extent < 0) return stock();
+  const auto normalize = [extent](int64_t value) {
+    return std::clamp(value < 0 ? value + extent : value, int64_t{0}, extent);
+  };
+  const auto lower = normalize(start);
+  const auto upper = std::max(lower, normalize(end));
+  auto shape = input_sizes.vec();
+  shape[axis] = upper - lower;
+  if (!grad_output.sizes().equals(shape)) return stock();
+  if (lower == 0 && upper == extent)
+    return grad_output.clone(c10::MemoryFormat::Contiguous);
+
+  // The XPU copy API writes to dense destinations. A rotary half-slice
+  // leaves gaps between rows, so build the dense result with zeros and cat.
+  std::vector<at::Tensor> pieces;
+  if (lower > 0) {
+    shape[axis] = lower;
+    pieces.push_back(at::zeros(shape, grad_output.options()));
+  }
+  pieces.push_back(grad_output);
+  if (upper < extent) {
+    shape[axis] = extent - upper;
+    pieces.push_back(at::zeros(shape, grad_output.options()));
+  }
+  return at::cat(pieces, axis);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SliceBackwardFn, slice_backward_dispatcher, Backend::kKunlunxin, SliceBackwardKernelKunlunxin)
+
 at::Tensor WhereSelfKernelKunlunxin(
     const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other) {
   const at::ScalarType result_dtype = at::result_type(self, other);
@@ -388,4 +1331,339 @@ at::Tensor WhereSelfKernelKunlunxin(
 
 REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kKunlunxin, WhereSelfKernelKunlunxin)
 
+at::Tensor EqTensorKernelKunlunxin(const at::Tensor& self, const at::Tensor& other) {
+  const auto dtype = at::result_type(self, other);
+  if (!kunlunxin::KunlunxinSupportsDtype(dtype)) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::eq_Tensor>::call(
+        self, other);
+  }
+  auto left = self.to(dtype);
+  auto right = other.to(self.device(), dtype);
+  auto shape = at::infer_size(left.sizes(), right.sizes());
+  auto out = at::empty(shape, self.options().dtype(at::kBool));
+  if (!out.numel()) return out;
+  left = left.expand(shape).contiguous();
+  right = right.expand(shape).contiguous();
+  kunlunxin::KunlunxinDeviceGuard guard(left);
+  auto* context = kunlunxin::GetKunlunxinContext(left);
+  kunlunxin::XdnnTensorWrapper t_left(left), t_right(right), t_out(out);
+  KUNLUNXIN_EXEC(
+      eq_tensor,
+      xdnn_pytorch::eq_tensor(context, t_left.get(), t_right.get(), t_out.get()));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(EqTensorFn, eq_tensor_dispatcher, Backend::kKunlunxin, EqTensorKernelKunlunxin)
+
+at::Tensor LeTensorKernelKunlunxin(const at::Tensor& self, const at::Tensor& other) {
+  const auto dtype = at::result_type(self, other);
+  if (!kunlunxin::KunlunxinSupportsDtype(dtype)) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::le_Tensor>::call(
+        self, other);
+  }
+  auto left = self.to(dtype);
+  auto right = other.to(self.device(), dtype);
+  auto shape = at::infer_size(left.sizes(), right.sizes());
+  auto out = at::empty(shape, self.options().dtype(at::kBool));
+  if (!out.numel()) return out;
+  left = left.expand(shape).contiguous();
+  right = right.expand(shape).contiguous();
+  kunlunxin::KunlunxinDeviceGuard guard(left);
+  auto* context = kunlunxin::GetKunlunxinContext(left);
+  kunlunxin::XdnnTensorWrapper t_left(left), t_right(right), t_out(out);
+  KUNLUNXIN_EXEC(
+      le_tensor,
+      xdnn_pytorch::le_tensor(context, t_left.get(), t_right.get(), t_out.get()));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kKunlunxin, LeTensorKernelKunlunxin)
+
+at::Tensor NeTensorKernelKunlunxin(const at::Tensor& self, const at::Tensor& other) {
+  const auto dtype = at::result_type(self, other);
+  if (!kunlunxin::KunlunxinSupportsDtype(dtype)) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::ne_Tensor>::call(
+        self, other);
+  }
+  auto left = self.to(dtype);
+  auto right = other.to(self.device(), dtype);
+  auto shape = at::infer_size(left.sizes(), right.sizes());
+  auto out = at::empty(shape, self.options().dtype(at::kBool));
+  if (!out.numel()) return out;
+  left = left.expand(shape).contiguous();
+  right = right.expand(shape).contiguous();
+  kunlunxin::KunlunxinDeviceGuard guard(left);
+  auto* context = kunlunxin::GetKunlunxinContext(left);
+  kunlunxin::XdnnTensorWrapper t_left(left), t_right(right), t_out(out);
+  KUNLUNXIN_EXEC(
+      ne_tensor,
+      xdnn_pytorch::ne_tensor(context, t_left.get(), t_right.get(), t_out.get()));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NeTensorFn, ne_tensor_dispatcher, Backend::kKunlunxin, NeTensorKernelKunlunxin)
+
+void ForeachAddInplaceScalarKernelKunlunxin(at::TensorList self, const at::Scalar& value) {
+  if (!(!value.isComplex()) || !CanBatchXdnn(self, {}, {})) {
+    return at::native::foreach_tensor_add_scalar_kernel_slow_(self, value);
+  }
+  kunlunxin::KunlunxinDeviceGuard guard(self.front());
+  auto* context = kunlunxin::GetKunlunxinContext(self.front());
+  XdnnTensorList source(self), result(self);
+  auto scalar = kunlunxin::ToXdnnScalar(value);
+  RunStreamOrderedXdnn(self.front(), "_foreach_add_scalar", [&] {
+    return xdnn_pytorch::_foreach_add_scalar(context, source.tensors, scalar, result.tensors);
+  });
+  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+}
+REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceScalarFn, foreach_add_inplace_scalar_dispatcher, Backend::kKunlunxin, ForeachAddInplaceScalarKernelKunlunxin);
+
+void ForeachMulInplaceScalarKernelKunlunxin(at::TensorList self, const at::Scalar& value) {
+  if (!(!value.isComplex()) || !CanBatchXdnn(self, {}, {})) {
+    return at::native::foreach_tensor_mul_scalar_kernel_slow_(self, value);
+  }
+  kunlunxin::KunlunxinDeviceGuard guard(self.front());
+  auto* context = kunlunxin::GetKunlunxinContext(self.front());
+  XdnnTensorList source(self), result(self);
+  auto scalar = kunlunxin::ToXdnnScalar(value);
+  RunStreamOrderedXdnn(self.front(), "_foreach_mul_scalar", [&] {
+    return xdnn_pytorch::_foreach_mul_scalar(context, source.tensors, scalar, result.tensors);
+  });
+  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+}
+REGISTER_IMPL_TO_DISPATCHER(ForeachMulInplaceScalarFn, foreach_mul_inplace_scalar_dispatcher, Backend::kKunlunxin, ForeachMulInplaceScalarKernelKunlunxin);
+
+void ForeachDivInplaceScalarlistKernelKunlunxin(at::TensorList self, at::ArrayRef<at::Scalar> value) {
+  if (!(value.size() == self.size() && std::none_of(value.begin(), value.end(), [](const at::Scalar& scalar) { return scalar.isComplex(); })) || !CanBatchXdnn(self, {}, {})) {
+    return at::native::foreach_tensor_div_scalarlist_kernel_slow_(self, value);
+  }
+  kunlunxin::KunlunxinDeviceGuard guard(self.front());
+  auto* context = kunlunxin::GetKunlunxinContext(self.front());
+  XdnnTensorList source(self), result(self);
+  auto scalar = ToXdnnScalars(value);
+  RunStreamOrderedXdnn(self.front(), "_foreach_div_scalarList", [&] {
+    return xdnn_pytorch::_foreach_div_scalarList(context, source.tensors, scalar, result.tensors);
+  });
+  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+}
+REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceScalarlistFn, foreach_div_inplace_scalarlist_dispatcher, Backend::kKunlunxin, ForeachDivInplaceScalarlistKernelKunlunxin);
+
+void ForeachAddcmulInplaceScalarKernelKunlunxin(at::TensorList self, at::TensorList first, at::TensorList second, const at::Scalar& value) {
+  if (!(first.size() == self.size() && second.size() == self.size() &&
+        !value.isComplex()) || !CanBatchXdnn(self, first, second)) {
+    return at::native::foreach_tensor_addcmul_scalar_slow_(self, first, second, value);
+  }
+  kunlunxin::KunlunxinDeviceGuard guard(self.front());
+  auto* context = kunlunxin::GetKunlunxinContext(self.front());
+  XdnnTensorList source(self), result(self);
+  XdnnTensorList left(first), right(second);
+  auto scalar = kunlunxin::ToXdnnScalar(value);
+  RunStreamOrderedXdnn(self.front(), "_foreach_addcmul_scalar", [&] {
+    return xdnn_pytorch::_foreach_addcmul_scalar(context, source.tensors, left.tensors, right.tensors, scalar, result.tensors);
+  });
+  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+}
+REGISTER_IMPL_TO_DISPATCHER(ForeachAddcmulInplaceScalarFn, foreach_addcmul_inplace_scalar_dispatcher, Backend::kKunlunxin, ForeachAddcmulInplaceScalarKernelKunlunxin);
+
+void ForeachAddcdivInplaceScalarlistKernelKunlunxin(at::TensorList self, at::TensorList first, at::TensorList second, at::ArrayRef<at::Scalar> value) {
+  if (!(first.size() == self.size() && second.size() == self.size() &&
+        value.size() == self.size() && std::none_of(value.begin(), value.end(), [](const at::Scalar& scalar) { return scalar.isComplex(); })) || !CanBatchXdnn(self, first, second)) {
+    return at::native::foreach_tensor_addcdiv_scalarlist_slow_(self, first, second, value);
+  }
+  kunlunxin::KunlunxinDeviceGuard guard(self.front());
+  auto* context = kunlunxin::GetKunlunxinContext(self.front());
+  XdnnTensorList source(self), result(self);
+  XdnnTensorList left(first), right(second);
+  auto scalar = ToXdnnScalars(value);
+  RunStreamOrderedXdnn(self.front(), "_foreach_addcdiv_scalarList", [&] {
+    return xdnn_pytorch::_foreach_addcdiv_scalarList(context, source.tensors, left.tensors, right.tensors, scalar, result.tensors);
+  });
+  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+}
+REGISTER_IMPL_TO_DISPATCHER(ForeachAddcdivInplaceScalarlistFn, foreach_addcdiv_inplace_scalarlist_dispatcher, Backend::kKunlunxin, ForeachAddcdivInplaceScalarlistKernelKunlunxin);
+
+std::vector<at::Tensor> ForeachSqrtKernelKunlunxin(at::TensorList self) {
+  if (!CanBatchXdnn(self)) return at::native::foreach_tensor_sqrt_slow(self);
+  kunlunxin::KunlunxinDeviceGuard guard(self.front());
+  auto* context = kunlunxin::GetKunlunxinContext(self.front());
+  std::vector<at::Tensor> output;
+  output.reserve(self.size());
+  for (const auto& tensor : self) output.emplace_back(at::empty(tensor.sizes(), tensor.options()));
+  XdnnTensorList source(self), result(output);
+  RunStreamOrderedXdnn(self.front(), "_foreach_sqrt", [&] {
+    return xdnn_pytorch::_foreach_sqrt(context, source.tensors, result.tensors);
+  });
+  return output;
+}
+REGISTER_IMPL_TO_DISPATCHER(
+    ForeachSqrtFn, foreach_sqrt_dispatcher, Backend::kKunlunxin, ForeachSqrtKernelKunlunxin);
+
 } // namespace at::native::flagos
+
+#if defined(FLAGOS_KUNLUNXIN_SCALED_LINEAR)
+namespace at::native::flagos {
+namespace {
+
+namespace xpu_api = baidu::xpu::api;
+namespace xpu_blas = baidu::xpu::xblas;
+
+constexpr int64_t kLinearScaleParts = 12;
+
+void CheckScaledLinear(int status, const char* operation) {
+  TORCH_CHECK(status == 0, operation, " failed on the Kunlunxin XPU backend: ",
+      kunlunxin::KunlunxinStatusName(status));
+}
+
+bool CanScaleLinearOperand(const at::Tensor& input) {
+  return input.is_contiguous() && !input.is_neg() && !input.is_conj() &&
+      input.numel() > 0 && input.numel() <= INT32_MAX &&
+      reinterpret_cast<uintptr_t>(input.const_data_ptr()) % 16 == 0;
+}
+
+bool CanUseScaledLinear(const at::Tensor& input, const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias) {
+  return (!bias || !bias->defined()) && input.is_privateuseone() &&
+      input.device() == weight.device() && input.scalar_type() == at::kBFloat16 &&
+      weight.scalar_type() == at::kBFloat16 && input.dim() >= 2 &&
+      weight.dim() == 2 && input.size(-1) > 0 && input.size(-1) == weight.size(-1) &&
+      input.size(-1) % 16 == 0 && weight.size(0) > 0 && weight.size(0) % 16 == 0 &&
+      input.numel() / input.size(-1) >= 2 &&
+      CanScaleLinearOperand(input) && CanScaleLinearOperand(weight);
+}
+
+using LinearContext = std::unique_ptr<xpu_api::Context, decltype(&xpu_api::destroy_context)>;
+
+xpu_api::Context* GetScaledLinearContext(int device, XPUStream stream) {
+  // Keep only a library context for each process-lifetime Native Host queue.
+  thread_local std::unordered_map<int, LinearContext> contexts;
+  auto it = contexts.find(device);
+  if (it == contexts.end()) {
+    LinearContext context(xpu_api::create_context(), &xpu_api::destroy_context);
+    TORCH_CHECK(context, "kunlunxin: could not create an XBLAS context");
+    if (context->max_ptr_size() != kLinearScaleParts) return nullptr;
+    context->set_stream(reinterpret_cast<decltype(context->get_stream())>(stream));
+    it = contexts.emplace(device, std::move(context)).first;
+  }
+  return it->second.get();
+}
+
+struct ScaledLinearOperand {
+  ScaledLinearOperand(xpu_api::Context* context, const at::Tensor& tensor)
+      : converted(at::empty(tensor.sizes(), tensor.options().dtype(at::kHalf))),
+        partial(at::empty({kLinearScaleParts}, tensor.options().dtype(at::kFloat))),
+        scale(at::empty({1}, tensor.options().dtype(at::kFloat))) {
+    const auto* source = static_cast<const bfloat16*>(tensor.const_data_ptr());
+    CheckScaledLinear(xpu_api::findmax(context, source, partial.data_ptr<float>(),
+        tensor.numel()), "linear findmax");
+    CheckScaledLinear(xpu_api::cast_te(context, source, partial.const_data_ptr<float>(),
+        static_cast<float16*>(converted.mutable_data_ptr()), scale.data_ptr<float>(),
+        tensor.numel()), "linear cast_te");
+  }
+
+  xpu_blas::NdScaleTensor<2, const float16, const float> matrix() const {
+    const auto rows = converted.size(0);
+    const auto cols = converted.size(1);
+    return {static_cast<const float16*>(converted.const_data_ptr()), nullptr,
+        {rows, cols}, {cols, 1}, scale.const_data_ptr<float>(), {rows, cols}, {1, 1}, {1, 1}};
+  }
+
+  at::Tensor converted;
+  at::Tensor partial;
+  at::Tensor scale;
+};
+
+at::Tensor ScaledLinearProduct(const at::Tensor& left, const at::Tensor& right,
+    bool transpose_left, bool transpose_right) {
+  const auto device = kunlunxin::XdnnDeviceIndex(left);
+  const auto stream = kunlunxin::KunlunxinSubmissionStream(device);
+  kunlunxin::KunlunxinDeviceGuard guard(left);
+  auto* context = stream && CanScaleLinearOperand(left) && CanScaleLinearOperand(right)
+      ? GetScaledLinearContext(device, stream) : nullptr;
+  if (!context) {
+    return at::mm(transpose_left ? left.t() : left, transpose_right ? right.t() : right);
+  }
+  const auto m = left.size(transpose_left ? 1 : 0);
+  const auto n = right.size(transpose_right ? 0 : 1);
+  auto result = at::empty({m, n}, left.options());
+  // XDNN and XBLAS use the current Native Host queue. The scaled FP16
+  // representations are private scratch for this single eager product.
+  const ScaledLinearOperand a(context, left);
+  const ScaledLinearOperand b(context, right);
+  xpu_blas::FcFusionTensor<const bfloat16> source{nullptr, nullptr, m, n, n, false};
+  xpu_blas::FcFusionTensor<bfloat16> output{
+      static_cast<bfloat16*>(result.mutable_data_ptr()), nullptr, m, n, n, false};
+  xpu_blas::FcFusionDescV2<float16, float, float> descriptor;
+  descriptor.trans_a = transpose_left;
+  descriptor.trans_b = transpose_right;
+  CheckScaledLinear(xpu_blas::fc_fusion(context, a.matrix(), b.matrix(), source, output,
+      descriptor, xpu_blas::FcFusionEpilogueV3<float>{}), "linear fc_fusion");
+  return result;
+}
+
+at::Tensor ScaledLinearForward(const at::Tensor& input, const at::Tensor& weight) {
+  auto shape = input.sizes().vec();
+  shape.back() = weight.size(0);
+  return ScaledLinearProduct(input.view({-1, input.size(-1)}), weight, false, true)
+      .view(shape);
+}
+
+class KunlunxinLinear : public torch::autograd::Function<KunlunxinLinear> {
+ public:
+  static at::Tensor forward(torch::autograd::AutogradContext* context,
+      const at::Tensor& input, const at::Tensor& weight) {
+    context->save_for_backward({input, weight});
+    return ScaledLinearForward(input, weight);
+  }
+
+  static torch::autograd::variable_list backward(torch::autograd::AutogradContext* context,
+      const torch::autograd::variable_list& gradients) {
+    const auto saved = context->get_saved_variables();
+    const auto& input = saved[0];
+    const auto& weight = saved[1];
+    const auto grad = gradients[0].contiguous().view({-1, weight.size(0)});
+    at::Tensor input_grad, weight_grad;
+    // Derivatives of the backward use ordinary differentiable ATen products.
+    const bool differentiable = at::GradMode::is_enabled();
+    if (context->needs_input_grad(0)) {
+      input_grad = (differentiable ? at::mm(grad, weight)
+          : ScaledLinearProduct(grad, weight, false, false)).view_as(input);
+    }
+    if (context->needs_input_grad(1)) {
+      const auto matrix = input.view({-1, input.size(-1)});
+      weight_grad = differentiable ? at::mm(grad.t(), matrix)
+          : ScaledLinearProduct(grad, matrix, true, false);
+    }
+    return {input_grad, weight_grad};
+  }
+};
+
+at::Tensor ScaledLinearKernelKunlunxin(const at::Tensor& input, const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias) {
+  if (!CanUseScaledLinear(input, weight, bias)) {
+    return at::native::linear(input, weight, bias);
+  }
+  return ScaledLinearForward(input, weight);
+}
+
+at::Tensor AutogradLinearKernelKunlunxin(const at::Tensor& input, const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias) {
+  if (!CanUseScaledLinear(input, weight, bias)) {
+    return at::native::linear(input, weight, bias);
+  }
+  if (at::GradMode::is_enabled() && (input.requires_grad() || weight.requires_grad())) {
+    return KunlunxinLinear::apply(input, weight);
+  }
+  return ScaledLinearForward(input, weight);
+}
+
+} // namespace
+} // namespace at::native::flagos
+
+TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+  m.impl("linear", TORCH_FN(at::native::flagos::ScaledLinearKernelKunlunxin));
+}
+
+TORCH_LIBRARY_IMPL(aten, AutogradPrivateUse1, m) {
+  m.impl("linear", TORCH_FN(at::native::flagos::AutogradLinearKernelKunlunxin));
+}
+#endif

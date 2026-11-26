@@ -186,7 +186,7 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # claim carries every dtype through the prelude, so the key cannot box), and
     # left this count at the pre-reroute 452. The hygon lane reported the two it
     # had gained as `assert 454 == 452`.
-    "dcu": 463,
+    "dcu": 466,
     # Isolated full-model precision checks restore SiLU to FlagGems.
     "gcu": 253,
     # The iluvatar lane's landing: the conf routes 583 ops to FlagGems, thirteen
@@ -211,22 +211,22 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # FlagGems' complex `add` is wrong on this chip, which `FlagGemsRejectsDtype`
     # now expresses at run time instead. `add.Scalar` stays on `none` -- FlagGems
     # 5.4.0 ships no kernel for that overload.
-    "iluvatar": 583,
+    "iluvatar": 587,
     # 256: two screens on a P800. The whole 618-op cohort first, at one profile
     # with the survey's default tolerance; then every survivor over ten profiles
     # (the survey's seven plus 13x7, 3x5x7 and 64x3) compared at atol=rtol=1e-4,
     # which is the tolerance these tests assert with. The number is a
     # measurement, not the cohort size -- see KUNLUNXIN_FLAGGEMS_MEASURED.
-    "kunlunxin": 258,
+    "kunlunxin": 259,
     # 585 since `mm` joined: the default conf routes it to FlagGems so the
     # soft-lowp matrix claim has a registered key to follow.
     "metax": 586,
     # 0: the apple conf routes no operator to FlagGems -- its native MPSGraph
     # kernels serve what it accelerates and the rest reaches cpu_fallback.
     "apple": 0,
-    "musa": 464,
-    "ppu": 590,
-    "nvidia": 549,
+    "musa": 466,
+    "ppu": 594,
+    "nvidia": 556,
     # The sparse TsingMicro config also spells two aliases `flagos_python`.
     "tsingmicro": 63,
 }

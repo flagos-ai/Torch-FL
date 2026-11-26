@@ -3,6 +3,7 @@
 
 """Ascend packed ABI: scalar promotion, layout, and immutable launch metadata."""
 
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -33,6 +34,82 @@ def test_prepare_runtime_configures_flaggems_for_the_ascend_device(monkeypatch):
     adapter.Backend().prepare_runtime()
 
     assert calls == [("ascend", torch_fl.flagos)]
+
+
+@pytest.fixture
+def verified_driver(tmp_path, monkeypatch):
+    driver = tmp_path / "backends/ascend/driver.py"
+    driver.parent.mkdir(parents=True)
+    driver.write_text("# published driver\n")
+    digest = hashlib.sha256(driver.read_bytes()).hexdigest()
+    monkeypatch.setattr(adapter, "_PUBLISHED_DRIVER_SHA256", digest)
+    return driver, digest
+
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_device_artifact_build_records_the_published_compiler_target(
+    monkeypatch, tmp_path, verified_driver, supported
+):
+    _, digest = verified_driver
+    utils = SimpleNamespace(_get_bisheng_path=lambda: "/cann/bin/bisheng")
+    monkeypatch.setattr(
+        adapter, "importlib", SimpleNamespace(import_module=lambda name: utils)
+    )
+    commands = []
+
+    def print_targets(command, *, text):
+        assert text
+        commands.append(command)
+        return "  hiipu64 - Ascend\n" if supported else "  x86-64 - X86\n"
+
+    monkeypatch.setattr(
+        adapter, "subprocess", SimpleNamespace(check_output=print_targets)
+    )
+    ascend = adapter.Backend()
+    if supported:
+        assert ascend.record_device_artifact_data(tmp_path) == {
+            "driver_source_sha256": digest,
+            "supports_hiipu64": True,
+        }
+    else:
+        with pytest.raises(RuntimeError, match="does not support hiipu64"):
+            ascend.record_device_artifact_data(tmp_path)
+    assert commands == [["/cann/bin/bisheng", "-print-targets"]]
+
+
+def test_strict_device_artifacts_require_an_attested_driver_and_a_live_npu(
+    monkeypatch, verified_driver
+):
+    class NPUDriver:
+        @classmethod
+        def is_active(cls):
+            return "original probe"
+
+    path, digest = verified_driver
+    driver = SimpleNamespace(__file__=str(path), NPUDriver=NPUDriver)
+    monkeypatch.setattr(
+        adapter, "importlib", SimpleNamespace(import_module=lambda name: driver)
+    )
+    availability = iter([False, True])
+    monkeypatch.setitem(
+        sys.modules,
+        "torch_fl",
+        SimpleNamespace(flagos=SimpleNamespace(is_available=availability.__next__)),
+    )
+    record = {"driver_source_sha256": digest, "supports_hiipu64": True}
+    ascend = adapter.Backend()
+    for data in (None, {}, dict(record, supports_hiipu64=1)):
+        with pytest.raises(RuntimeError, match="build-time hiipu64 record"):
+            ascend.install_device_artifact_data(data)
+    path.write_text("# modified driver\n")
+    with pytest.raises(RuntimeError, match="verified FlagTree driver"):
+        ascend.install_device_artifact_data(record)
+    assert NPUDriver.is_active() == "original probe"
+
+    path.write_text("# published driver\n")
+    ascend.install_device_artifact_data(record)
+    assert NPUDriver.is_active() is False
+    assert NPUDriver.is_active() is True
 
 
 @pytest.fixture

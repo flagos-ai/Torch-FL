@@ -10,6 +10,7 @@
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/impl/VirtualGuardImpl.h>
 #include <c10/util/SmallVector.h>
+#include <c10/util/accumulate.h>
 #include <dlfcn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -23,6 +24,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -31,6 +33,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -54,7 +57,8 @@ const backend::Api& Backend() { return *backend_api; }
 struct EnqueueCounter {
   explicit EnqueueCounter(std::string value) : name(std::move(value)) {}
   std::string name;
-  std::atomic<uint64_t> count{0};
+  std::atomic<uint64_t> native{0};
+  std::atomic<uint64_t> python{0};
 };
 std::mutex enqueue_counter_mutex;
 
@@ -65,7 +69,8 @@ py::tuple CaptureEnqueues(const py::function& run) {
 }
 
 void RecordEnqueue(EnqueueCounter& counter, uint64_t stream, bool compiled_host) {
-  counter.count.fetch_add(1, std::memory_order_relaxed);
+  auto& count = compiled_host ? counter.native : counter.python;
+  count.fetch_add(1, std::memory_order_relaxed);
   EnqueueTrace::record(stream, compiled_host);
 }
 
@@ -80,17 +85,40 @@ std::shared_ptr<EnqueueCounter> RegisterEnqueueCounter(py::handle metadata) {
   EnqueueCounters().push_back(counter);
   return counter;
 }
-py::dict EnqueueStats() {
-  std::unordered_map<std::string, uint64_t> counts;
-  {
-    std::lock_guard<std::mutex> lock(enqueue_counter_mutex);
-    for (const auto& counter : EnqueueCounters())
-      if (const auto value = counter->count.load(std::memory_order_relaxed))
-        counts[counter->name] += value;
+struct EnqueueCounts {
+  uint64_t native = 0;
+  uint64_t python = 0;
+};
+
+std::unordered_map<std::string, EnqueueCounts> EnqueuesByKernel() {
+  std::unordered_map<std::string, EnqueueCounts> counts;
+  std::lock_guard<std::mutex> lock(enqueue_counter_mutex);
+  for (const auto& counter : EnqueueCounters()) {
+    const auto native = counter->native.load(std::memory_order_relaxed);
+    const auto python = counter->python.load(std::memory_order_relaxed);
+    if (native || python) {
+      auto& totals = counts[counter->name];
+      totals.native += native;
+      totals.python += python;
+    }
   }
+  return counts;
+}
+
+py::dict EnqueueStats() {
   py::dict result;
-  for (const auto& item : counts) result[py::str(item.first)] = py::int_(item.second);
+  for (const auto& [name, counts] : EnqueuesByKernel())
+    result[py::str(name)] = py::int_(counts.native + counts.python);
   return result;
+}
+
+py::dict EnqueueOrigins() {
+  py::dict native, python;
+  for (const auto& [name, counts] : EnqueuesByKernel()) {
+    if (counts.native) native[py::str(name)] = py::int_(counts.native);
+    if (counts.python) python[py::str(name)] = py::int_(counts.python);
+  }
+  return py::dict("native"_a = native, "python"_a = python);
 }
 
 bool IsCapturing(uint64_t stream) {
@@ -438,9 +466,15 @@ class Launcher {
       if (arg.path.front() == position) return true;
     return false;
   }
+  bool RuntimeFloat(size_t position) const {
+    return std::any_of(arguments_.begin(), arguments_.end(), [position](const auto& arg) {
+      return arg.path.size() == 1 && arg.path.front() == position &&
+          (arg.kind == Argument::Kind::Float32 || arg.kind == Argument::Kind::Float64);
+    });
+  }
   template <class GetValue>
   void CallNative(size_t argument_count, const GetValue& get_value,
-                  const std::vector<int64_t>& grid, int device, uint64_t function) const {
+                  at::IntArrayRef grid, int device, uint64_t function) const {
     TORCH_CHECK(argument_count == num_args_, "native launch argument arity mismatch");
     if (compact_) {
       c10::SmallVector<ScalarSlot, 32> slots;
@@ -511,7 +545,7 @@ class Launcher {
       slot.Set(static_cast<float>(value.toDouble()));
       break;
     case Argument::Kind::Bool:
-      slot.Set(static_cast<uint8_t>(value.toBool()));
+      slot.Set(static_cast<uint32_t>(value.toBool()));
       break;
     case Argument::Kind::Int8:
       slot.Set(static_cast<uint8_t>(value.toInt()));
@@ -529,7 +563,7 @@ class Launcher {
       throw std::invalid_argument("unsupported native scalar ABI");
     }
   }
-  void EnqueueNative(const std::vector<int64_t>& grid, int device, uint64_t function,
+  void EnqueueNative(at::IntArrayRef grid, int device, uint64_t function,
                      void** pointers) const {
     TORCH_CHECK(!grid.empty() && grid.size() <= 3, "invalid launch grid");
     std::array<uint64_t, 3> dims{1, 1, 1};
@@ -629,7 +663,7 @@ class Launcher {
       return;
     }
     if (a.type == "i1" || a.type == "u1") {
-      slot.Set(static_cast<uint8_t>(py::cast<bool>(value)));
+      slot.Set(static_cast<uint32_t>(py::cast<bool>(value)));
       return;
     }
     if (a.type == "i8") {
@@ -725,7 +759,7 @@ class KernelCache {
   // Flat mirrors of an already verified serialized key. These retain only
   // metadata; matching a tensor never retains or reuses its pointer or values.
   struct ValuePattern {
-    enum Kind { None, Bool, Int, Double, String, Tensor } kind = None;
+    enum Kind { None, Bool, Int, Double, RuntimeFloat, String, Tensor } kind = None;
     int64_t integer = 0;
     uint64_t bits = 0;
     at::ScalarType dtype = at::kFloat;
@@ -779,6 +813,7 @@ class KernelCache {
         std::memcpy(&actual, &number, sizeof(actual));
         return actual == bits;
       }
+      case RuntimeFloat: return value.isDouble();
       case String: return value.isString() && value.toStringRef() == text;
       case Tensor: {
         if (!value.isTensor()) return false;
@@ -798,6 +833,7 @@ class KernelCache {
     int device;
     std::vector<ValuePattern> args;
     std::vector<Named> kwargs;
+    bool has_runtime_float = false;
 
     template <class Args, class Kwargs>
     bool Matches(const Args& actual_args, const Kwargs& actual_kwargs, int actual_device) const {
@@ -842,8 +878,10 @@ class KernelCache {
   };
 
  public:
-  KernelCache(py::tuple names, py::dict defaults, bool returns_constants)
-      : names_(names), defaults_(defaults), returns_constants_(returns_constants) {
+  KernelCache(py::tuple names, py::dict defaults, bool returns_constants,
+              bool reuse_runtime_floats)
+      : names_(names), defaults_(defaults), returns_constants_(returns_constants),
+        reuse_runtime_floats_(reuse_runtime_floats) {
     for (auto name : names) native_names_.push_back(py::cast<std::string>(name));
   }
 
@@ -895,6 +933,14 @@ class KernelCache {
     }
     variant.launcher->CallValues(x, y, z, Stream(device), variant.function, values);
     return variant.result;
+  }
+
+  py::object MissingKey(py::tuple args, py::dict kwargs, int device) {
+    std::string key;
+    if (!Key(args, kwargs, device, key)) return py::none();
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    if (variants_.find(key) != variants_.end()) return py::none();
+    return py::bytes(key);
   }
 
   void Prepare(py::bytes original_key, py::tuple args, py::dict kwargs, py::tuple record) {
@@ -965,7 +1011,7 @@ class KernelCache {
       variant->bindings.push_back(std::move(binding));
     }
     variant->native_key = key;
-    if (variant->native) variant->pattern = CapturePattern(key, args, kwargs);
+    if (variant->native) variant->pattern = CapturePattern(key, args, kwargs, *variant);
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto inserted = variants_.emplace(std::move(key), std::move(variant));
     if (inserted.second && inserted.first->second->native) {
@@ -976,7 +1022,7 @@ class KernelCache {
   }
 
   template <class Args, class Kwargs>
-  bool RunNative(const Args& args, const Kwargs& kwargs, const std::vector<int64_t>& grid,
+  bool RunNative(const Args& args, const Kwargs& kwargs, at::IntArrayRef grid,
                  int device, int64_t grid_function = 0) {
     static_assert(std::is_same_v<Kwargs, flagos::native_host::Keywords> ||
                       std::is_lvalue_reference_v<decltype((*kwargs.begin()).key())>,
@@ -993,7 +1039,8 @@ class KernelCache {
       // still available for unusual scalar/shape combinations and containers.
       if (found != fast_variants_.end() && found->second.size() <= 8)
         for (auto* candidate : found->second)
-          if (candidate->pattern->Matches(args, kwargs, device)) {
+          if ((!grid_function || !candidate->pattern->has_runtime_float) &&
+              candidate->pattern->Matches(args, kwargs, device)) {
             selected = candidate;
             break;
           }
@@ -1060,11 +1107,11 @@ class KernelCache {
                                                    kwargs};
         using Grid = std::vector<int64_t> (*)(const flagos::native_host::GridMetadata&,
                                               std::vector<int64_t>);
-        actual_grid = reinterpret_cast<Grid>(grid_function)(metadata, grid);
+        actual_grid = reinterpret_cast<Grid>(grid_function)(metadata, grid.vec());
       } else {
         HostGridMeta metadata{&variant.native_meta, &native_names_, &args, &kwargs};
         using Grid = std::vector<int64_t> (*)(const HostGridMeta&, std::vector<int64_t>);
-        actual_grid = reinterpret_cast<Grid>(grid_function)(metadata, grid);
+        actual_grid = reinterpret_cast<Grid>(grid_function)(metadata, grid.vec());
       }
     }
     for (const auto& hook : variant.native_hooks) {
@@ -1089,7 +1136,8 @@ class KernelCache {
       }
     }
     variant.launcher->CallNative(variant.bindings.size(), get_value,
-                                 grid_function ? actual_grid : grid, device, variant.function);
+                                 grid_function ? at::IntArrayRef(actual_grid) : grid,
+                                 device, variant.function);
     return true;
   }
 
@@ -1101,8 +1149,8 @@ class KernelCache {
       key ^= value + 0x9e3779b97f4a7c15ULL + (key << 6) + (key >> 2);
     return key;
   }
-  static std::optional<Pattern> CapturePattern(const std::string& key, py::tuple args,
-                                               py::dict kwargs) {
+  std::optional<Pattern> CapturePattern(const std::string& key, py::tuple args,
+                                        py::dict kwargs, const Variant& variant) const {
     if (key.size() < sizeof(int)) return std::nullopt;
     int device;
     std::memcpy(&device, key.data(), sizeof(device));
@@ -1110,10 +1158,21 @@ class KernelCache {
     if (!Key(args, kwargs, device, checked) || checked != key) return std::nullopt;
     Pattern result;
     result.device = device;
+    auto allow_runtime_float = [&](ValuePattern& value, size_t position) {
+      if (!reuse_runtime_floats_ || value.kind != ValuePattern::Double ||
+          !variant.hooks.empty() || position >= names_.size() ||
+          variant.constants.contains(names_[position]) ||
+          !variant.launcher->RuntimeFloat(position)) return;
+      // These pointwise grids depend on shape. The compiled ABI carries the
+      // changing optimizer scalar in a runtime floating-point slot.
+      value.kind = ValuePattern::RuntimeFloat;
+      result.has_runtime_float = true;
+    };
     bool tensor_found = false;
     for (auto value : args) {
       auto pattern = ValuePattern::Capture(value);
       if (!pattern) return std::nullopt;
+      allow_runtime_float(*pattern, result.args.size());
       if (!tensor_found && pattern->kind == ValuePattern::Tensor) {
         result.key = FastKey(device, args.size(), kwargs.size(), THPVariable_Unpack(value.ptr()));
         tensor_found = true;
@@ -1124,7 +1183,10 @@ class KernelCache {
     for (auto item : kwargs) {
       auto pattern = ValuePattern::Capture(item.second);
       if (!pattern) return std::nullopt;
-      result.kwargs.push_back({py::cast<std::string>(item.first), std::move(*pattern)});
+      auto label = py::cast<std::string>(item.first);
+      const auto position = std::find(native_names_.begin(), native_names_.end(), label);
+      allow_runtime_float(*pattern, position - native_names_.begin());
+      result.kwargs.push_back({std::move(label), std::move(*pattern)});
     }
     return result;
   }
@@ -1320,6 +1382,7 @@ class KernelCache {
   std::vector<std::string> native_names_;
   py::dict defaults_;
   bool returns_constants_;
+  bool reuse_runtime_floats_;
   std::unordered_map<std::string, std::unique_ptr<Variant>> variants_;
   std::unordered_map<size_t, std::vector<const Variant*>> native_variants_;
   std::unordered_map<uint64_t, std::vector<const Variant*>> fast_variants_;
@@ -1348,13 +1411,20 @@ class PointwiseSpec {
     for (size_t i = 0; i < outputs; ++i) {
       output_names_.push_back("out" + std::to_string(i));
       auto rule = py::cast<py::tuple>(promotions_[i]);
+      const auto kind = py::getattr(rule[rule.size() - 1], "name", py::none());
+      const auto name = kind.is_none() ? std::string() : py::cast<std::string>(kind);
+      real_result_promotion_.push_back(
+          name == "DEFAULT" || name == "NO_OPMATH" || name == "INT_TO_FLOAT" ||
+          name == "COMPLEX_TO_FLOAT" || name == "BOOL_TO_LONG");
       std::vector<size_t> indices;
       for (size_t j = 0; j + 1 < rule.size(); ++j) indices.push_back(py::cast<size_t>(rule[j]));
       promotion_indices_.push_back(std::move(indices));
     }
   }
   template <class Args, class Kwargs>
-  std::optional<Prepared> PrepareNative(const Args& args, const Kwargs& kwargs) {
+  std::optional<Prepared> PrepareNative(
+      const Args& args, const Kwargs& kwargs,
+      std::optional<CurrentDeviceScope>& device_scope) {
     if (args.size() != inputs_.size()) return std::nullopt;
     Prepared prepared;
     prepared.outputs.resize(output_names_.size());
@@ -1378,11 +1448,11 @@ class PointwiseSpec {
     if (inputs.empty()) return std::nullopt;
     const auto& first = tensors.front();
     if (first.device().type() != c10::DeviceType::PrivateUse1) return std::nullopt;
-    CurrentDeviceScope device_scope(first.device());
+    device_scope.emplace(first.device());
     if (IsCapturing(Stream(first.device().index()))) return std::nullopt;
     bool same_shape = true, same_stride = true, contiguous = true;
     for (const auto& tensor : tensors) {
-      if (tensor.device().type() != c10::DeviceType::PrivateUse1 || tensor.is_complex() ||
+      if (tensor.device() != first.device() || tensor.is_complex() ||
           (tensor.key_set().has(c10::DispatchKey::Python) ||
            tensor.key_set().has(c10::DispatchKey::Functionalize)))
         return std::nullopt;
@@ -1425,40 +1495,7 @@ class PointwiseSpec {
         }
     for (size_t i = 0; i < prepared.outputs.size(); ++i)
       if (!prepared.outputs[i].defined()) {
-        // Promotion depends on types and scalar rank, not tensor values. Keep
-        // the complete existing key without formatting integers on every call.
-        std::string key(reinterpret_cast<const char*>(&i), sizeof(i));
-        key.push_back(static_cast<char>(c10::get_default_dtype_as_scalartype()));
-        for (auto index : promotion_indices_[i]) {
-          const auto value = args.get(index);
-          if (value.isTensor()) {
-            const auto& tensor = value.toTensor();
-            key.push_back('T');
-            key.push_back(static_cast<char>(tensor.scalar_type()));
-            key.push_back(tensor.dim() == 0);
-          } else
-            key.push_back(value.isBool() ? 'b' : value.isInt() ? 'i' : 'f');
-        }
-        std::optional<at::ScalarType> dtype;
-        {
-          std::lock_guard<std::mutex> lock(dtype_mutex_);
-          auto found = native_dtypes_.find(key);
-          if (found != native_dtypes_.end()) dtype = found->second;
-        }
-        if (!dtype) {
-          py::gil_scoped_acquire gil;
-          py::tuple values(promotion_indices_[i].size());
-          for (size_t j = 0; j < values.size(); ++j)
-            values[j] = torch::jit::toPyObject(args.get(promotion_indices_[i][j]));
-          auto rule = py::cast<py::tuple>(promotions_[i]);
-          py::dict options;
-          options["type_promotion"] = rule[rule.size() - 1];
-          auto result = py::cast<py::tuple>(promotion_(*values, **options));
-          TORCH_CHECK(THPDtype_Check(result[1].ptr()), "invalid pointwise promotion dtype");
-          dtype = reinterpret_cast<THPDtype*>(result[1].ptr())->scalar_type;
-          std::lock_guard<std::mutex> lock(dtype_mutex_);
-          native_dtypes_.emplace(key, *dtype);
-        }
+        const auto dtype = ResultDtype(args, i);
         // The surrounding device scope already selected the allocation device.
         // Use the same constructors as FlagOS empty/empty_strided for ordinary
         // dense results; empty_like retains the general Preserve/names rules.
@@ -1466,13 +1503,13 @@ class PointwiseSpec {
         constexpr c10::DispatchKeySet keys(c10::DispatchKey::PrivateUse1);
         if (like && like->is_non_overlapping_and_dense() && !like->has_names())
           prepared.outputs[i] = at::detail::empty_strided_generic(
-              like->sizes(), like->strides(), allocator, keys, *dtype);
+              like->sizes(), like->strides(), allocator, keys, dtype);
         else if (like)
           prepared.outputs[i] =
-              at::empty_like(*like, like->options().dtype(*dtype), at::MemoryFormat::Preserve);
+              at::empty_like(*like, like->options().dtype(dtype), at::MemoryFormat::Preserve);
         else
           prepared.outputs[i] = at::detail::empty_generic(
-              prepared.shape, allocator, keys, *dtype, at::MemoryFormat::Contiguous);
+              prepared.shape, allocator, keys, dtype, at::MemoryFormat::Contiguous);
       }
     return prepared;
   }
@@ -1616,6 +1653,48 @@ class PointwiseSpec {
   }
 
  private:
+  template <class Args>
+  at::ScalarType ResultDtype(const Args& args, size_t output) {
+    const auto& indices = promotion_indices_[output];
+    if (real_result_promotion_[output]) {
+      // FlagGems uses elementwise_dtypes. For real floating tensors, a
+      // dimensioned tensor's dtype takes precedence over zero-dimensional
+      // tensors and Python scalars, with promotion within each tensor group.
+      auto dimensioned = at::ScalarType::Undefined;
+      auto scalar_tensor = at::ScalarType::Undefined;
+      bool only_real_floating_tensors = true;
+      for (auto index : indices) {
+        const auto& value = args.get(index);
+        if (!value.isTensor()) continue;
+        const auto& tensor = value.toTensor();
+        const auto dtype = tensor.scalar_type();
+        if (dtype != at::kFloat && dtype != at::kDouble &&
+            dtype != at::kHalf && dtype != at::kBFloat16) {
+          only_real_floating_tensors = false;
+          break;
+        }
+        auto& group = tensor.dim() == 0 ? scalar_tensor : dimensioned;
+        group = (group == at::ScalarType::Undefined || group == dtype)
+            ? dtype : c10::promoteTypes(group, dtype);
+      }
+      if (only_real_floating_tensors) {
+        if (dimensioned != at::ScalarType::Undefined) return dimensioned;
+        if (scalar_tensor != at::ScalarType::Undefined) return scalar_tensor;
+      }
+    }
+
+    py::gil_scoped_acquire gil;
+    py::tuple values(indices.size());
+    for (size_t i = 0; i < values.size(); ++i)
+      values[i] = torch::jit::toPyObject(args.get(indices[i]));
+    auto rule = py::cast<py::tuple>(promotions_[output]);
+    py::dict options;
+    options["type_promotion"] = rule[rule.size() - 1];
+    auto result = py::cast<py::tuple>(promotion_(*values, **options));
+    TORCH_CHECK(THPDtype_Check(result[1].ptr()), "invalid pointwise promotion dtype");
+    return reinterpret_cast<THPDtype*>(result[1].ptr())->scalar_type;
+  }
+
   std::vector<bool> inputs_;
   std::vector<py::str> keys_;
   py::tuple promotions_;
@@ -1623,8 +1702,7 @@ class PointwiseSpec {
   std::unordered_map<std::string, at::ScalarType> dtypes_;
   std::vector<std::string> output_names_;
   std::vector<std::vector<size_t>> promotion_indices_;
-  std::unordered_map<std::string, at::ScalarType> native_dtypes_;
-  std::mutex dtype_mutex_;
+  std::vector<bool> real_result_promotion_;
 };
 
 class PointwiseSchedule {
@@ -1653,6 +1731,23 @@ class PointwiseSchedule {
     return false;
   }
 
+  static at::Tensor ReadTensorView(py::handle object) {
+    if (THPVariable_CheckExact(object.ptr())) return THPVariable_Unpack(object.ptr());
+    if (Py_TYPE(object.ptr()) != buffer_type) return {};
+    const auto& buffer = py::cast<const StridedBuffer&>(object);
+    if (!THPVariable_CheckExact(buffer.base.ptr()) ||
+        !THPDtype_Check(buffer.dtype.ptr()) || buffer.offset < 0 ||
+        std::any_of(buffer.steps.begin(), buffer.steps.end(),
+                    [](int64_t step) { return step < 0; })) return {};
+    const auto& base = THPVariable_Unpack(buffer.base.ptr());
+    const auto dtype = reinterpret_cast<THPDtype*>(buffer.dtype.ptr())->scalar_type;
+    if (base.scalar_type() != dtype || base.is_conj() || base.is_neg() ||
+        buffer.offset > std::numeric_limits<int64_t>::max() - base.storage_offset())
+      return {};
+    return base.as_strided(buffer.sizes, buffer.steps,
+                           base.storage_offset() + buffer.offset);
+  }
+
  public:
   PointwiseSchedule(py::object owner, size_t rank, py::object kernel, py::tuple helpers,
                     py::tuple device_api, bool enflame = false)
@@ -1667,7 +1762,10 @@ class PointwiseSchedule {
     for (size_t i = 0; i < rank_; ++i) tile_names_.push_back("tile_size" + std::to_string(i));
     one_dim_ = py::cast<bool>(config.attr("prefer_1d_tile"));
     block_pointer_ = py::cast<bool>(config.attr("prefer_block_pointer"));
-    balanced_ = !enflame_ && py::cast<bool>(config.attr("balance_grid"));
+    const bool hygon = py::cast<bool>(py::getattr(owner, "_native_pointwise_hygon", py::bool_(false)));
+    kunlunxin_ = py::cast<bool>(py::getattr(owner, "_native_pointwise_kunlunxin", py::bool_(false)));
+    balanced_ = !enflame_ && !hygon && !kunlunxin_ &&
+        py::cast<bool>(py::getattr(config, "balance_grid", py::bool_(false)));
     max_grid_ = py::cast<int64_t>(config.attr("max_grid_size")[py::int_(0)]);
     if (enflame_) {
       TORCH_CHECK(std::string(Backend().vendor) == "enflame",
@@ -1690,23 +1788,50 @@ class PointwiseSchedule {
       return;
     }
     max_tile_ = py::cast<int64_t>(config.attr("max_tile_size")) /
-                (py::cast<bool>(helpers[4](schema)) ? 2 : 1);
+                (!hygon && !kunlunxin_ && py::cast<bool>(helpers[4](schema)) ? 2 : 1);
     const auto name = py::cast<std::string>(owner.attr("_scalar_fn").attr("__name__"));
-    fill_ = name.find("fill_scalar") != std::string::npos && py::cast<int>(helpers[5]) >= 9;
+    if (!kunlunxin_ && name.find("fill_scalar") != std::string::npos &&
+        py::cast<int>(helpers[5]) >= 9 &&
+        (!hygon || one_dim_))
+      fill_tile_ = one_dim_ && !hygon ? 1024 : 64;
     cache_ = py::cast<KernelCache*>(kernel.attr("native_cache"));
+    if (kunlunxin_) {
+      TORCH_CHECK(std::string(Backend().vendor) == "kunlunxin",
+                  "Kunlunxin pointwise schedule requires the Kunlunxin backend");
+      kunlunxin_auto_grid_ = py::cast<bool>(config.attr("kunlunAutoGrid"));
+      const auto buffer_limit = py::cast<int64_t>(config.attr("buffer_size_limit"));
+      kunlunxin_options_.push_back({"buffer_size_limit",
+          py::cast<bool>(config.attr("is_cat")) ? 512 : (buffer_limit ? buffer_limit : 2048)});
+      for (const auto* option : {"isCloseVectorization", "isCloseInterleave", "isCloseDtypeConvert"})
+        if (py::cast<bool>(config.attr(option))) kunlunxin_options_.push_back({option, true});
+      if (!py::cast<bool>(config.attr("isCloseMemoryAsync")))
+        kunlunxin_options_.push_back({"isCloseMemoryAsync", false});
+      const auto* compare_nan = std::getenv("XPU_cmp_nan");
+      if (compare_nan && std::string_view(compare_nan) == "1")
+        kunlunxin_options_.push_back({"isOpenCmpNan", true});
+      const auto unroll = py::cast<int64_t>(config.attr("unroll_num"));
+      if (unroll) kunlunxin_options_.push_back({"unroll_num", unroll});
+      for (int64_t tile = 1; tile <= (int64_t{1} << 62); tile *= 2) {
+        kunlunxin_warps_[tile] = py::cast<int64_t>(helpers_[1](tile));
+        if (tile == (int64_t{1} << 62)) break;
+      }
+      return;
+    }
     warps_.resize(std::max<int64_t>(max_tile_, 1024) + 1);
     for (size_t i = 1; i < warps_.size(); ++i) warps_[i] = py::cast<int64_t>(helpers_[1](i));
   }
   template <class Args, class Outputs>
   void CallNative(const Args& args, const Outputs& outputs,
-                  std::optional<at::IntArrayRef> task = std::nullopt, bool collapse = false) {
+                  std::optional<at::IntArrayRef> task = std::nullopt, bool collapse = false,
+                  bool device_already_selected = false) {
+    std::optional<CurrentDeviceScope> device_scope;
     if (enflame_) {
       auto plan = EnflamePlanFor(args, outputs, task, collapse);
       if (!plan.grid[0]) return;
       auto* cache = plan.secondary ? secondary_cache_ : cache_;
       const auto& kernel = plan.secondary ? secondary_kernel_ : kernel_;
       const int device = outputs.get(0).device().index();
-      CurrentDeviceScope guard(outputs.get(0).device());
+      if (!device_already_selected) device_scope.emplace(outputs.get(0).device());
       if (cache->RunNative(flagos::native_host::Arguments{plan.values},
                            flagos::native_host::Keywords{plan.options}, plan.grid, device))
         return;
@@ -1717,6 +1842,10 @@ class PointwiseSchedule {
       for (const auto& item : plan.options)
         options[py::str(std::string(item.key()))] = torch::jit::toPyObject(item.value());
       options["grid"] = py::tuple(py::cast(plan.grid));
+      if (py::cast<bool>(kernel.attr("prepare_native")(*values, **options)) &&
+          cache->RunNative(flagos::native_host::Arguments{plan.values},
+                           flagos::native_host::Keywords{plan.options}, plan.grid, device))
+        return;
       kernel.attr("run")(*values, **options);
       return;
     }
@@ -1745,8 +1874,8 @@ class PointwiseSchedule {
         shape.append(task_shape.begin(), task_shape.end());
       c10::SmallVector<int64_t, 8> tiles(shape.size(), 1);
       int64_t budget = max_tile_;
-      if (fill_)
-        tiles = {one_dim_ ? 1024 : 64};
+      if (fill_tile_)
+        tiles = {fill_tile_};
       else
         for (size_t r = shape.size(); r > 0; --r) {
           uint64_t value = static_cast<uint64_t>(shape[r - 1]);
@@ -1756,15 +1885,17 @@ class PointwiseSchedule {
         }
       int64_t tile_size = 1, count = 1;
       for (auto tile : tiles) tile_size *= tile;
-      if (one_dim_)
+      if (kunlunxin_ && one_dim_)
+        std::tie(tile_size, count) = KunlunxinTile(tasks, task_shape);
+      else if (one_dim_)
         count = (tasks + tile_size - 1) / tile_size;
       else
         for (size_t i = 0; i < tiles.size(); ++i)
           count *= (task_shape[i] + tiles[i] - 1) / tiles[i];
-      ctas = fill_ ? count : std::min(max_grid_, count);
+      ctas = fill_tile_ || (kunlunxin_ && one_dim_) ? count : std::min(max_grid_, count);
       int64_t per_cta = (count + ctas - 1) / ctas;
       if (balanced_) ctas = (count + per_cta - 1) / per_cta;
-      warps = warps_.at(tile_size);
+      warps = kunlunxin_ ? KunlunxinWarps(tile_size) : warps_.at(tile_size);
       for (const auto& tensor : tensors) {
         c10::SmallVector<int64_t, 8> strides(task_shape.size(), 0);
         if (collapse)
@@ -1796,9 +1927,10 @@ class PointwiseSchedule {
         for (size_t i = 0; i < tiles.size(); ++i) options.push_back({tile_names_.at(i), tiles[i]});
     }
     options.push_back({"num_warps", warps});
+    options.insert(options.end(), kunlunxin_options_.begin(), kunlunxin_options_.end());
     const int device = tensors.front().device().index();
-    CurrentDeviceScope guard(tensors.front().device());
-    const std::vector<int64_t> grid{ctas, 1, 1};
+    if (!device_already_selected) device_scope.emplace(tensors.front().device());
+    const std::array<int64_t, 3> grid{ctas, 1, 1};
     if (cache_->RunNative(flagos::native_host::Arguments{values},
                           flagos::native_host::Keywords{options}, grid, device))
       return;
@@ -1809,6 +1941,10 @@ class PointwiseSchedule {
     for (const auto& item : options)
       pykwargs[py::str(std::string(item.key()))] = torch::jit::toPyObject(item.value());
     pykwargs["grid"] = py::tuple(py::cast(grid));
+    if (py::cast<bool>(kernel_.attr("prepare_native")(*pyargs, **pykwargs)) &&
+        cache_->RunNative(flagos::native_host::Arguments{values},
+                          flagos::native_host::Keywords{options}, grid, device))
+      return;
     kernel_.attr("run")(*pyargs, **pykwargs);
   }
   py::object Call(py::tuple args, py::dict kwargs) {
@@ -1833,6 +1969,21 @@ class PointwiseSchedule {
     py::object result =
         results.size() == 1 ? py::reinterpret_borrow<py::object>(results[0]) : py::object(results);
     if (rank_ && !output.elements) return result;
+    // The published TsingMicro copy and cat hosts call the overload directly.
+    // Represent same-dtype buffers as ordinary views for typed submission.
+    if (std::string_view(Backend().vendor) == "tsingmicro" &&
+        args.size() == 1 && results.size() == 1) {
+      auto input = ReadTensorView(args[0]);
+      auto output_tensor = ReadTensorView(results[0]);
+      if (input.defined() && output_tensor.defined()) {
+        c10::List<c10::IValue> inputs(c10::AnyType::get());
+        inputs.push_back(std::move(input));
+        c10::List<at::Tensor> outputs;
+        outputs.push_back(std::move(output_tensor));
+        CallNative(inputs, outputs);
+        return result;
+      }
+    }
     py::list parameters;
     for (auto value : args) parameters.append(value);
     for (auto value : results) parameters.append(value);
@@ -1842,8 +1993,8 @@ class PointwiseSchedule {
     if (rank_) {
       std::vector<int64_t> task = one_dim_ ? std::vector<int64_t>{output.elements} : output.shape;
       std::vector<int64_t> tiles;
-      if (fill_)
-        tiles = {one_dim_ ? 1024 : 64};
+      if (fill_tile_)
+        tiles = {fill_tile_};
       else {
         py::tuple sizes(task.size() + 1);
         sizes[0] = max_tile_;
@@ -1852,7 +2003,9 @@ class PointwiseSchedule {
       }
       int64_t tile_size = 1, num_tiles = 1;
       for (auto tile : tiles) tile_size *= tile;
-      if (one_dim_)
+      if (kunlunxin_ && one_dim_)
+        std::tie(tile_size, num_tiles) = KunlunxinTile(output.elements, output.shape);
+      else if (one_dim_)
         num_tiles = (output.elements + tile_size - 1) / tile_size;
       else
         for (size_t i = 0; i < tiles.size(); ++i)
@@ -1863,10 +2016,10 @@ class PointwiseSchedule {
         ctAs = py::cast<int64_t>(partition[0]);
         per_cta = py::cast<int64_t>(partition[1]);
       } else {
-        ctAs = fill_ ? num_tiles : std::min(max_grid_, num_tiles);
+        ctAs = fill_tile_ || (kunlunxin_ && one_dim_) ? num_tiles : std::min(max_grid_, num_tiles);
         per_cta = (num_tiles + ctAs - 1) / ctAs;
       }
-      warps = py::cast<int64_t>(helpers_[1](tile_size));
+      warps = kunlunxin_ ? KunlunxinWarps(tile_size) : py::cast<int64_t>(helpers_[1](tile_size));
       for (const auto& view : views) {
         for (auto stride : view.strides) parameters.append(stride);
         if (block_pointer_ && !one_dim_) {
@@ -1886,6 +2039,8 @@ class PointwiseSchedule {
           options[py::str("tile_size" + std::to_string(i))] = tiles[i];
     }
     options["num_warps"] = warps;
+    for (const auto& option : kunlunxin_options_)
+      options[py::str(std::string(option.key()))] = torch::jit::toPyObject(option.value());
     const int previous = py::cast<int>(device_api_[0](views.front().device));
     try {
       auto values = py::tuple(parameters);
@@ -1925,10 +2080,26 @@ class PointwiseSchedule {
   }
 
  private:
+  std::pair<int64_t, int64_t> KunlunxinTile(int64_t tasks, at::IntArrayRef shape) const {
+    // Mirror the published 1D wrapper's cluster partition and its masked
+    // memory workaround for a tile of 32768 lanes.
+    int64_t count = kunlunxin_auto_grid_ && c10::sum_integers(shape) <= 2048 * 64 ? 1 : 12;
+    const uint64_t extent = (tasks - 1) / count + 1;
+    const uint64_t tile = extent <= 1 ? 1 : uint64_t{1} << (64 - __builtin_clzll(extent - 1));
+    TORCH_CHECK(tile <= std::numeric_limits<int64_t>::max(), "Kunlunxin pointwise tile overflow");
+    if (tile == 32768) return {16384, (tasks - 1) / 16384 + 1};
+    return {static_cast<int64_t>(tile), count};
+  }
+  int64_t KunlunxinWarps(int64_t tile) const {
+    auto entry = kunlunxin_warps_.find(tile);
+    if (entry != kunlunxin_warps_.end()) return entry->second;
+    py::gil_scoped_acquire gil;
+    return py::cast<int64_t>(helpers_[1](tile));
+  }
   struct EnflamePlan {
     c10::SmallVector<c10::IValue, 64> values;
     c10::SmallVector<flagos::native_host::Keyword, 16> options;
-    std::vector<int64_t> grid{0, 1, 1};
+    std::array<int64_t, 3> grid{0, 1, 1};
     bool secondary = false;
   };
   template <class Args, class Outputs>
@@ -2062,10 +2233,14 @@ class PointwiseSchedule {
   py::tuple helpers_, device_api_;
   KernelCache* cache_;
   std::vector<std::string> tile_names_;
-  bool one_dim_, block_pointer_, balanced_, fill_;
+  bool one_dim_, block_pointer_, balanced_;
+  int64_t fill_tile_ = 0;
   int64_t max_grid_, max_tile_;
   std::vector<int64_t> warps_;
   bool enflame_ = false, four_sips_ = false;
+  bool kunlunxin_ = false, kunlunxin_auto_grid_ = false;
+  std::vector<flagos::native_host::Keyword> kunlunxin_options_;
+  std::unordered_map<int64_t, int64_t> kunlunxin_warps_;
   int64_t mmu_limit_ = 0;
   py::object secondary_kernel_;
   KernelCache* secondary_cache_ = nullptr;
@@ -2364,13 +2539,16 @@ c10::SmallVector<at::Tensor, 4> ApplyPointwiseImpl(int64_t slot, const Args& arg
     std::lock_guard<std::mutex> lock(pointwise_slot_mutex);
     entry = NativePointwiseSlots().at(slot);
   }
-  auto prepared = entry->spec->PrepareNative(args, kwargs);
+  std::optional<CurrentDeviceScope> device_scope;
+  auto prepared = entry->spec->PrepareNative(args, kwargs, device_scope);
   if (prepared) {
     auto* schedule = PointwiseForRank(entry, prepared->shape.size());
     schedule->CallNative(args, flagos::native_host::TensorValues{prepared->outputs},
-                         at::IntArrayRef(prepared->shape), prepared->collapse);
+                         at::IntArrayRef(prepared->shape), prepared->collapse,
+                         /*device_already_selected=*/true);
     return std::move(prepared->outputs);
   }
+  device_scope.reset();
   py::gil_scoped_acquire gil;
   py::tuple values(args.size());
   for (size_t i = 0; i < args.size(); ++i) values[i] = torch::jit::toPyObject(args.get(i));
@@ -2433,7 +2611,8 @@ std::optional<c10::Device> KernelDevice(const c10::IValue& value) {
 }
 template <class Args, class Kwargs>
 void LaunchOriginalKernel(ScriptKernel* entry, const Args& args, const Kwargs& kwargs,
-                          const std::vector<int64_t>& grid, int64_t grid_function, bool packed) {
+                          const std::vector<int64_t>& grid, int64_t grid_function,
+                          bool packed, int device) {
   py::gil_scoped_acquire gil;
   PythonArguments context;
   py::tuple values(args.size());
@@ -2460,7 +2639,11 @@ void LaunchOriginalKernel(ScriptKernel* entry, const Args& args, const Kwargs& k
   } else
     keywords["grid"] = py::tuple(py::cast(grid));
   try {
-    entry->entry.attr("run")(*values, **keywords);
+    const bool submitted =
+        device >= 0 &&
+        py::cast<bool>(entry->entry.attr("prepare_native")(*values, **keywords)) &&
+        entry->cache->RunNative(args, kwargs, grid, device, grid_function);
+    if (!submitted) entry->entry.attr("run")(*values, **keywords);
   } catch (...) {
     auto error = std::current_exception();
     try {
@@ -2494,7 +2677,7 @@ void LaunchScriptKernelImpl(int64_t slot, const c10::List<c10::IValue>& args,
     device = target->index();
   }
   if (device >= 0 && entry->cache->RunNative(args, kwargs, grid, device, grid_function)) return;
-  LaunchOriginalKernel(entry, args, kwargs, grid, grid_function, false);
+  LaunchOriginalKernel(entry, args, kwargs, grid, grid_function, false, device);
 }
 
 void LaunchScriptKernelPacked(int64_t slot, flagos::native_host::Arguments args,
@@ -2516,7 +2699,8 @@ void LaunchScriptKernelPacked(int64_t slot, flagos::native_host::Arguments args,
     guard.emplace(*target);
     if (entry->cache->RunNative(args, kwargs, grid, target->index(), grid_function)) return;
   }
-  LaunchOriginalKernel(entry, args, kwargs, grid, grid_function, true);
+  LaunchOriginalKernel(entry, args, kwargs, grid, grid_function, true,
+                       target ? target->index() : -1);
 }
 
 TORCH_LIBRARY_FRAGMENT(flagos_source_native, m) {
@@ -2534,6 +2718,15 @@ TORCH_LIBRARY_FRAGMENT(flagos_source_native, m) {
     return c10::ivalue::Tuple::create(value.toList().vec());
   });
   m.def("dtype_str(int dtype) -> str", [](int64_t dtype) { return dtype_names.at(dtype); });
+  m.def("default_dtype() -> int", []() {
+    return static_cast<int64_t>(c10::get_default_dtype_as_scalartype());
+  });
+  m.def("factory_device() -> Device", []() {
+    return c10::Device(c10::DeviceType::PrivateUse1);
+  });
+  m.def("shape_product(int[] shape) -> int", [](at::IntArrayRef shape) {
+    return c10::multiply_integers(shape);
+  });
   m.def(torch::schema("foreign_bool(int slot, Any[] args, Dict(str, Any) kwargs) -> bool",
                       c10::AliasAnalysisKind::CONSERVATIVE),
         [](int64_t slot, const c10::List<c10::IValue>& args,
@@ -2685,6 +2878,7 @@ PYBIND11_MODULE(_launcher, module) {
   });
   module.def("current_stream", &Stream);
   module.def("enqueue_stats", &EnqueueStats);
+  module.def("enqueue_origins", &EnqueueOrigins);
   module.def("capture_enqueues", &CaptureEnqueues);
   module.def("is_capturing", [](int device) {
     return IsCapturing(Stream(device));
@@ -2694,8 +2888,10 @@ PYBIND11_MODULE(_launcher, module) {
       .def("__call__", &Launcher::Call)
       .def_property_readonly("abi", &Launcher::Abi);
   py::class_<KernelCache>(module, "KernelCache")
-      .def(py::init<py::tuple, py::dict, bool>())
+      .def(py::init<py::tuple, py::dict, bool, bool>(),
+           "names"_a, "defaults"_a, "returns_constants"_a, "reuse_runtime_floats"_a = false)
       .def("run", &KernelCache::Run)
+      .def("missing_key", &KernelCache::MissingKey)
       .def("prepare", &KernelCache::Prepare);
   py::class_<PointwiseSpec>(module, "PointwiseSpec")
       .def(py::init<py::object, py::object, py::object>())

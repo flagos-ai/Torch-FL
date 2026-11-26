@@ -6,6 +6,8 @@
 #include <ATen/Context.h>
 #include <c10/core/DeviceType.h>
 
+#include "../../empty.h"
+
 namespace at::native::flagos::ascend {
 
 class OpPreparation {
@@ -13,7 +15,12 @@ class OpPreparation {
   static at::Tensor apply_tensor_without_format(
       at::IntArrayRef sizes,
       const at::TensorOptions& options) {
-    return at::empty(sizes, RetargetToPrivateUse1(options));
+    const auto target = RetargetToPrivateUse1(options);
+    return at::native::flagos::empty_memory_format(
+        sizes, c10::optTypeMetaToScalarType(target.dtype_opt()),
+        target.layout_opt(), target.device_opt(), target.pinned_memory_opt(),
+        c10::impl::check_tensor_options_and_extract_memory_format(
+            target, std::nullopt));
   }
 
   static at::Tensor apply_tensor_with_format(

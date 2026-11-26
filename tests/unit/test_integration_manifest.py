@@ -83,6 +83,11 @@ _KNOWN_GAPS = {
     "native_source_hosts": tuple(p for p in _PLATFORMS if p != "ascend"),
     "native_source_hosts_metax": tuple(p for p in _PLATFORMS if p != "metax"),
     "native_source_hosts_hygon": tuple(p for p in _PLATFORMS if p != "hygon"),
+    "native_source_hosts_mthreads_bmm": tuple(p for p in _PLATFORMS if p != "mthreads"),
+    "native_source_hosts_thead_matmul_and_copy": tuple(
+        p for p in _PLATFORMS if p != "thead"
+    ),
+    "kunlunxin_precision": tuple(p for p in _PLATFORMS if p != "kunlunxin"),
     "nvidia_host_programs": tuple(p for p in _PLATFORMS if p != "nvidia"),
     "cuda_flaggems_mul": tuple(p for p in _PLATFORMS if p != "nvidia"),
     "iluvatar_runtime": (

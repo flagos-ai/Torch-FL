@@ -119,6 +119,85 @@ def test_new_pointwise_specialization_preserves_noncontiguous_layout():
     assert torch_fl.native_host.audit()["host_artifacts"] == before
 
 
+@pytest.mark.parametrize("shape", [(1, 128), (2, 3, 7)])
+def test_constant_padding_uses_build_time_flaggems_host(shape):
+    cpu = torch.arange(torch.Size(shape).numel()).reshape(shape)
+    value = cpu.to("flagos")
+    kernel = f"_pad_jit_rank_{len(shape)}"
+    before = torch_fl.native_host.audit()["enqueued_kernels"].get(kernel, 0)
+
+    result = torch.nn.functional.pad(value, (0, 1), value=-100)
+
+    torch.testing.assert_close(
+        result.cpu(), torch.nn.functional.pad(cpu, (0, 1), value=-100)
+    )
+    audit = torch_fl.native_host.audit()
+    assert audit["enqueued_kernels"][kernel] > before
+    assert (
+        audit["launched_kernels"][kernel]["generator"]
+        == "flag_gems.ops.pad.generate_code"
+    )
+
+
+def test_native_host_preserves_autograd_and_enqueues_below_it():
+    cpu = torch.linspace(-0.5, 0.75, 128)
+    value = cpu.to("flagos").requires_grad_()
+    seed = torch.ones_like(cpu).to("flagos")
+    with torch.enable_grad():
+        torch.cos(value).backward(seed)
+        value.grad = None
+        before = torch_fl.native_host.enqueue_origins()
+        result = torch.cos(value)
+        after_forward = torch_fl.native_host.enqueue_origins()
+        assert result.grad_fn is not None
+        result.backward(seed)
+
+    assert any(
+        "cos" in name and count > before["native"].get(name, 0)
+        for name, count in after_forward["native"].items()
+    )
+    assert after_forward["python"] == before["python"]
+    torch.testing.assert_close(result.cpu(), cpu.cos())
+    torch.testing.assert_close(value.grad.cpu(), -cpu.sin())
+
+
+@pytest.mark.parametrize("start", [0, 64])
+def test_native_slice_backward_preserves_strided_gradient(start):
+    cpu = torch.randn(1, 21, 8, 128, dtype=torch.bfloat16)
+    expected_input = cpu.transpose(1, 2)[..., 64:]
+    actual_input = cpu.to("flagos").transpose(1, 2)[..., 64:]
+    assert not actual_input.is_contiguous()
+    args = ([1, 8, 21, 128], -1, start, start + 64, 1)
+    op = torch.ops.aten.slice_backward.default
+    expected = op(expected_input, *args)
+    with torch_fl.native_host.execution_scope(0):
+        actual = op(actual_input, *args)
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
+def test_native_cross_entropy_handles_optional_weight_from_autograd():
+    cpu = torch.linspace(-1.3, 1.1, 5 * 71).reshape(5, 71).requires_grad_()
+    labels = torch.tensor([-100, 21, 7, 16, -100])
+    expected = torch.nn.functional.cross_entropy(cpu, labels)
+    expected.backward()
+
+    actual = cpu.detach().to("flagos").requires_grad_()
+    device_labels = labels.to("flagos")
+    with torch_fl.native_host.execution_scope(0):
+        torch.nn.functional.cross_entropy(actual, device_labels).backward()
+        actual.grad = None
+        before = torch_fl.native_host.enqueue_origins()
+        result = torch.nn.functional.cross_entropy(actual, device_labels)
+        result.backward()
+        after = torch_fl.native_host.enqueue_origins()
+
+    for name in ("nll_loss_nd_backward_kernel", "log_softmax_backward_kernel"):
+        assert after["native"].get(name, 0) > before["native"].get(name, 0)
+        assert after["python"].get(name, 0) == before["python"].get(name, 0)
+    torch.testing.assert_close(result.cpu(), expected)
+    torch.testing.assert_close(actual.grad.cpu(), cpu.grad)
+
+
 def test_pointwise_promotion_matches_source_across_default_dtypes():
     import flag_gems
 
@@ -839,6 +918,67 @@ def test_direct_jit_warmup_does_not_launch_and_keeps_return_type():
     assert entry[(1,)](output, 1.25) is first
     torch_fl.flagos.synchronize()
     assert output.cpu().item() == 1.25
+
+
+def test_first_typed_launch_compiles_without_python_enqueue():
+    hosts = torch_fl.native_host._hosts
+    launcher = importlib.import_module(hosts.package + "._launcher")
+    source = importlib.import_module("flag_gems.ops.scalar_tensor")
+    entry = hosts.resolve(source.scalar_tensor_kernel)
+    slot = launcher.register_script_kernel(entry)
+    output = torch.empty((), dtype=torch.float32, device="flagos")
+    before = launcher.enqueue_origins()
+    torch.ops.flagos_source_native.launch(slot, [output, 3.125], {}, [1])
+    after = launcher.enqueue_origins()
+    name = source.scalar_tensor_kernel.__name__
+    assert after["native"].get(name, 0) == before["native"].get(name, 0) + 1
+    assert after["python"] == before["python"]
+    assert output.cpu().item() == 3.125
+
+
+@pytest.mark.parametrize(
+    ("apply", "kernel", "shape"),
+    [
+        (lambda x: torch.argmax(x, dim=-1), "argmax_kernel_inner", (1, 151936)),
+        (lambda x: torch.mul(x, 0.03125), "mul_scalar_kernel", (23, 97)),
+    ],
+)
+def test_first_launch_with_published_metadata(apply, kernel, shape):
+    cpu = torch.randn(shape)
+    device = cpu.to("flagos")
+    with torch_fl.native_host.execution_scope(0):
+        before = torch_fl.native_host.enqueue_origins()
+        output = apply(device)
+        after = torch_fl.native_host.enqueue_origins()
+    assert after["native"].get(kernel, 0) > before["native"].get(kernel, 0)
+    assert after["python"] == before["python"]
+    torch.testing.assert_close(output.cpu(), apply(cpu), rtol=0, atol=0)
+
+
+def test_training_mask_and_padding_enqueue_natively():
+    cpu_labels = torch.arange(128, dtype=torch.int64).reshape(1, 128)
+    cpu_mask = cpu_labels % 2 == 0
+    labels, mask = cpu_labels.to("flagos"), cpu_mask.to("flagos")
+    maximum_negative = torch.finfo(torch.bfloat16).min
+    zero = torch.tensor(0.0, dtype=torch.bfloat16)
+    device_zero = zero.to("flagos").requires_grad_()
+
+    with torch.enable_grad(), torch_fl.native_host.execution_scope(0):
+        before = torch_fl.native_host.enqueue_origins()
+        found = torch.where(mask, device_zero, maximum_negative)
+        padded = torch.nn.functional.pad(labels, (0, 1), value=-100)
+        after = torch_fl.native_host.enqueue_origins()
+
+    assert after["python"] == before["python"]
+    assert sum(after["native"].values()) > sum(before["native"].values())
+    torch.testing.assert_close(
+        found.cpu(), torch.where(cpu_mask, zero, maximum_negative), rtol=0, atol=0
+    )
+    assert torch.equal(
+        padded.cpu(), torch.nn.functional.pad(cpu_labels, (0, 1), value=-100)
+    )
+    (gradient,) = torch.autograd.grad(found, device_zero, torch.ones_like(found))
+    assert gradient.item() == cpu_mask.sum().item()
 
 
 def test_nested_abi_validation_without_a_device_launch():

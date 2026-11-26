@@ -18,11 +18,14 @@
 #include "acl_stream.h"
 
 Stream_t GetDefaultStreamForDevice(int device) {
+  at::native::flagos::ascend::WaitForAscendEagerSubmissions();
   return reinterpret_cast<Stream_t>(
       at::native::flagos::ascend::GetDefaultAclStreamForDevice(device));
 }
 
 Stream_t GetCurrentStreamForDevice(int device) {
+  // Raw stream handles can be handed to a consumer such as FlagCX.
+  at::native::flagos::ascend::WaitForAscendEagerSubmissions();
   return reinterpret_cast<Stream_t>(
       at::native::flagos::ascend::GetCurrentAclStreamForDevice(device));
 }
@@ -49,11 +52,13 @@ Error_t StreamGetPriority(Stream_t stream, int* priority) {
 }
 
 Error_t StreamDestroy(Stream_t stream) {
+  at::native::flagos::ascend::FlushAscendEager();
   aclError err = aclrtDestroyStream((aclrtStream)stream);
   return (err == ACL_SUCCESS) ? Success : ErrorUnknown;
 }
 
 Error_t StreamQuery(Stream_t stream) {
+  at::native::flagos::ascend::FlushAscendEager();
   aclrtStreamStatus status;
   aclError err = aclrtStreamQuery((aclrtStream)stream, &status);
   if (err != ACL_SUCCESS) {
@@ -63,11 +68,13 @@ Error_t StreamQuery(Stream_t stream) {
 }
 
 Error_t StreamSynchronize(Stream_t stream) {
+  at::native::flagos::ascend::FlushAscendEager();
   aclError err = aclrtSynchronizeStream((aclrtStream)stream);
   return (err == ACL_SUCCESS) ? Success : ErrorUnknown;
 }
 
 Error_t StreamWaitEvent(Stream_t stream, Event_t event, unsigned int flags) {
+  at::native::flagos::ascend::FlushAscendEager();
   aclError err = aclrtStreamWaitEvent((aclrtStream)stream, (aclrtEvent)event);
   return (err == ACL_SUCCESS) ? Success : ErrorUnknown;
 }
@@ -88,6 +95,7 @@ Error_t EventDestroy(Event_t event) {
 }
 
 Error_t EventRecord(Event_t event, Stream_t stream) {
+  at::native::flagos::ascend::FlushAscendEager();
   aclError err = aclrtRecordEvent((aclrtEvent)event, (aclrtStream)stream);
   return (err == ACL_SUCCESS) ? Success : ErrorUnknown;
 }

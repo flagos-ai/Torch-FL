@@ -23,8 +23,8 @@
 // it, training would decay to CPU.
 
 #include "../../generated/ops.h"
+#include <ATen/ExpandUtils.h>
 #include <ATen/core/Tensor.h>
-#include <algorithm>
 #include <vector>
 #include "op_preparation.h"
 #include "op_api_common.h"
@@ -37,37 +37,22 @@ namespace at::native::flagos {
 
 // Compute the output shape for aten::matmul following NumPy/PyTorch semantics.
 // aclnnMatmul handles all input dimensionalities ("for any shape mat multiply").
-static std::vector<int64_t> matmul_output_shape(
+static at::DimVector matmul_output_shape(
     const at::Tensor& a, const at::Tensor& b) {
-  int64_t da = a.dim(), db = b.dim();
-  // 1-D cases
-  if (da == 1 && db == 1) return {};                     // dot -> scalar
-  if (da == 1 && db == 2) return {b.size(1)};            // (K,)x(K,N)->(N,)
-  if (da == 2 && db == 1) return {a.size(0)};            // (M,K)x(K,)->(M,)
-  if (da == 2 && db == 2) return {a.size(0), b.size(1)}; // mm
-  // N-D batched: treat 1-D inputs as row/col vector, broadcast batch dims,
-  // output M×N from last two dims of each input.
-  auto a_sz = a.sizes().vec();
-  auto b_sz = b.sizes().vec();
-  bool a_1d = (da == 1), b_1d = (db == 1);
-  if (a_1d) a_sz.insert(a_sz.begin(), 1);
-  if (b_1d) b_sz.push_back(1);
-  int64_t na = static_cast<int64_t>(a_sz.size());
-  int64_t nb = static_cast<int64_t>(b_sz.size());
-  int64_t n  = std::max(na, nb);
-  std::vector<int64_t> out;
-  for (int64_t i = 0; i < n - 2; ++i) {
-    int64_t ai = na - n + i, bi = nb - n + i;
-    int64_t sa = (ai >= 0) ? a_sz[ai] : 1;
-    int64_t sb = (bi >= 0) ? b_sz[bi] : 1;
-    TORCH_CHECK(sa == sb || sa == 1 || sb == 1,
-                "matmul: incompatible batch dimensions");
-    out.push_back(sa == 1 ? sb : sa);
+  const auto a_sizes = a.sizes();
+  const auto b_sizes = b.sizes();
+  const auto a_batch = a.dim() > 2 ? a_sizes.slice(0, a.dim() - 2)
+                                    : at::IntArrayRef();
+  const auto b_batch = b.dim() > 2 ? b_sizes.slice(0, b.dim() - 2)
+                                    : at::IntArrayRef();
+  auto out = at::infer_size_dimvector(a_batch, b_batch);
+  // A vector has no row or column axis to include in the result.
+  if (a.dim() > 1) {
+    out.push_back(a_sizes[a.dim() - 2]);
   }
-  out.push_back(a_sz[na - 2]);  // M
-  out.push_back(b_sz[nb - 1]);  // N
-  if (a_1d) out.erase(out.end() - 2);
-  if (b_1d) out.pop_back();
+  if (b.dim() > 1) {
+    out.push_back(b_sizes.back());
+  }
   return out;
 }
 
@@ -109,13 +94,13 @@ at::Tensor MatmulKernelAscend(const at::Tensor& self,
   hsh.tensor(self);
   hsh.tensor(other);
   hsh.val(cube_math_type);
-  ascend::ExecAscendCached(
+  ascend::ExecAscendCached<true>(
       "aclnnMatmul", "aclnnMatmulGetWorkspaceSize",
       opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self, &other}, {&out},
-      [&](ascend::GwsFunc gws,
-          std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t,
+      [cube_math_type](ascend::GwsFunc gws,
+          ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t,
           uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor,
                    out_t[0].acl_tensor, cube_math_type, pws, pex);
@@ -182,7 +167,7 @@ static at::Tensor matmul_mat1_backward(const at::Tensor& self,
   }
   // Target the *promoted* shape, not self's: a 1-D self is still a row vector
   // at this point and only gets flattened back at the end of the kernel.
-  const auto target = mat1.sizes().vec();
+  const auto target = mat1.sizes();
 
   if (mat1.dim() == 2 && mat2.dim() > 2) {
     // self is 2-D against a batched other, so grad is [B..., M, N] and the sum
@@ -192,7 +177,7 @@ static at::Tensor matmul_mat1_backward(const at::Tensor& self,
     // has to be permuted to the front before flattening. op-plugin reshapes
     // grad to {M, -1} directly, which pairs (m, n) columns against (b, n) rows
     // and silently mixes batches; that is a bug, not a convention.
-    std::vector<int64_t> perm;
+    at::DimVector perm;
     perm.reserve(grad.dim());
     perm.push_back(grad.dim() - 2);  // M
     for (int64_t i = 0; i < grad.dim() - 2; ++i) {
@@ -225,7 +210,7 @@ static at::Tensor matmul_mat2_backward(const at::Tensor& self,
     mat1 = mat1.unsqueeze(0);
     grad = grad.unsqueeze(-2);
   }
-  const auto target = mat2.sizes().vec();
+  const auto target = mat2.sizes();
 
   if (mat2.dim() == 2 && mat1.dim() > 2) {
     // Mirror of the fold above. Here matmul flattened self's batch dims into

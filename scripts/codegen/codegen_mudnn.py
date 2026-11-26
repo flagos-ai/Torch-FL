@@ -69,6 +69,7 @@ from pathlib import Path
 # DECLARE_DISPATCHER in generated/ops.h exactly (else the build won't link).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from codegen_ops import schema_to_cpp_name  # noqa: E402
+from codegen_musa_foreach import emit as emit_foreach  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
 OUT_CC = REPO / "csrc/aten/backends/mthreads/generated/musa_kernels.cc"
@@ -137,9 +138,9 @@ OPS = {
     # lowering only declares `float2bfloat16(float)`. Routed to `musa` in
     # NATIVE_TRITON_GAPS' spirit rather than patching FlagGems.
     #
-    # `mul_.Scalar` and `div_.Scalar` need no entry: ATen boxes the Scalar
-    # overloads into these Tensor ones, so a single kernel per op covers both
-    # forms -- measured, `a.mul_(2.0)` dispatches as `mul_.Tensor`.
+    # Scalar division can use the Tensor overload. Scalar multiplication has
+    # its own entry below so foreach weight decay can pass the multiplier
+    # directly to muDNN.
     "add_.Tensor": ("binary_alpha_inplace", "ADD_ALPHA"),
     "sub_.Tensor": ("binary_alpha_inplace", "SUB_ALPHA"),
     "mul_.Tensor": ("binary_inplace", "MUL"),
@@ -157,6 +158,7 @@ OPS = {
     # GCU has to stage these scalars into a full-size device tensor because the
     # topsaten scalar path fails in its driver; mudnn takes the scalar directly.
     "mul.Scalar": ("unary_scalar", "MUL"),
+    "mul_.Scalar": ("unary_scalar_inplace", "MUL"),
     "div.Scalar": ("unary_scalar", "TRUEDIV"),
     "pow.Tensor_Scalar": ("unary_scalar", "POW"),
     "remainder.Scalar": ("unary_scalar", "FLOORMOD"),
@@ -183,6 +185,7 @@ OPS = {
     # ---- reduce whole tensor ----
     "sum": ("reduce_all_dtype", "ADD"),
     "mean": ("reduce_all_dtype", "MEAN"),
+    "cross_entropy_loss": ("cross_entropy", "CrossEntropyLoss"),
     # ---- misc ----
     "gelu": ("gelu", "GELU"),
     "_softmax": ("softmax_fwd", "SOFTMAX"),
@@ -324,6 +327,10 @@ NO_MUDNN_EQUIVALENT = ["sinh", "cosh", "asin"]
 # is called directly by copy_ops.cc/contiguous_ops.cc, not registered as a
 # kernel.
 SKIP: set = set()
+
+# These ops have no wrapper in the shared CUDA registration. Claim both
+# dispatch keys so the device kernel retains eager autograd.
+COMPOSITE_OPS = {"cross_entropy_loss"}
 
 # Handwritten kernels that still need an m.impl() line emitted into
 # musa_register.inc. The two `*_overrideable` convolution ops cannot be left to
@@ -484,6 +491,42 @@ _BINARY_PROLOGUE = """\
   auto other_b = other_c.expand(out_shape);
 """
 
+_HOST_SCALAR_ROUTES = {
+    "mul.Tensor": """\
+  const bool host_first = self.is_cpu();
+  const auto& tensor = host_first ? other : self;
+  const auto& host = host_first ? self : other;
+  if (auto scalar = HostFloatScalar(tensor, host, tensor.scalar_type())) {
+    auto out = at::empty(tensor.sizes(), tensor.options());
+    RunFloatScalar(tensor, out, *scalar, musa_ops::mudnn::Unary::Mode::MUL, "mul");
+    return out;
+  }
+""",
+    "add.Tensor": """\
+  if (IsUnitAlpha(alpha)) {
+    if (auto scalar = HostFloatScalar(self, other, self.scalar_type())) {
+      auto out = at::empty(self.sizes(), self.options());
+      RunFloatScalar(self, out, *scalar, musa_ops::mudnn::Unary::Mode::ADD, "add");
+      return out;
+    }
+  }
+""",
+    "add_.Tensor": """\
+  if (IsUnitAlpha(alpha) && self.is_non_overlapping_and_dense()) {
+    if (auto scalar = HostFloatScalar(self, other, result_dtype)) {
+      if (result_dtype == self.scalar_type()) {
+        RunFloatScalar(self, self, *scalar, musa_ops::mudnn::Unary::Mode::ADD, "add_");
+      } else {
+        auto wide = self.to(result_dtype);
+        RunFloatScalar(wide, wide, *scalar, musa_ops::mudnn::Unary::Mode::ADD, "add_");
+        self.copy_(wide);
+      }
+      return self;
+    }
+  }
+""",
+}
+
 # True division is the one binary op whose *result category* at::result_type gets
 # wrong: TensorIterator builds the div kernel with promote_integer_inputs_to_float,
 # so an integral result dtype is widened to the default dtype and the quotient is
@@ -540,7 +583,7 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 T_BINARY = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
-  if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
+{host_scalar_route}  if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
       !musa_ops::{dtype_pred}(other.scalar_type())) {{
     auto fallback_device = self.is_cpu() ? other.device() : self.device();
     return at::{at_op}(self.cpu(), other.cpu()).to(fallback_device);
@@ -574,7 +617,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other,
 T_BINARY_ALPHA = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {{
-  if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
+{host_scalar_route}  if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
       !musa_ops::{dtype_pred}(other.scalar_type())) {{
     auto fallback_device = self.is_cpu() ? other.device() : self.device();
     return at::{at_op}(self.cpu(), other.cpu(), alpha).to(fallback_device);
@@ -647,6 +690,9 @@ _BINARY_INPLACE_PROLOGUE = """\
       c10::canCast(result_dtype, self.scalar_type()),
       "result type ", result_dtype,
       " can't be cast to the desired output type ", self.scalar_type());
+"""
+
+_BINARY_INPLACE_OPERAND = """\
   // A non-device operand (the wrapped number, a CPU tensor) has to be moved
   // before mudnn can read it; expand() to self's shape stays a view, and mudnn
   // reads 0-strides correctly, so broadcasting costs no allocation.
@@ -707,6 +753,7 @@ at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& other) {{
   }}
 """
     + _BINARY_INPLACE_PROLOGUE
+    + _BINARY_INPLACE_OPERAND
     + _BINARY_INPLACE_MODE
     + _BINARY_INPLACE_BODY
 )
@@ -728,6 +775,7 @@ at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& other,
   }}
 """
     + _BINARY_INPLACE_PROLOGUE
+    + _BINARY_INPLACE_OPERAND
     + _BINARY_INPLACE_MODE
     + _BINARY_INPLACE_BODY
 )
@@ -745,6 +793,8 @@ at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& other,
   }}
 """
     + _BINARY_INPLACE_PROLOGUE
+    + "{host_scalar_route}"
+    + _BINARY_INPLACE_OPERAND
     + _BINARY_INPLACE_MODE
     + """\
   // Before either arm runs `op`. mudnn's Binary carries the alpha as an untyped
@@ -836,6 +886,21 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 )
 
+# Keep the BF16 multiplier in the scalar argument until the device kernel
+# executes. The composite path remains available for the other ATen cases.
+T_UNARY_SCALAR_INPLACE = """\
+at::Tensor& {kernel}(at::Tensor& self, const at::Scalar& other) {{
+  if (self.scalar_type() != at::kBFloat16 || !other.isFloatingPoint() ||
+      self.is_conj() || self.is_neg() || !self.is_non_overlapping_and_dense()) {{
+    return at::compositeexplicitautograd::{at_op}(self, other);
+  }}
+  RunFloatScalar(self, self, other, musa_ops::mudnn::Unary::Mode::{mode}, "{at_op}");
+  return self;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
+"""
+
 # add.Scalar/sub.Scalar: aten's alpha scales the scalar operand, so
 # self + other*alpha folds into a single ADD/SUB alpha. Folded on the host in
 # the scalar's own type to avoid a needless int->double round trip.
@@ -902,9 +967,8 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 # refuses on purpose -- see MATMUL_CATEGORIES. mudnn's MatMul and BatchMatMul
 # both want a workspace maintainer (the
 # query returned 0 bytes for the shapes probed, but the argument is mandatory).
-# Operands are made contiguous here: unlike the elementwise ops, a GEMM's inner
-# layout requirements are not something the stride descriptor alone guarantees,
-# so this keeps mm(a.t(), b) correct rather than fast.
+# Describe a dense transposed operand in storage order and use the SDK's
+# transpose flag. General strided operands still need a contiguous copy.
 T_MATMUL = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   if (!musa_ops::{dtype_pred}(self.scalar_type())) {{
@@ -916,13 +980,17 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   std::vector<int64_t> out_shape = self.sizes().vec();
   out_shape.back() = mat2.size(-1);
   auto out = at::empty(out_shape, self.options());
-{empty_guard}  auto self_c = self.contiguous();
-  auto mat2_c = mat2.contiguous();
+{empty_guard}  const auto [self_c, trans_self] = musa_ops::MudnnMatmulInput(self);
+  const auto [mat2_c, trans_mat2] = musa_ops::MudnnMatmulInput(mat2);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_mat2(mat2_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::{mode} op;
+  musa_ops::MudnnSetMatmulDeterminism(op, "{at_op}");
+  const auto trans_status = op.SetTranspose(trans_self, trans_mat2);
+  TORCH_CHECK(trans_status == musa_ops::mudnn::Status::SUCCESS,
+              "{at_op}: mudnn SetTranspose failed: ", musa_ops::MudnnStatusName(trans_status));
   EXEC_MUDNN_CMD(
       "{at_op}", self,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_mat2.get(),
@@ -946,13 +1014,17 @@ at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& mat2, at::Tensor&
   if (!out.sizes().equals(out_shape)) {{
     out.resize_(out_shape);
   }}
-  auto self_c = self.contiguous();
-  auto mat2_c = mat2.contiguous();
+  const auto [self_c, trans_self] = musa_ops::MudnnMatmulInput(self);
+  const auto [mat2_c, trans_mat2] = musa_ops::MudnnMatmulInput(mat2);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_mat2(mat2_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::{mode} op;
+  musa_ops::MudnnSetMatmulDeterminism(op, "{at_op}");
+  const auto trans_status = op.SetTranspose(trans_self, trans_mat2);
+  TORCH_CHECK(trans_status == musa_ops::mudnn::Status::SUCCESS,
+              "{at_op}: mudnn SetTranspose failed: ", musa_ops::MudnnStatusName(trans_status));
   EXEC_MUDNN_CMD(
       "{at_op}", self,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_mat2.get(),
@@ -1010,14 +1082,14 @@ at::Tensor {kernel}(
   // mudnn multi-dim Reduce (more than one axis at a time) silently ignores
   // strides and reads the input as if contiguous (verified: (4,5) stride (0,1)
   // reduced over all dims gives 210 = sum(1..20) instead of 60 = 4*sum(1..5)).
-  // Single-dim reduces honour strides correctly, except on a fully-broadcast
-  // input (a 0-stride view of one element), where a single-dim reduce
-  // intermittently writes only out[0]. MudnnReduceNeedsContiguous catches
-  // that; together the two branches cover the stride bug, the SIGFPE and the
-  // partial write.
-  if (norm_dims.size() > 1 && !self_c.is_contiguous()) {{
-    self_c = self_c.contiguous();
-  }} else if (musa_ops::MudnnReduceNeedsContiguous(self_c)) {{
+  // BF16 sums need the vendor Torch's contiguous input layout even for one
+  // axis. The strided kernel rounds some halfway values differently.
+  const bool contiguous_bf16_sum =
+      musa_ops::mudnn::Reduce::Mode::{mode} == musa_ops::mudnn::Reduce::Mode::ADD &&
+      out_dtype == at::kBFloat16;
+  if (!self_c.is_contiguous() &&
+      (norm_dims.size() > 1 || contiguous_bf16_sum ||
+       musa_ops::MudnnReduceNeedsContiguous(self_c))) {{
     self_c = self_c.contiguous();
   }}
   auto out = at::empty(squeezed_shape, self.options().dtype(out_dtype));
@@ -1940,6 +2012,7 @@ at::Tensor {kernel}(
   musa_ops::MudnnTensorWrapper t_mat2(mat2_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::{mode} op;
+  musa_ops::MudnnSetMatmulDeterminism(op, "{at_op}");
 
   const bool self_is_out_shaped = self.sizes().equals(out_shape);
   const bool self_is_vector =
@@ -2712,6 +2785,88 @@ at::Tensor {kernel}(const at::Tensor& self) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
+T_CROSS_ENTROPY = """\
+namespace {{
+using MusaCrossEntropy = musa_ops::mudnn::CrossEntropyLoss;
+
+void ConfigureMusaCrossEntropy(MusaCrossEntropy& op) {{
+  using Status = musa_ops::mudnn::Status;
+  TORCH_CHECK(op.SetReductionMode(MusaCrossEntropy::ReductionMode::MEAN) == Status::SUCCESS &&
+              op.SetIgnoreIndex(-100) == Status::SUCCESS &&
+              op.SetLabelSmoothing(0.0) == Status::SUCCESS,
+              "cross_entropy_loss: muDNN configuration failed");
+}}
+
+at::Tensor MusaCrossEntropyForward(const at::Tensor& input, const at::Tensor& labels) {{
+  auto loss = at::empty({{}}, input.options());
+  musa_ops::MudnnTensorWrapper out(loss), source(input), target(labels);
+  musa_ops::mudnn::Tensor weight;
+  MusaCrossEntropy op;
+  ConfigureMusaCrossEntropy(op);
+  EXEC_MUDNN_CMD("cross_entropy_loss", input,
+                op.Run(_mudnn_h, out.get(), source.get(), target.get(),
+                       weight, musa_ops::MudnnWorkspaceFor(input)));
+  return loss;
+}}
+
+class MusaCrossEntropyFunction : public torch::autograd::Function<MusaCrossEntropyFunction> {{
+ public:
+  static at::Tensor forward(torch::autograd::AutogradContext* ctx,
+                            const at::Tensor& input, const at::Tensor& labels) {{
+    ctx->save_for_backward({{input, labels}});
+    return MusaCrossEntropyForward(input, labels);
+  }}
+
+  static torch::autograd::variable_list backward(
+      torch::autograd::AutogradContext* ctx, torch::autograd::variable_list grads) {{
+    const auto saved = ctx->get_saved_variables();
+    const auto& input = saved[0];
+    const auto& labels = saved[1];
+    if (at::GradMode::is_enabled()) {{
+      auto loss = at::compositeimplicitautograd::cross_entropy_loss(input, labels);
+      auto higher = torch::autograd::grad({{loss}}, {{input}}, grads,
+                                         /*retain_graph=*/true, /*create_graph=*/true);
+      return {{higher[0], at::Tensor()}};
+    }}
+    auto grad_input = at::empty(input.sizes(), input.options());
+    musa_ops::MudnnTensorWrapper out(grad_input), source(input), target(labels),
+        grad_output(grads[0]);
+    musa_ops::mudnn::Tensor weight;
+    MusaCrossEntropy op;
+    ConfigureMusaCrossEntropy(op);
+    EXEC_MUDNN_CMD("cross_entropy_loss_backward", input,
+                  op.RunBwd(_mudnn_h, out.get(), source.get(), grad_output.get(),
+                            target.get(), weight, musa_ops::MudnnWorkspaceFor(input)));
+    return {{grad_input, at::Tensor()}};
+  }}
+}};
+}}  // namespace
+
+at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& target,
+                    const std::optional<at::Tensor>& weight, int64_t reduction,
+                    c10::SymInt ignore_index, double label_smoothing) {{
+  // Match the vendor's eager fused class-index loss using original logits.
+  // Other layouts, weights and reductions use ATen's differentiable composite.
+  if (GetBackendForOp("{at_op}") != Backend::kMthreads ||
+      !self.is_privateuseone() || self.device() != target.device() ||
+      self.is_nested() || target.is_nested() || self.has_names() || target.has_names() ||
+      self.scalar_type() != at::kFloat || target.scalar_type() != at::kLong ||
+      self.dim() != 2 || target.dim() != 1 || self.numel() == 0 ||
+      self.size(0) != target.size(0) || !self.is_contiguous() || !target.is_contiguous() ||
+      self.is_neg() || target.is_neg() ||
+      (weight && weight->defined()) || reduction != at::Reduction::Mean ||
+      ignore_index.maybe_as_int() != -100 || label_smoothing != 0.0 ||
+      self._fw_grad(0).defined()) {{
+    return at::compositeimplicitautograd::cross_entropy_loss_symint(
+        self, target, weight, reduction, ignore_index, label_smoothing);
+  }}
+  if (at::GradMode::is_enabled() && self.requires_grad()) {{
+    return MusaCrossEntropyFunction::apply(self, target);
+  }}
+  return MusaCrossEntropyForward(self, target);
+}}
+"""
+
 CATEGORIES = {
     "metadata_view": T_METADATA_VIEW,
     "unary": T_UNARY,
@@ -2725,12 +2880,14 @@ CATEGORIES = {
     "binary_alpha_inplace": T_BINARY_ALPHA_INPLACE,
     "binary_cmp": T_BINARY_CMP,
     "unary_scalar": T_UNARY_SCALAR,
+    "unary_scalar_inplace": T_UNARY_SCALAR_INPLACE,
     "unary_scalar_alpha": T_UNARY_SCALAR_ALPHA,
     "unary_scalar_cmp": T_UNARY_SCALAR_CMP,
     "matmul": T_MATMUL,
     "matmul_out": T_MATMUL_OUT,
     "reduce_dims_dtype": T_REDUCE_DIMS_DTYPE,
     "reduce_all_dtype": T_REDUCE_ALL_DTYPE,
+    "cross_entropy": T_CROSS_ENTROPY,
     "gelu": T_GELU,
     "softmax_fwd": T_SOFTMAX_FWD,
     "unary_cmp": T_UNARY_CMP,
@@ -2856,12 +3013,14 @@ CATEGORY_CLASS = {
     "binary_alpha_inplace": "Binary",
     "binary_cmp": "Binary",
     "unary_scalar": "Unary",
+    "unary_scalar_inplace": "Unary",
     "unary_scalar_alpha": "Unary",
     "unary_scalar_cmp": "Unary",
     "matmul": None,  # mode names the class itself (MatMul / BatchMatMul)
     "matmul_out": None,
     "reduce_dims_dtype": "Reduce",
     "reduce_all_dtype": "Reduce",
+    "cross_entropy": "CrossEntropyLoss",
     "gelu": "Unary",
     "softmax_fwd": "Softmax",
     "unary_cmp": "Unary",
@@ -2922,15 +3081,21 @@ FILE_HEADER = """\
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ExpandUtils.h>
+#include <ATen/ops/cross_entropy_loss_compositeimplicitautograd_dispatch.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/mul_compositeexplicitautograd_dispatch.h>
 #include <ATen/ops/result_type.h>
 #include <ATen/ops/view_as_complex_native.h>
 #include <ATen/ops/view_as_real_native.h>
 #include <c10/core/DefaultDtype.h>
 #include <c10/core/Scalar.h>
 #include <c10/core/ScalarType.h>
+#include <torch/csrc/autograd/autograd.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include <torch/library.h>
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 #include "../mudnn_common.h"
@@ -2938,6 +3103,39 @@ FILE_HEADER = """\
 namespace at::native::flagos {
 
 namespace musa_ops = at::native::flagos::musa_ops;
+
+namespace {
+std::optional<at::Scalar> HostFloatScalar(const at::Tensor& tensor,
+                                         const at::Tensor& other,
+                                         at::ScalarType compute_dtype) {
+  const auto dtype = tensor.scalar_type();
+  if (!tensor.is_privateuseone() || (dtype != at::kFloat && dtype != at::kBFloat16) ||
+      !other.is_cpu() || other.dim() != 0 || !other.is_floating_point() ||
+      tensor.is_conj() || tensor.is_neg() || at::result_type(tensor, other) != dtype) {
+    return std::nullopt;
+  }
+  // The Binary path would first convert the scalar to the compute dtype.
+  // Preserve that rounding before passing it to Unary::SetAlpha.
+  if (compute_dtype == at::kBFloat16) return at::Scalar(other.item<c10::BFloat16>());
+  if (compute_dtype == at::kFloat) return at::Scalar(other.item<float>());
+  return std::nullopt;
+}
+
+bool IsUnitAlpha(const at::Scalar& alpha) {
+  return (alpha.isFloatingPoint() || alpha.isIntegral(false)) &&
+      alpha.toDouble() == 1.0;
+}
+
+void RunFloatScalar(const at::Tensor& input, at::Tensor& out, const at::Scalar& value,
+                    musa_ops::mudnn::Unary::Mode mode, const char* tag) {
+  if (input.numel() == 0) return;
+  musa_ops::MudnnTensorWrapper source(input), destination(out);
+  musa_ops::mudnn::Unary op;
+  op.SetMode(mode);
+  op.SetAlpha(value.to<double>());
+  EXEC_MUDNN_CMD(tag, input, op.Run(_mudnn_h, destination.get(), source.get()));
+}
+}  // namespace
 
 """
 
@@ -3056,6 +3254,7 @@ def main():
 
     bodies = []
     covered = []  # (op, mode, category)
+    composite_impls = []
     skipped = []  # (op, reason)
 
     for op, (cat, mode) in OPS.items():
@@ -3074,7 +3273,7 @@ def main():
         if cat != "metadata_view" and syms is not None and cls not in syms:
             skipped.append((op, f"musa::dnn::{cls} not in {libmudnn_path().name}"))
             continue
-        if op not in wrappers:
+        if op not in wrappers and op not in COMPOSITE_OPS:
             skipped.append((op, "no wrapper in generated/register.inc"))
             continue
         fn, disp = schema_to_cpp_name(op)
@@ -3095,6 +3294,7 @@ def main():
             kernel=kernel,
             mode=mode_name,
             mode_set=mode_set,
+            host_scalar_route=_HOST_SCALAR_ROUTES.get(op, ""),
             promote_truediv=promote_truediv,
             fn=fn,
             disp=disp,
@@ -3152,6 +3352,10 @@ def main():
             fmt["stable_expr"] = extra[2]
         bodies.append(CATEGORIES[cat].format(**fmt))
         covered.append((op, mode_name, cat))
+        if op in COMPOSITE_OPS:
+            composite_impls.append(
+                f'  m.impl("{op}", TORCH_FN(at::native::flagos::{kernel}));\n'
+            )
 
     for op in NO_MUDNN_EQUIVALENT:
         skipped.append((op, "no mudnn mode; stays on cpu_fallback"))
@@ -3166,11 +3370,20 @@ def main():
                 skipped.append((op, "handwritten, but no wrapper in register.inc"))
 
     OUT_CC.parent.mkdir(parents=True, exist_ok=True)
-    OUT_CC.write_text(FILE_HEADER + "\n".join(bodies) + FILE_FOOTER)
+    registration = "".join(
+        f"\nTORCH_LIBRARY_IMPL(aten, {key}, m) {{\n{''.join(composite_impls)}}}\n"
+        for key in ("PrivateUse1", "AutogradPrivateUse1")
+        if composite_impls
+    )
+    OUT_CC.write_text(FILE_HEADER + "\n".join(bodies) + FILE_FOOTER + registration)
 
-    impl_ops = sorted([op for op, _, _ in covered] + handwritten)
+    impl_ops = sorted(
+        [op for op, _, _ in covered if op not in COMPOSITE_OPS] + handwritten
+    )
     impls = "".join(f'  m.impl("{op}", {wrappers[op]});\n' for op in impl_ops)
     OUT_INC.write_text(INC_HEADER + impls)
+    if args.category == "all":
+        emit_foreach(OUT_CC.parent)
 
     print(f"[gen] {OUT_CC.relative_to(REPO)}  ({len(covered)} kernels)")
     print(f"[gen] {OUT_INC.relative_to(REPO)}  ({len(impl_ops)} m.impl lines)")

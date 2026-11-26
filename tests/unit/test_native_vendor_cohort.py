@@ -49,8 +49,10 @@ def test_build_policy_views_share_cohort_and_do_not_mutate_registry():
     sources["entries"].clear()
     assert policy.precision_policy("nvidia")["operators"]
     assert policy.source_policy("nvidia")["entries"]
+    assert not policy.precision_policy("mthreads")["operators"]
+    assert policy.source_policy("mthreads")["entries"]
     with pytest.raises(ValueError, match="unmeasured native-host vendor"):
-        policy.precision_policy("mthreads")
+        policy.precision_policy("apple")
 
 
 def test_bundle_uses_content_identity_and_preserves_license(published, tmp_path):
@@ -140,6 +142,54 @@ def test_hcu_bundle_must_use_the_existing_dtk_builder(tmp_path):
         cohort.bundle(
             {"vendor": "hygon", "library_dir": str(tmp_path)}, tmp_path / "package"
         )
+
+
+def test_thead_bundle_checks_device_hashes_and_copies_published_flat_licenses(tmp_path):
+    policy = cohort.load_build_policy(ROOT).precision_policy("thead")
+    library = tmp_path / "torch/lib"
+    library.mkdir(parents=True)
+    (library.parent / "version.py").write_text(
+        f"__version__ = {policy['vendor_torch']!r}\n"
+        f"git_version = {policy['torch_git_version']!r}\n"
+        f"cuda = {policy['cuda']!r}\n"
+    )
+    assert set(policy["libraries"]) == set(cohort.CUDA_DEVICE_LIBRARIES)
+    for name in policy["libraries"]:
+        asset = library / name
+        asset.write_text(name)
+        policy["libraries"][name] = cohort.digest(asset)
+    for name in policy["host_headers"]:
+        header = library.parent / "include" / name
+        header.parent.mkdir(parents=True, exist_ok=True)
+        header.write_text("published CUDA macros")
+        policy["host_headers"][name] = cohort.digest(header)
+    (library / "libtorch_cpu.so").write_text("vendor CPU core must remain outside")
+    info = tmp_path / "torch-2.10.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        f"Name: torch\nVersion: {policy['vendor_torch']}\n"
+        "License-File: LICENSE\nLicense-File: NOTICE\n"
+    )
+    for name in ("LICENSE", "NOTICE"):
+        (info / name).write_text(name)
+
+    record = cohort.describe(library, policy)
+    assert record["requirements"] == []
+    assert record["git_version"] != policy["cpu_torch_git_version"]
+    destination = tmp_path / "package"
+    assert cohort.bundle(record, destination) == policy["libraries"]
+    assert not (destination / "lib_thead").exists()
+    root = destination / "native_host/_generated"
+    assert {asset.name for asset in (root / "thead_vendor").iterdir()} == set(
+        policy["libraries"]
+    )
+    assert {asset.name for asset in (root / "licenses").iterdir()} == {
+        "vendor_torch_LICENSE",
+        "vendor_torch_NOTICE",
+    }
+    (library / "libtorch_cuda.so").write_text("different published bits")
+    with pytest.raises(ValueError, match="published T-Head device library changed"):
+        cohort.describe(library, policy)
 
 
 def test_hcu_published_source_selection_is_explicit_and_dtype_scoped():

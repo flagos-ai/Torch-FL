@@ -33,16 +33,24 @@ def test_committed_entries_match_published_schemas(generator):
 
 def test_conf_dtype_routes_match_generated_vendor_capabilities(generator):
     conf = (ROOT / "torch_fl/configs/backends_nvidia.conf").read_text()
+    outputs, catalog = generator.render(generator.load_policy())
+    native_composite = {row["op"] for row in catalog if "composite" in row}
+    claims = outputs[
+        generator.ENTRY_PATH.with_name("register_native_vendor_nvidia.inc")
+    ]
     clauses = {}
     for line in conf.splitlines():
         name, assignment, value = line.split("#", 1)[0].partition("=")
         if assignment and ";" in value:
             base, clause = value.split(";", 1)
             dtypes, backend = clause.strip().split(":")
-            assert base.strip() == "flaggems"
+            if name.strip() in native_composite:
+                assert base.strip() == "none"
+                assert f'm.impl("{name.strip()}",' in claims
+            else:
+                assert base.strip() == "flaggems"
             assert backend == "nvidia"
             clauses[name.strip()] = sorted(dtypes.split(","))
-    catalog = generator.render(generator.load_policy())[1]
     assert clauses == {row["op"]: row["dtypes"] for row in catalog}
 
 
@@ -127,9 +135,9 @@ def test_catalog_emission_rejects_stale_core_sources(
     assert not capsys.readouterr().out
 
 
-def test_hcu_entries_use_published_structured_implementations(generator):
+def test_hcu_entries_use_published_implementations(generator):
     outputs, catalog = generator.render(generator.load_policy("hygon"))
-    assert len(catalog) == 5
+    assert len(catalog) == 19
     for path, content in outputs.items():
         assert path.read_text() == content
     source = next(content for path, content in outputs.items() if path.suffix == ".cc")
@@ -137,10 +145,39 @@ def test_hcu_entries_use_published_structured_implementations(generator):
     assert "BindStreamScope(module)" in source
     assert "StructuredCall<at::native::structured_mm_out_cuda>" in source
     assert "StructuredCall<at::native::structured_bmm_out_cuda>" in source
+    assert "Concatenate<at::native::structured_cat_out_cuda>" in source
+    assert "at::native::foreach_tensor_mul_scalar_kernel_cuda_" in source
     assert "Matrix<" not in source
     assert "DeviceBoxingGuard" not in source and "redispatch" not in source
     routes = (ROOT / "torch_fl/configs/backends_hygon.conf").read_text()
     for row in catalog:
         assert row["vendor"] == "hygon"
         expected = ",".join(row["dtypes"]) + ":hygon"
-        assert f"{row['op']} = flaggems; {expected}" in routes
+        base = "none" if "composite" in row else "flaggems"
+        assert f"{row['op']} = {base}; {expected}" in routes
+
+
+def test_thead_entries_keep_existing_aten_and_flaggems_fallbacks(generator):
+    policy = generator.load_policy("thead")
+    outputs, catalog = generator.render(policy)
+    assert len(catalog) == 9
+    assert all(row["guarded"] for row in policy["operators"])
+    for path, content in outputs.items():
+        assert path.read_text() == content
+
+    source = next(content for path, content in outputs.items() if path.suffix == ".cc")
+    assert "BinaryPointwise<at::meta::structured_mul_Tensor>" in source
+    assert "Concatenate<at::native::structured_cat_out_cuda>" in source
+    assert source.count("CanBatchForeach<at::ScalarType::BFloat16>(") == 7
+    assert "DeviceBoxingGuard" not in source
+
+    core = outputs[generator.ENTRY_PATH.with_name("register_native_vendor_thead.inc")]
+    assert "thead_vendor::Multiplication(self, other)" in core
+    assert "return at::compositeexplicitautogradnonfunctional::mul(self, other)" in core
+    assert 'm.impl("cat",' not in core
+    kernels = (generator.ENTRY_PATH.parent / "flaggems_python_kernels.cc").read_text()
+    assert "thead_vendor::Concatenation(tensors, dim)" in kernels
+    assert "CatFnSource.Call<at::Tensor>" in kernels
+    routes = (ROOT / "torch_fl/configs/backends_thead.conf").read_text().splitlines()
+    assert {"mul.Tensor = none", "mul.out = flaggems", "cat = flaggems"} <= set(routes)
+    assert not any(":thead" in line for line in routes)

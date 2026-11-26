@@ -38,3 +38,25 @@ def test_c_api_stream_selection_matches_python_context(device):
     finally:
         library.SetCurrentStreamForDevice(device, previous_stream)
         torch.flagos.set_device(previous_device)
+
+
+@pytest.mark.native_source_host
+def test_acl_event_orders_eager_ops_across_streams():
+    device = torch.flagos.current_device()
+    target = f"flagos:{device}"
+    default = torch.flagos.current_stream(device)
+    consumer = torch.flagos.Stream(device=device)
+    reference = torch.arange(32, dtype=torch.bfloat16)
+    value = reference.to(target)
+    factor = torch.full_like(reference, -1).to(target)
+
+    # Exercise slot reuse in the host queue before recording the event.
+    for _ in range(513):
+        value = torch.mul(value, factor)
+    complete = default.record_event()
+
+    with torch.flagos.stream(consumer):
+        consumer.wait_event(complete)
+        result = torch.mul(value, factor)
+    consumer.synchronize()
+    torch.testing.assert_close(result.cpu(), reference, rtol=0, atol=0)

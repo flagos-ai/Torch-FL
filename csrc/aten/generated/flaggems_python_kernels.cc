@@ -4,6 +4,9 @@
 #ifdef FLAGOS_FLAGGEMS_PYTHON
 
 #include "ops.h"
+#include <ATen/ops/full_native.h>
+#include <ATen/ops/result_type.h>
+#include <ATen/ops/constant_pad_nd_native.h>
 #include "../strided_ops.h"
 #include <ATen/native/BinaryOps.h>
 #include "../fallback.h"
@@ -12,6 +15,9 @@
 #include "../device_boxing.h"
 #include "../backends/flagos/python_op_caller.h"
 #include "../backends/flagos/typed_source_host.h"
+#if defined(FLAGOS_NATIVE_THEAD_VENDOR)
+#include "../backends/flagos/thead_vendor_guards.h"
+#endif
 
 namespace at::native::flagos {
 namespace {
@@ -254,6 +260,17 @@ at::Tensor & PrivLogSoftmaxOutKernelPython(const at::Tensor & self, int64_t dim,
 
 static TypedSourceSlot PrivLogSoftmaxBackwardDataFnSource("aten::_log_softmax_backward_data", "flag_gems.log_softmax_backward", "aca263c2da6fc21abcd7232097f4616d6c967fd2a504e724032a4835ddd446c1", "{\"abi\": \"aca263c2da6fc21abcd7232097f4616d6c967fd2a504e724032a4835ddd446c1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"input_dtype\", \"type\": \"at::ScalarType\"}], \"host\": \"flag_gems.log_softmax_backward\", \"op\": \"aten::_log_softmax_backward_data\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivLogSoftmaxBackwardDataKernelPython(const at::Tensor & grad_output, const at::Tensor & output, int64_t dim, at::ScalarType input_dtype) {
+#if defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (input_dtype == at::kFloat && output.scalar_type() == at::kFloat &&
+      grad_output.scalar_type() == at::kFloat && output.dim() == 2 &&
+      (dim == -1 || dim == 1) && output.numel() && output.is_contiguous() &&
+      grad_output.is_contiguous() && grad_output.device() == output.device() &&
+      grad_output.sizes().equals(output.sizes())) {
+    const int64_t dims[] = {dim};
+    auto sum = at::sum(grad_output, at::IntArrayRef(dims), true, at::kFloat);
+    return at::sub(grad_output, at::mul(at::exp(output), sum));
+  }
+#endif
   auto result = PrivLogSoftmaxBackwardDataFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.log_softmax_backward", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(output), static_cast<const int64_t&>(dim), static_cast<const at::ScalarType&>(input_dtype));
   UnboxToFlagos(result);
   return result;
@@ -606,6 +623,15 @@ at::Tensor AddTensorKernelPython(const at::Tensor & self, const at::Tensor & oth
   if (!alpha.isIntegral(false))
     at::native::alpha_check(at::result_type(self, other), alpha);
 #endif
+#if defined(USE_ASCEND) && defined(FLAGOS_NATIVE_HOSTS)
+  // The published BF16 add corrupts values for dense matrices with different strides.
+  if (self.scalar_type() == at::kBFloat16 && other.scalar_type() == at::kBFloat16 &&
+      self.device() == other.device() && self.dim() == 2 && self.sizes().equals(other.sizes()) &&
+      !self.is_contiguous() && other.is_contiguous() && self.is_non_overlapping_and_dense()) {
+    if (const auto native = add_tensor_dispatcher.KernelFor(Backend::kAscend))
+      return native(self, other, alpha);
+  }
+#endif
   auto result = AddTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.add", {self, other}, {PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
@@ -614,7 +640,7 @@ at::Tensor AddTensorKernelPython(const at::Tensor & self, const at::Tensor & oth
 static TypedSourceSlot AddInplaceTensorFnSource("aten::add_.Tensor", "flag_gems.add_", "1b351573d35e2a3323b644364e80e318cbda91d54b694c8ac662239a73e6d0d7", "{\"abi\": \"1b351573d35e2a3323b644364e80e318cbda91d54b694c8ac662239a73e6d0d7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.add_\", \"op\": \"aten::add_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
   auto result = AddInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.add_", {self, other}, {PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(alpha));
-  self.copy_(result);
+  if (!result.is_same(self)) self.copy_(result);
   return self;
 }
 
@@ -1205,6 +1231,10 @@ at::Tensor BlackmanWindowPeriodicKernelPython(int64_t window_length, bool period
 
 static TypedSourceSlot BmmFnSource("aten::bmm", "flag_gems.bmm", "e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268", "{\"abi\": \"e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm\", \"op\": \"aten::bmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BmmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
+#if defined(FLAGOS_ACCEL_PPU)
+  at::Tensor empty_product;
+  if (at::native::flagos::TryEmptyPpuMatmul(self, mat2, 3, empty_product)) { return empty_product; }
+#endif
   at::Tensor native_product;
   if (at::native::flagos::TryNativeHostBmmOuterProduct(self, mat2, native_product)) { return native_product; }
   at::Tensor self_dotpad = self;
@@ -1235,6 +1265,11 @@ at::Tensor BucketizeTensorKernelPython(const at::Tensor & self, const at::Tensor
 
 static TypedSourceSlot CatFnSource("aten::cat", "flag_gems.cat", "eb699a46d1603857e5598ada5081877cc15a70ec4a7246c1ae68b54be9a85d0d", "{\"abi\": \"eb699a46d1603857e5598ada5081877cc15a70ec4a7246c1ae68b54be9a85d0d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::ITensorListRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.cat\", \"op\": \"aten::cat\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CatKernelPython(const at::ITensorListRef & tensors, int64_t dim) {
+#if defined(FLAGOS_NATIVE_THEAD_VENDOR)
+  if (auto kernel = cat_dispatcher.KernelFor(Backend::kThead);
+      kernel && NativeSourceCanRun() && thead_vendor::Concatenation(tensors, dim))
+    return kernel(tensors, dim);
+#endif
   auto result = CatFnSource.Call<at::Tensor>([&]() { return CallPythonOp_ListI("flag_gems.cat", tensors, dim); }, static_cast<const at::ITensorListRef&>(tensors), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result);
 #if defined(USE_DCU)
@@ -1377,6 +1412,18 @@ at::Tensor & ConjPhysicalInplaceKernelPython(at::Tensor & self) {
 
 static TypedSourceSlot ConstantPadNdFnSource("aten::constant_pad_nd", "flag_gems.constant_pad_nd", "621273739f8d32d92137d480e27294bdf0e23734eeee4993cb8aaf1270fd19f2", "{\"abi\": \"621273739f8d32d92137d480e27294bdf0e23734eeee4993cb8aaf1270fd19f2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.constant_pad_nd\", \"op\": \"aten::constant_pad_nd\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ConstantPadNdKernelPython(const at::Tensor & self, at::IntArrayRef pad, const at::Scalar & value) {
+#if defined(FLAGOS_NATIVE_HOSTS) && \
+    (defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_DCU) || \
+     defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_ILUVATAR) || defined(FLAGOS_ACCEL_MUSA))
+#if defined(FLAGOS_ACCEL_METAX)
+  const bool native_fill = !value.isComplex() && value.toDouble() < 0;
+#else
+  constexpr bool native_fill = true;
+#endif
+  if (native_fill && self.scalar_type() == at::kLong && !ConstantPadNdFnSource.Available()) {
+    return at::native::constant_pad_nd(self, pad, value);
+  }
+#endif
   auto result = ConstantPadNdFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.constant_pad_nd", {self, pad, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(pad), static_cast<const at::Scalar&>(value));
   UnboxToFlagos(result);
   return result;
@@ -2031,6 +2078,13 @@ at::Tensor FractionalMaxPool2dBackwardKernelPython(const at::Tensor & grad_outpu
 
 static TypedSourceSlot FullFnSource("aten::full", "flag_gems.full", "00231d69b0943146650b45a74e5c0ea8948a9948f33d186350d188e642c1d88d", "{\"abi\": \"00231d69b0943146650b45a74e5c0ea8948a9948f33d186350d188e642c1d88d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.full\", \"op\": \"aten::full\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FullKernelPython(at::IntArrayRef size, const at::Scalar & fill_value, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+#if defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)
+  // ATen allocates the result and its fill uses the configured FlagGems host.
+  if (layout.value_or(at::kStrided) == at::kStrided && !pin_memory.value_or(false)) {
+    return at::native::full(size, fill_value, dtype, layout,
+                            TypedSourceFactoryDevice(device), pin_memory);
+  }
+#endif
   auto result = ([&]() { if (!FullFnSource.Available()) return CallPythonOp_Factory("flag_gems.full", {size, fill_value}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return FullFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.full", {size, fill_value}, dtype, device); }, static_cast<const at::IntArrayRef&>(size), static_cast<const at::Scalar&>(fill_value), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
@@ -2376,6 +2430,13 @@ at::Tensor IndexCopyKernelPython(const at::Tensor & self, int64_t dim, const at:
 
 static TypedSourceSlot IndexCopyInplaceFnSource("aten::index_copy_", "flag_gems.index_copy_", "294e35adc0237c782c9eb74c87137b8047f03c641200b99ed2b116f76af02f37", "{\"abi\": \"294e35adc0237c782c9eb74c87137b8047f03c641200b99ed2b116f76af02f37\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.index_copy_\", \"op\": \"aten::index_copy_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & IndexCopyInplaceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source) {
+#if defined(USE_MACA)
+  // The published rank-four provider reads the value cache in dense order.
+  if (!source.is_contiguous() && source.dim() == 4 &&
+      source.scalar_type() == at::kBFloat16 && source.device() == self.device() &&
+      (dim == 2 || dim == -2))
+    return IndexCopyInplaceKernelPython(self, dim, index, source.contiguous());
+#endif
   auto result = IndexCopyInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.index_copy_", {self, dim, index, source}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(source));
   self.copy_(result);
   return self;
@@ -3152,8 +3213,13 @@ at::Tensor MeanKernelPython(const at::Tensor & self, ::std::optional<at::ScalarT
 static TypedSourceSlot MeanDimFnSource("aten::mean.dim", "flag_gems.mean_dim", "0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c", "{\"abi\": \"0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.mean_dim\", \"op\": \"aten::mean.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
 #if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+#if defined(FLAGOS_METAX_NATIVE_MEAN)
+  constexpr bool use_measured_mean = true;
+#else
+  const bool use_measured_mean = !MeanDimFnSource.Available();
+#endif
   at::Tensor native_mean;
-  if (self.dim() > 0 && (self.size(-1) == 128 || self.size(-1) == 1024) && at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) { return native_mean; }
+  if (use_measured_mean && self.dim() > 0 && (self.size(-1) == 128 || self.size(-1) == 1024) && at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) { return native_mean; }
 #endif
 #if defined(USE_DCU)
   const auto output_dtype = dtype.value_or(self.scalar_type());
@@ -3247,6 +3313,10 @@ at::Tensor MmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
   if (at::native::flagos::FlagGemsMatmulNeedsHost(self.scalar_type())) {
     return at::native::flagos::MatmulOnHost(self, mat2);
   }
+#if defined(FLAGOS_ACCEL_PPU)
+  at::Tensor empty_product;
+  if (at::native::flagos::TryEmptyPpuMatmul(self, mat2, 2, empty_product)) { return empty_product; }
+#endif
   at::Tensor self_dotpad = self;
   at::Tensor mat2_dotpad = mat2;
   at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
@@ -3520,9 +3590,22 @@ static TypedSourceSlot NllLoss2dForwardFnSource("aten::nll_loss2d_forward", "fla
   return {result[0], result[1]};
 }
 
+#if defined(FLAGOS_ACCEL_CUDA)
+at::Tensor NllLossMeanBackwardNvidia(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index, const at::Tensor & total_weight);
+#endif
 static TypedSourceSlot NllLossBackwardFnSource("aten::nll_loss_backward", "flag_gems.nll_loss_backward", "e7b74c7e7ceaec814e909049f876729b672a3acbeb84a7873405cef03d8f2041", "{\"abi\": \"e7b74c7e7ceaec814e909049f876729b672a3acbeb84a7873405cef03d8f2041\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nll_loss_backward\", \"op\": \"aten::nll_loss_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NllLossBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index, const at::Tensor & total_weight) {
-  auto result = NllLossBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nll_loss_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction), static_cast<const int64_t&>(ignore_index), static_cast<const at::Tensor&>(total_weight));
+#if defined(FLAGOS_ACCEL_CUDA)
+  return NllLossMeanBackwardNvidia(grad_output, self, target, weight, reduction, ignore_index, total_weight);
+#endif
+#if defined(USE_TSINGMICRO)
+  // Unboxed autograd can represent an absent class weight as an undefined Tensor.
+  const std::optional<at::Tensor> no_weight;
+  const auto& effective_weight = weight && !weight->defined() ? no_weight : weight;
+#else
+  const auto& effective_weight = weight;
+#endif
+  auto result = NllLossBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nll_loss_backward", {grad_output, self, target, effective_weight, reduction, ignore_index, total_weight}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(effective_weight), static_cast<const int64_t&>(reduction), static_cast<const int64_t&>(ignore_index), static_cast<const at::Tensor&>(total_weight));
   UnboxToFlagos(result);
   return result;
 }
@@ -3630,6 +3713,16 @@ at::Tensor PowTensorScalarKernelPython(const at::Tensor & self, const at::Scalar
   if (MulTensorFnSource.Available() && c10::isFloatingType(self.scalar_type()) &&
       (exponent.isIntegral(false) || exponent.isFloatingPoint()) && exponent.toDouble() == 2.0)
     return at::mul(self, self);
+#elif defined(FLAGOS_ACCEL_PPU) || defined(FLAGOS_ACCEL_METAX) || defined(USE_TSINGMICRO)
+  if (MulTensorFnSource.Available() && self.scalar_type() == at::kFloat &&
+      (exponent.isIntegral(false) || exponent.isFloatingPoint())) {
+    const auto power = exponent.toDouble();
+#if defined(FLAGOS_ACCEL_PPU) || defined(USE_TSINGMICRO)
+    if (power == 1.0) return self.clone();
+    if (power == 2.0) return at::mul(self, self);
+#endif
+    if (power == 3.0) return at::mul(at::mul(self, self), self);
+  }
 #endif
   auto result = PowTensorScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.pow_tensor_scalar", {self, exponent}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(exponent));
   UnboxToFlagos(result);
@@ -4222,7 +4315,8 @@ at::Tensor SliceTensorKernelPython(const at::Tensor & self, int64_t dim, ::std::
 
 static TypedSourceSlot SliceBackwardFnSource("aten::slice_backward", "flag_gems.slice_backward", "2631da573a97281058a3e65106f2acafb5754fc0d2ec98d886e984dc1c018126", "{\"abi\": \"2631da573a97281058a3e65106f2acafb5754fc0d2ec98d886e984dc1c018126\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.slice_backward\", \"op\": \"aten::slice_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SliceBackwardKernelPython(const at::Tensor & grad_output, at::IntArrayRef input_sizes, int64_t dim, int64_t start, int64_t end, int64_t step) {
-  auto result = SliceBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.slice_backward", {grad_output, input_sizes, dim, start, end, step}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::IntArrayRef&>(input_sizes), static_cast<const int64_t&>(dim), static_cast<const int64_t&>(start), static_cast<const int64_t&>(end), static_cast<const int64_t&>(step));
+  const auto grad_output_c = grad_output.contiguous();
+  auto result = SliceBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.slice_backward", {grad_output_c, input_sizes, dim, start, end, step}); }, static_cast<const at::Tensor&>(grad_output_c), static_cast<const at::IntArrayRef&>(input_sizes), static_cast<const int64_t&>(dim), static_cast<const int64_t&>(start), static_cast<const int64_t&>(end), static_cast<const int64_t&>(step));
   UnboxToFlagos(result);
   return result;
 }
@@ -4571,6 +4665,10 @@ at::Tensor StdCorrectionKernelPython(const at::Tensor & self, at::OptionalIntArr
 
 static TypedSourceSlot SubTensorFnSource("aten::sub.Tensor", "flag_gems.sub", "91a4775c8b6ade3a6b35d5989964f9ab855c0b029bd262de2334903024b59d97", "{\"abi\": \"91a4775c8b6ade3a6b35d5989964f9ab855c0b029bd262de2334903024b59d97\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.sub\", \"op\": \"aten::sub.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SubTensorKernelPython(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
+#if defined(USE_DCU)
+  at::native::sub_check(self, other);
+  at::native::alpha_check(at::result_type(self, other), alpha);
+#endif
   auto result = SubTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sub", {self, other}, {PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
@@ -4598,8 +4696,40 @@ at::Tensor & SumIntlistOutKernelPython(const at::Tensor & self, at::OptionalIntA
 
 static TypedSourceSlot SumDimIntlistFnSource("aten::sum.dim_IntList", "flag_gems.sum_dim", "ff7346e1b0b31523a8dff939eb7aafb90198e6a4ac5009746f15502da5af0f0d", "{\"abi\": \"ff7346e1b0b31523a8dff939eb7aafb90198e6a4ac5009746f15502da5af0f0d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.sum_dim\", \"op\": \"aten::sum.dim_IntList\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SumDimIntlistKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  auto result = SumDimIntlistFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sum_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
+  at::Tensor collapsed;
+#if defined(FLAGOS_NATIVE_HOSTS) && \
+    (defined(FLAGOS_ACCEL_ILUVATAR) || defined(FLAGOS_ACCEL_METAX))
+  const auto rank = self.dim();
+  if (rank >= 3 && self.is_privateuseone() && self.scalar_type() == at::kBFloat16 &&
+      (!dtype || *dtype == at::kBFloat16) && self.numel() && !self.is_neg() &&
+      self.is_non_overlapping_and_dense() && self.stride(-1) == 1 &&
+      self.size(-1) > 1 && dim && dim->size() == static_cast<size_t>(rank - 1) &&
+      SumDimIntlistFnSource.Available()) {
+    bool leading = true;
+    for (int64_t axis = 0; leading && axis < rank - 1; ++axis) {
+      const auto reduced = (*dim)[axis];
+      leading = reduced == axis || reduced == axis - rank;
+    }
+    if (leading) {
+      // Each storage row has one element of each output column.
+      // Use the published single-axis kernel on the original storage.
+      const auto width = self.size(-1);
+      collapsed = self.as_strided({self.numel() / width, width}, {width, 1});
+    }
+  }
+#endif
+  const int64_t leading_axis = 0;
+  const at::OptionalIntArrayRef reduced_axes = collapsed.defined()
+      ? at::OptionalIntArrayRef(at::IntArrayRef(leading_axis)) : dim;
+  const auto& reduction_input = collapsed.defined() ? collapsed : self;
+  const bool reduction_keepdim = keepdim && !collapsed.defined();
+  auto result = SumDimIntlistFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sum_dim", {reduction_input, reduced_axes, reduction_keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(reduction_input), static_cast<const at::OptionalIntArrayRef&>(reduced_axes), static_cast<const bool&>(reduction_keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
+  if (collapsed.defined() && keepdim) {
+    std::vector<int64_t> shape(self.dim(), 1);
+    shape.back() = self.size(-1);
+    return result.view(shape);
+  }
   return result;
 }
 
@@ -4979,7 +5109,9 @@ REGISTER_IMPL_TO_DISPATCHER(PrivLinalgEigvalsFn, priv_linalg_eigvals_dispatcher,
 REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxFn, priv_log_softmax_dispatcher, Backend::kFlagGems, PrivLogSoftmaxKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxOutFn, priv_log_softmax_out_dispatcher, Backend::kFlagGems, PrivLogSoftmaxOutKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxBackwardDataFn, priv_log_softmax_backward_data_dispatcher, Backend::kFlagGems, PrivLogSoftmaxBackwardDataKernelPython)
+#if !defined(FLAGOS_ACCEL_CUDA)
 REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxBackwardDataOutFn, priv_log_softmax_backward_data_out_dispatcher, Backend::kFlagGems, PrivLogSoftmaxBackwardDataOutKernelPython)
+#endif
 REGISTER_IMPL_TO_DISPATCHER(PrivMaskedScaleFn, priv_masked_scale_dispatcher, Backend::kFlagGems, PrivMaskedScaleKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(PrivNativeBatchNormLegitFn, priv_native_batch_norm_legit_dispatcher, Backend::kFlagGems, PrivNativeBatchNormLegitKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(PrivNativeBatchNormLegitNoStatsFn, priv_native_batch_norm_legit_no_stats_dispatcher, Backend::kFlagGems, PrivNativeBatchNormLegitNoStatsKernelPython)
@@ -4997,7 +5129,9 @@ REGISTER_IMPL_TO_DISPATCHER(PrivScaledDotProductFlashAttentionBackwardFn, priv_s
 REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kFlagGems, PrivSoftmaxKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxOutFn, priv_softmax_out_dispatcher, Backend::kFlagGems, PrivSoftmaxOutKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataFn, priv_softmax_backward_data_dispatcher, Backend::kFlagGems, PrivSoftmaxBackwardDataKernelPython)
+#if !defined(FLAGOS_ACCEL_CUDA)
 REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataOutFn, priv_softmax_backward_data_out_dispatcher, Backend::kFlagGems, PrivSoftmaxBackwardDataOutKernelPython)
+#endif
 REGISTER_IMPL_TO_DISPATCHER(PrivSparseSemiStructuredAddmmFn, priv_sparse_semi_structured_addmm_dispatcher, Backend::kFlagGems, PrivSparseSemiStructuredAddmmKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(PrivSparseSemiStructuredMmFn, priv_sparse_semi_structured_mm_dispatcher, Backend::kFlagGems, PrivSparseSemiStructuredMmKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(PrivThnnFusedLstmCellFn, priv_thnn_fused_lstm_cell_dispatcher, Backend::kFlagGems, PrivThnnFusedLstmCellKernelPython)
@@ -5585,7 +5719,9 @@ REGISTER_IMPL_TO_DISPATCHER(StdCorrectionFn, std_correction_dispatcher, Backend:
 REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kFlagGems, SubTensorKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(SubInplaceTensorFn, sub_inplace_tensor_dispatcher, Backend::kFlagGems, SubInplaceTensorKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(SumFn, sum_dispatcher, Backend::kFlagGems, SumKernelPython)
+#if !defined(FLAGOS_ACCEL_CUDA)
 REGISTER_IMPL_TO_DISPATCHER(SumIntlistOutFn, sum_intlist_out_dispatcher, Backend::kFlagGems, SumIntlistOutKernelPython)
+#endif
 REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kFlagGems, SumDimIntlistKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(SumOutFn, sum_out_dispatcher, Backend::kFlagGems, SumOutKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(TakeFn, take_dispatcher, Backend::kFlagGems, TakeKernelPython)
@@ -5641,9 +5777,11 @@ REGISTER_IMPL_TO_DISPATCHER(ZerosLikeFn, zeros_like_dispatcher, Backend::kFlagGe
 #endif  // FLAGOS_FLAGGEMS_PYTHON
 
 // BEGIN GENERATED FLAGGEMS OUT ADAPTERS
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_DCU)
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && (defined(USE_DCU) || defined(USE_ILUVATAR))
 #include <ATen/MemoryOverlap.h>
+#include <ATen/native/CPUFallback.h>
 #include <ATen/native/Resize.h>
+#include "../fallback.h"
 namespace at::native::flagos {
 at::Tensor & AddOutAdapter(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha, at::Tensor & out) {
   at::assert_no_internal_overlap(out);
@@ -5657,6 +5795,21 @@ at::Tensor & AddOutAdapter(const at::Tensor & self, const at::Tensor & other, co
   return out;
 }
 REGISTER_IMPL_TO_DISPATCHER(AddOutFn, add_out_dispatcher, Backend::kFlagGems, AddOutAdapter)
+#if defined(USE_DCU)
+at::Tensor & SubOutAdapter(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha, at::Tensor & out) {
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  at::assert_no_partial_overlap(out, other);
+  auto result = sub_tensor_dispatcher(self, other, alpha);
+  TORCH_CHECK(result.device() == out.device(), "out adapter device mismatch");
+  TORCH_CHECK(c10::canCast(result.scalar_type(), out.scalar_type()), "result type cannot be cast to output type");
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(SubOutFn, sub_out_dispatcher, Backend::kFlagGems, SubOutAdapter)
+#endif
+#if defined(USE_DCU)
 at::Tensor & MulOutAdapter(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
   at::assert_no_internal_overlap(out);
   at::assert_no_partial_overlap(out, self);
@@ -5669,6 +5822,8 @@ at::Tensor & MulOutAdapter(const at::Tensor & self, const at::Tensor & other, at
   return out;
 }
 REGISTER_IMPL_TO_DISPATCHER(MulOutFn, mul_out_dispatcher, Backend::kFlagGems, MulOutAdapter)
+#endif
+#if defined(USE_DCU)
 at::Tensor & MeanOutAdapter(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
   at::assert_no_internal_overlap(out);
   at::assert_no_partial_overlap(out, self);
@@ -5681,6 +5836,8 @@ at::Tensor & MeanOutAdapter(const at::Tensor & self, at::OptionalIntArrayRef dim
   return out;
 }
 REGISTER_IMPL_TO_DISPATCHER(MeanOutFn, mean_out_dispatcher, Backend::kFlagGems, MeanOutAdapter)
+#endif
+#if defined(USE_DCU)
 at::Tensor & CatOutAdapter(const at::ITensorListRef & tensors, int64_t dim, at::Tensor & out) {
   at::assert_no_internal_overlap(out);
   for (const auto& input : tensors) at::assert_no_overlap(out, input);
@@ -5692,6 +5849,295 @@ at::Tensor & CatOutAdapter(const at::ITensorListRef & tensors, int64_t dim, at::
   return out;
 }
 REGISTER_IMPL_TO_DISPATCHER(CatOutFn, cat_out_dispatcher, Backend::kFlagGems, CatOutAdapter)
+#endif
+} // namespace at::native::flagos
+#endif
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_DCU) || defined(USE_MUSA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_ILUVATAR) || defined(USE_KUNLUNXIN) || ((defined(USE_MACA) || defined(USE_TSINGMICRO)) && defined(FLAGOS_NATIVE_HOSTS)))
+#include <ATen/native/CPUFallback.h>
+#include <ATen/ops/embedding_dense_backward_ops.h>
+#include "../fallback.h"
+namespace at::native::flagos {
+static TypedSourceSlot EmbeddingDenseBackwardFnSource("aten::embedding_dense_backward", "flag_gems.embedding_dense_backward", "0bef44696b97b126df5f4a43f8aec5d69fe1082ec8bdb7dfb58f3ae9febe97db", "{\"abi\": \"0bef44696b97b126df5f4a43f8aec5d69fe1082ec8bdb7dfb58f3ae9febe97db\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.embedding_dense_backward\", \"op\": \"aten::embedding_dense_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
+at::Tensor EmbeddingDenseBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & indices, int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq) {
+  auto result = EmbeddingDenseBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.embedding_dense_backward", {grad_output, indices, num_weights, padding_idx, scale_grad_by_freq}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(indices), static_cast<const int64_t&>(num_weights), static_cast<const int64_t&>(padding_idx), static_cast<const bool&>(scale_grad_by_freq));
+  UnboxToFlagos(result);
+  return result;
+}
+at::Tensor EmbeddingDenseBackwardNative(const at::Tensor & grad_output, const at::Tensor & indices, int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq) {
+  auto dtype = grad_output.scalar_type();
+  auto index_dtype = indices.scalar_type();
+  if ((dtype != at::kFloat && dtype != at::kBFloat16) ||
+#if !defined(USE_DCU)
+      !EmbeddingDenseBackwardFnSource.Available() ||
+#endif
+      (index_dtype != at::kInt && index_dtype != at::kLong) ||
+      grad_output.device() != indices.device() ||
+      grad_output.layout() != at::kStrided || indices.layout() != at::kStrided ||
+      grad_output.dim() < 2 || grad_output.numel() == 0 || num_weights <= 0
+#if defined(USE_KUNLUNXIN)
+      // The published frequency division changes BF16 accumulation rounding.
+      || (scale_grad_by_freq && dtype == at::kBFloat16)
+      || !grad_output.sizes().slice(0, grad_output.dim() - 1).equals(indices.sizes())
+      || grad_output.numel() > INT32_MAX || num_weights > INT32_MAX / grad_output.size(-1)
+#endif
+      ) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::embedding_dense_backward>::call(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
+  }
+  return EmbeddingDenseBackwardKernelPython(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
+}
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardFn, embedding_dense_backward_dispatcher, Backend::kFlagGems, EmbeddingDenseBackwardNative)
+} // namespace at::native::flagos
+#endif
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_ILUVATAR)
+#include <ATen/MemoryOverlap.h>
+#include <ATen/native/CPUFallback.h>
+#include <ATen/native/Resize.h>
+#include <ATen/ops/mean_ops.h>
+#include "../fallback.h"
+namespace at::native::flagos {
+at::Tensor & MeanOutIluvatar(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
+  const auto input_dtype = self.scalar_type();
+  if (!dim || dim->size() != 1 || self.dim() == 0 ||
+      ((*dim)[0] != -1 && (*dim)[0] != self.dim() - 1) ||
+      self.numel() == 0 || !self.is_contiguous() ||
+      (input_dtype != at::kFloat && input_dtype != at::kBFloat16) ||
+      dtype.value_or(input_dtype) != input_dtype ||
+      out.scalar_type() != input_dtype || out.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::mean_out>::call(
+        self, dim, keepdim, dtype, out);
+  }
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  auto result = MeanDimKernelPython(self, dim, keepdim, dtype);
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(MeanOutFn, mean_out_dispatcher, Backend::kFlagGems, MeanOutIluvatar)
+} // namespace at::native::flagos
+#endif
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(FLAGOS_ACCEL_CUDA)
+#include <ATen/MemoryOverlap.h>
+#include <ATen/core/Reduction.h>
+#include <ATen/native/CPUFallback.h>
+#include <ATen/native/Resize.h>
+#include <ATen/ops/_log_softmax_backward_data_ops.h>
+#include <ATen/ops/_softmax_backward_data_ops.h>
+#include <ATen/ops/nll_loss_backward_ops.h>
+#include <ATen/ops/nll_loss_forward_ops.h>
+#include <ATen/ops/sum_ops.h>
+#include <limits>
+#include "../fallback.h"
+namespace at::native::flagos {
+namespace {
+static TypedSourceSlot NllLossNdForwardFnSource("aten::nll_loss_forward.output", "flag_gems.nll_loss_nd_forward", "41b5cb4aaa3ac8d35449a12ac0f176e343624b4898096c851b2cf490caa9a928", "{\"abi\": \"41b5cb4aaa3ac8d35449a12ac0f176e343624b4898096c851b2cf490caa9a928\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.nll_loss_nd_forward\", \"op\": \"aten::nll_loss_forward.output\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
+::std::tuple<at::Tensor,at::Tensor> NllLossNdForwardKernelPython(const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index) {
+  auto result = NllLossNdForwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.nll_loss_nd_forward", {self, target, weight, reduction, ignore_index}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction), static_cast<const int64_t&>(ignore_index));
+  UnboxToFlagos(result[0]);
+  UnboxToFlagos(result[1]);
+  return {result[0], result[1]};
+}
+static TypedSourceSlot NllLossNdBackwardFnSource("aten::nll_loss_backward.grad_input", "flag_gems.nll_loss_nd_backward", "d1a17bb668a1af367c7abdfd5d4cebedf9663b9045b5c11b69acde5fcccd8882", "{\"abi\": \"d1a17bb668a1af367c7abdfd5d4cebedf9663b9045b5c11b69acde5fcccd8882\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nll_loss_nd_backward\", \"op\": \"aten::nll_loss_backward.grad_input\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
+at::Tensor NllLossNdBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index, const at::Tensor & total_weight) {
+  auto result = NllLossNdBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nll_loss_nd_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction), static_cast<const int64_t&>(ignore_index), static_cast<const at::Tensor&>(total_weight));
+  UnboxToFlagos(result);
+  return result;
+}
+
+bool IsNativeMeanLossNvidia(const at::Tensor& self, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction, int64_t ignore_index) {
+  // Rank three selects the bounds-masked published NLL kernels.
+  // The rank-two provider's backward writes through ignored indices.
+  return reduction == at::Reduction::Mean && (!weight || !weight->defined()) &&
+      self.dim() == 2 && self.is_contiguous() && self.numel() > 0 &&
+      self.numel() <= std::numeric_limits<int32_t>::max() &&
+      self.scalar_type() == at::kFloat && target.dim() == 1 &&
+      target.size(0) == self.size(0) && target.scalar_type() == at::kLong &&
+      target.device() == self.device() &&
+      ignore_index >= std::numeric_limits<int32_t>::min() &&
+      ignore_index <= std::numeric_limits<int32_t>::max();
+}
+
+void CheckNativeLossTargetsNvidia(const at::Tensor& target, int64_t classes, int64_t ignore_index) {
+  auto invalid = at::logical_and(target.ne(ignore_index),
+      at::logical_or(target.lt(0), target.ge(classes)));
+  TORCH_CHECK_INDEX(!at::any(invalid).item<bool>(), "NLL loss target is out of bounds");
+}
+
+::std::tuple<at::Tensor &,at::Tensor &> NllLossMeanForwardOutNvidia(const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index, at::Tensor & output, at::Tensor & total_weight) {
+  if (!NllLossNdForwardFnSource.Available() ||
+      !IsNativeMeanLossNvidia(self, target, weight, reduction, ignore_index) ||
+      output.scalar_type() != self.scalar_type() || output.device() != self.device() ||
+      total_weight.scalar_type() != self.scalar_type() || total_weight.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::nll_loss_forward_output>::call(
+        self, target, weight, reduction, ignore_index, output, total_weight);
+  }
+  at::assert_no_internal_overlap(output);
+  at::assert_no_internal_overlap(total_weight);
+  at::assert_no_overlap(output, self);
+  at::assert_no_overlap(output, target);
+  at::assert_no_overlap(total_weight, self);
+  at::assert_no_overlap(total_weight, target);
+  at::assert_no_overlap(total_weight, output);
+  CheckNativeLossTargetsNvidia(target, self.size(1), ignore_index);
+  auto [loss, count] = NllLossNdForwardKernelPython(
+      self.unsqueeze(-1), target.unsqueeze(-1), std::nullopt, reduction, ignore_index);
+  at::native::resize_output(output, {});
+  at::native::resize_output(total_weight, {});
+  output.copy_(loss.masked_fill(count.eq(0), std::numeric_limits<float>::quiet_NaN()));
+  total_weight.copy_(count);
+  return {output, total_weight};
+}
+
+at::Tensor NllLossMeanBackwardNvidia(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index, const at::Tensor & total_weight) {
+  if (!NllLossNdBackwardFnSource.Available() ||
+      !IsNativeMeanLossNvidia(self, target, weight, reduction, ignore_index) ||
+      grad_output.numel() != 1 || grad_output.scalar_type() != self.scalar_type() ||
+      grad_output.device() != self.device() || total_weight.numel() != 1 ||
+      total_weight.scalar_type() != self.scalar_type() || total_weight.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::nll_loss_backward>::call(
+        grad_output, self, target, weight, reduction, ignore_index, total_weight);
+  }
+  CheckNativeLossTargetsNvidia(target, self.size(1), ignore_index);
+  return NllLossNdBackwardKernelPython(grad_output, self.unsqueeze(-1), target.unsqueeze(-1),
+      std::nullopt, reduction, ignore_index, total_weight).squeeze(-1);
+}
+
+at::Tensor & NllLossMeanBackwardOutNvidia(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index, const at::Tensor & total_weight, at::Tensor & grad_input) {
+  if (grad_input.device() != self.device() || grad_input.scalar_type() != self.scalar_type()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::nll_loss_backward_grad_input>::call(
+        grad_output, self, target, weight, reduction, ignore_index, total_weight, grad_input);
+  }
+  at::assert_no_internal_overlap(grad_input);
+  at::assert_no_overlap(grad_input, self);
+  at::assert_no_overlap(grad_input, target);
+  at::assert_no_overlap(grad_input, total_weight);
+  at::assert_no_overlap(grad_input, grad_output);
+  auto result = NllLossMeanBackwardNvidia(
+      grad_output, self, target, weight, reduction, ignore_index, total_weight);
+  at::native::resize_output(grad_input, result.sizes());
+  grad_input.copy_(result);
+  return grad_input;
+}
+
+at::Tensor & LogSoftmaxBackwardOutNvidia(const at::Tensor & grad_output, const at::Tensor & output, int64_t dim, at::ScalarType input_dtype, at::Tensor & out) {
+  if (!PrivLogSoftmaxBackwardDataOutFnSource.Available() || input_dtype != at::kFloat ||
+      grad_output.scalar_type() != input_dtype || output.scalar_type() != input_dtype || out.scalar_type() != input_dtype ||
+      output.device() != grad_output.device() || out.device() != output.device() ||
+      output.dim() < 2 || output.dim() > 3 || !output.is_contiguous() ||
+      !out.is_contiguous() || !grad_output.sizes().equals(output.sizes()) ||
+      output.numel() == 0 || output.numel() > std::numeric_limits<int32_t>::max()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::_log_softmax_backward_data_out>::call(
+        grad_output, output, dim, input_dtype, out);
+  }
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, grad_output);
+  at::assert_no_overlap(out, output);
+  return PrivLogSoftmaxBackwardDataOutKernelPython(grad_output, output, dim, input_dtype, out);
+}
+
+at::Tensor & SoftmaxBackwardOutNvidia(const at::Tensor & grad_output, const at::Tensor & output, int64_t dim, at::ScalarType input_dtype, at::Tensor & grad_input) {
+  if (!PrivSoftmaxBackwardDataOutFnSource.Available() || (input_dtype != at::kFloat && input_dtype != at::kBFloat16) ||
+      grad_output.scalar_type() != input_dtype || output.scalar_type() != input_dtype || grad_input.scalar_type() != input_dtype ||
+      output.device() != grad_output.device() || grad_input.device() != output.device() ||
+      output.dim() < 2 || output.dim() > 4 || !output.is_contiguous() ||
+      !grad_input.is_contiguous() || !grad_output.sizes().equals(output.sizes()) ||
+      output.numel() == 0 || output.numel() > std::numeric_limits<int32_t>::max()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::_softmax_backward_data_out>::call(
+        grad_output, output, dim, input_dtype, grad_input);
+  }
+  at::assert_no_internal_overlap(grad_input);
+  at::assert_no_overlap(grad_input, grad_output);
+  at::assert_no_overlap(grad_input, output);
+  return PrivSoftmaxBackwardDataOutKernelPython(grad_output, output, dim, input_dtype, grad_input);
+}
+
+at::Tensor & SumIntlistOutNvidia(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
+  const auto output_dtype = dtype.value_or(out.scalar_type());
+  if (!SumIntlistOutFnSource.Available() || !dim || dim->empty() || self.numel() == 0 ||
+      (self.scalar_type() != at::kFloat && self.scalar_type() != at::kBFloat16) ||
+      (output_dtype != at::kFloat && output_dtype != at::kBFloat16) ||
+      output_dtype != out.scalar_type() || !out.is_contiguous() || out.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::sum_IntList_out>::call(
+        self, dim, keepdim, dtype, out);
+  }
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  return SumIntlistOutKernelPython(self, dim, keepdim, output_dtype, out);
+}
+}
+REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxBackwardDataOutFn, priv_log_softmax_backward_data_out_dispatcher, Backend::kFlagGems, LogSoftmaxBackwardOutNvidia)
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataOutFn, priv_softmax_backward_data_out_dispatcher, Backend::kFlagGems, SoftmaxBackwardOutNvidia)
+REGISTER_IMPL_TO_DISPATCHER(NllLossForwardOutputFn, nll_loss_forward_output_dispatcher, Backend::kFlagGems, NllLossMeanForwardOutNvidia)
+REGISTER_IMPL_TO_DISPATCHER(NllLossBackwardGradInputFn, nll_loss_backward_grad_input_dispatcher, Backend::kFlagGems, NllLossMeanBackwardOutNvidia)
+REGISTER_IMPL_TO_DISPATCHER(SumIntlistOutFn, sum_intlist_out_dispatcher, Backend::kFlagGems, SumIntlistOutNvidia)
+} // namespace at::native::flagos
+#endif
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && (defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_MUSA) || defined(USE_ILUVATAR) || defined(USE_KUNLUNXIN) || (defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)))
+#include <ATen/MemoryOverlap.h>
+#include <ATen/native/CPUFallback.h>
+#include <ATen/native/Resize.h>
+#include <ATen/ops/mul_ops.h>
+#include "../fallback.h"
+namespace at::native::flagos {
+at::Tensor & MulOutFlagGems(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
+  const bool self_on_device = self.device() == out.device();
+  const auto& tensor = self_on_device ? self : other;
+  const auto& rhs = self_on_device ? other : self;
+  const bool cpu_scalar = rhs.device().is_cpu() && rhs.dim() == 0;
+  const auto dtype = out.scalar_type();
+  if (!MulTensorFnSource.Available() || tensor.device() != out.device() ||
+      (!cpu_scalar && (rhs.device() != out.device() || rhs.scalar_type() != tensor.scalar_type())) ||
+      at::result_type(self, other) != dtype || (dtype != at::kFloat && dtype != at::kHalf &&
+          dtype != at::kBFloat16 && dtype != at::kLong && dtype != at::kBool)) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::mul_out>::call(
+        self, other, out);
+  }
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  at::assert_no_partial_overlap(out, other);
+  auto result = MulTensorKernelPython(tensor, rhs);
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(MulOutFn, mul_out_dispatcher, Backend::kFlagGems, MulOutFlagGems)
+} // namespace at::native::flagos
+#endif
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_TSINGMICRO) && defined(FLAGOS_NATIVE_HOSTS)
+namespace at::native::flagos {
+namespace {
+template <class... Args>
+bool TryTsingMicroInplaceHost(const TypedSourceSlot& source, at::Tensor& out,
+                              const Args&... args) {
+  const auto result = source.Call<at::Tensor>([] { return at::Tensor(); }, out, args...);
+  if (!result.defined()) return false;
+  TORCH_CHECK(result.is_same(out), "TsingMicro FlagGems in-place host changed the output alias");
+  return true;
+}
+} // namespace
+
+bool TryTsingMicroAddInplaceHost(at::Tensor& out, const at::Tensor& scalar,
+                                const at::Scalar& alpha) {
+  return TryTsingMicroInplaceHost(AddInplaceTensorFnSource, out, scalar, alpha);
+}
+
+bool TryTsingMicroMulInplaceHost(at::Tensor& out, const at::Tensor& scalar) {
+  return TryTsingMicroInplaceHost(MulInplaceTensorFnSource, out, scalar);
+}
+} // namespace at::native::flagos
+#endif
+
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_KUNLUNXIN) && defined(FLAGOS_NATIVE_HOSTS)
+namespace at::native::flagos {
+bool TryKunlunxinLerpInplaceHost(at::Tensor& self, const at::Tensor& end,
+                               const at::Scalar& weight) {
+  const auto result = LerpInplaceScalarFnSource.Call<at::Tensor>(
+      [] { return at::Tensor(); }, self, end, weight);
+  if (!result.defined()) return false;
+  TORCH_CHECK(result.is_same(self), "Kunlunxin FlagGems lerp changed the output alias");
+  return true;
+}
 } // namespace at::native::flagos
 #endif
 // END GENERATED FLAGGEMS OUT ADAPTERS
