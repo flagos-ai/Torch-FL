@@ -31,6 +31,11 @@
 #include "index_bounds.h"
 #include "backends/soft_lowp/format.h"
 #include "backends/soft_lowp/ops.h"
+#if defined(USE_DCU) && defined(FLAGOS_FLAGGEMS_PYTHON)
+#include <ATen/ops/fft_fft_native.h>
+#include <ATen/ops/fft_irfft_native.h>
+#include "backends/flagos/python_op_caller.h"
+#endif
 // TsingMicro's RNG kernels are claimed directly below rather than through a
 // generated list, so their declarations have to be visible here.
 #if defined(USE_TSINGMICRO)
@@ -263,6 +268,16 @@ at::Tensor& WrapperIndexPut_(
     const c10::List<::std::optional<at::Tensor>>& indices,
     const at::Tensor& values,
     bool accumulate) {
+#if defined(USE_DCU) && defined(FLAGOS_FLAGGEMS_PYTHON)
+  const auto dtype = self.scalar_type();
+  if (dtype == at::kFloat || dtype == at::kDouble ||
+      dtype == at::kHalf || dtype == at::kBFloat16) {
+    at::native::flagos::CheckIndexListInRange(self, indices);
+    at::native::flagos::CallPythonOp_Generic(
+        "index_put_", {self, indices, values, accumulate});
+    return self;
+  }
+#endif
   TORCH_CHECK(at::native::flagos::CpuFallbackAllowed(),
               "native FlagGems hosts do not permit CPU fallback: aten::index_put_");
   at::Tensor self_cpu = self.cpu();
@@ -289,6 +304,32 @@ at::Tensor& WrapperIndexPutImpl_(
     bool /*unsafe*/) {
   return WrapperIndexPut_(self, indices, values, accumulate);
 }
+
+#if defined(USE_DCU) && defined(FLAGOS_FLAGGEMS_PYTHON)
+at::Tensor WrapperFftFft(
+    const at::Tensor& self, std::optional<c10::SymInt> n,
+    int64_t dim, std::optional<c10::string_view> norm) {
+  static const bool available = at::native::flagos::HasFlagGemsPythonOp("fft_fft");
+  if (!available) {
+    return at::native::fft_fft_symint(self, n, dim, norm);
+  }
+  return at::native::flagos::CallPythonOp_Generic(
+      "fft_fft", {self, n ? c10::IValue(n->expect_int()) : c10::IValue(),
+                  dim, norm ? c10::IValue(std::string(*norm)) : c10::IValue()});
+}
+
+at::Tensor WrapperFftIrfft(
+    const at::Tensor& self, std::optional<c10::SymInt> n,
+    int64_t dim, std::optional<c10::string_view> norm) {
+  static const bool available = at::native::flagos::HasFlagGemsPythonOp("fft_irfft");
+  if (!available) {
+    return at::native::fft_irfft_symint(self, n, dim, norm);
+  }
+  return at::native::flagos::CallPythonOp_Generic(
+      "fft_irfft", {self, n ? c10::IValue(n->expect_int()) : c10::IValue(),
+                    dim, norm ? c10::IValue(std::string(*norm)) : c10::IValue()});
+}
+#endif
 
 void WrapperRecordStream(at::Tensor& self, at::Stream s) {
   if (!c10::flagos::CachingDeviceAllocator::is_enabled()) {
@@ -678,6 +719,13 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("_to_copy", WrapperToCopy);
   m.impl("index_put_", WrapperIndexPut_);
   m.impl("_index_put_impl_", WrapperIndexPutImpl_);
+#if defined(USE_DCU) && defined(FLAGOS_FLAGGEMS_PYTHON)
+  // FFT uses the native metadata views to keep complex storage on device.
+  m.impl("view_as_real", at::native::flagos::view_as_real);
+  m.impl("view_as_complex", at::native::flagos::view_as_complex);
+  m.impl("fft_fft", WrapperFftFft);
+  m.impl("fft_irfft", WrapperFftIrfft);
+#endif
   m.impl("record_stream", WrapperRecordStream);
   m.impl("_fused_sdp_choice", WrapperFusedSdpChoice);
   // matmul: on Ascend, claim the fused aclnnMatmul kernel here on plain

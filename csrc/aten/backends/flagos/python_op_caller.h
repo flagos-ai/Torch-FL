@@ -75,6 +75,7 @@ at::Tensor CallPythonOp_Embedding(const char* func_name, const at::Tensor& weigh
 at::Tensor CallPythonOp_Generic(const char* func_name, const std::vector<c10::IValue>& args);
 at::Tensor CallPythonOp_Generic(const char* func_name,
                                std::initializer_list<c10::IValue> args);
+bool HasFlagGemsPythonOp(const char* func_name);
 
 // A keyword argument to forward to the FlagGems Python op by name. Used for the
 // aten trailing args that gems declares keyword-only (dtype/alpha/correction/...).

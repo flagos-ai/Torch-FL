@@ -549,6 +549,14 @@ py::object IValueToPython(const c10::IValue& val, const char* func_name) {
       t.append(TensorToPython(list.get(j)));
     }
     return std::move(t);
+  } else if (val.isOptionalTensorList()) {
+    auto list = val.toOptionalTensorList();
+    py::list t;
+    for (size_t j = 0; j < list.size(); ++j) {
+      const auto index = list.get(j);
+      t.append(index && index->defined() ? TensorToPython(*index) : py::none());
+    }
+    return std::move(t);
   }
   TORCH_CHECK(false, "Unsupported IValue type in generic FlagGems caller for op: ",
               func_name);
@@ -652,6 +660,21 @@ at::Tensor CallPythonOp_GenericKw(const char* func_name,
   if(TrySourceHostTensor(func_name,c10::ArrayRef<c10::IValue>(args),c10::ArrayRef<PyKwarg>(kwargs),result))return result;
   return CallPythonOp_GenericKw(func_name,std::vector<c10::IValue>(args),
                                 std::vector<PyKwarg>(kwargs),python_dtype_for_fp8);
+}
+
+bool HasFlagGemsPythonOp(const char* func_name) {
+  const CallScope call;
+  auto& cache = GetCache();
+  cache.EnsureInitialized();
+  py::gil_scoped_acquire gil;
+  try {
+    return py::isinstance<py::function>(cache.OpsModule().attr(func_name));
+  } catch (const py::error_already_set& error) {
+    if (!error.matches(PyExc_AttributeError) && !error.matches(PyExc_ImportError)) {
+      throw;
+    }
+    return false;
+  }
 }
 
 at::Tensor CallPythonOp_Generic(const char* func_name, const std::vector<c10::IValue>& args) {
