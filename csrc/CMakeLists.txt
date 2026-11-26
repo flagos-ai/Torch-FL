@@ -506,23 +506,39 @@ endif()
 # for the torch in the build environment rather than for a directory the
 # conditions below might fall back to.
 set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA OFF)
-get_target_property(_flagos_torch_cpu_location torch_cpu_library IMPORTED_LOCATION)
-get_target_property(_flagos_torch_python_location torch_python_library IMPORTED_LOCATION)
-foreach(_flagos_torch_location IN ITEMS
-    "${_flagos_torch_cpu_location}" "${_flagos_torch_python_location}")
-  if(_flagos_torch_location)
-    get_filename_component(_flagos_torch_dir "${_flagos_torch_location}" DIRECTORY)
-    if(EXISTS "${_flagos_torch_dir}/libtorch_cuda.so")
-      set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA ON)
-    endif()
-  endif()
-endforeach()
+if(_flagos_is_cuda AND PYTORCH_INSTALL_DIR
+   AND EXISTS "${PYTORCH_INSTALL_DIR}/lib/libtorch_cuda.so")
+  set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA ON)
+endif()
 message(STATUS "torch_fl: torch links libtorch_cuda.so: ${FLAGOS_TORCH_LINKS_LIBTORCH_CUDA}")
 if(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TORCH_LINKS_LIBTORCH_CUDA=1)
 endif()
 
 set(_torch_fl_link_libs torch_cpu_library torch_python_library flagos ${CUDA_RUNTIME_LIB})
+if(_flagos_is_cuda AND FLAGOS_BUILD_VENDOR AND FLAGOS_BUILD_FLAGGEMS
+   AND FLAGOS_TORCH_LINKS_LIBTORCH_CUDA
+   AND Torch_VERSION VERSION_GREATER_EQUAL "2.10"
+   AND Torch_VERSION VERSION_LESS "2.11")
+  # ATen's DispatchStub layout is part of the native kernel ABI.
+  execute_process(
+    COMMAND "${PYTHON_EXECUTABLE}" -c
+      "import sys; sys.path.insert(0, sys.argv[1]); from vendor_build import dispatch_definitions; print(';'.join(dispatch_definitions(sys.argv[2])))"
+      "${PROJECT_SOURCE_DIR}/torch_fl/native_host"
+      "${PYTORCH_INSTALL_DIR}/lib/libtorch_cpu.so"
+    OUTPUT_VARIABLE _nvidia_dispatch_definitions
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  set(_nvidia_native_sources
+    native_host/backends/nvidia/aten_ops.cc
+    native_host/backends/nvidia/precision.cc)
+  target_sources(${LIBRARY_NAME} PRIVATE ${_nvidia_native_sources})
+  target_include_directories(${LIBRARY_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_host")
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_BUILTIN_NVIDIA_PRECISION=1)
+  set_source_files_properties(${_nvidia_native_sources}
+    PROPERTIES COMPILE_DEFINITIONS "${_nvidia_dispatch_definitions}")
+  list(APPEND _torch_fl_link_libs CUDA::cublas)
+endif()
 if(FLAGOS_BUILD_FLAGGEMS_CPP)
   if(TARGET FlagGems::operators)
     list(APPEND _torch_fl_link_libs FlagGems::operators)

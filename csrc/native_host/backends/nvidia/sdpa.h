@@ -9,22 +9,44 @@
 #include <ATen/ops/_cudnn_attention_forward_native.h>
 #include <c10/util/env.h>
 
+#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
+#include "backends/nvidia/cuda_inputs.h"
+#include <ATen/ops/scaled_dot_product_attention.h>
+#include <c10/cuda/CUDAException.h>
+#endif
+
 namespace at::native::flagos::vendor {
+
+#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
+inline at::Tensor WideSdpa(const at::Tensor& query, const at::Tensor& key,
+                           const at::Tensor& value, std::optional<double> scale) {
+  const auto stream = GetCurrentStreamForDevice(query.device().index());
+  const auto queue = reinterpret_cast<cudaStream_t>(stream);
+  cudaStreamCaptureStatus capture_status;
+  C10_CUDA_CHECK(cudaStreamIsCapturing(queue, &capture_status));
+  if (capture_status != cudaStreamCaptureStatusNone) return {};
+
+  return WithCudaInputs({query, key, value}, [&](at::TensorList inputs) {
+    const auto native = at::scaled_dot_product_attention(
+        inputs[0], inputs[1], inputs[2], std::nullopt, 0.0, false, scale, false);
+    auto result = at::empty_strided(native.sizes(), native.strides(), query.options());
+    CopyCudaResult(result, native);
+    return result;
+  });
+}
+#endif
 
 inline at::Tensor CudnnSdpa(
     const at::Tensor& query, const at::Tensor& key, const at::Tensor& value,
     const std::optional<at::Tensor>& mask, double dropout, bool causal,
     std::optional<double> scale, bool enable_gqa) {
   auto& context = at::globalContext();
-  if (!context.userEnabledCuDNNSDP() ||
-      (context.deterministicAlgorithms() && !context.deterministicAlgorithmsWarnOnly()) ||
-      mask || dropout != 0.0 || !query.is_privateuseone() ||
+  if (mask || dropout != 0.0 || !query.is_privateuseone() ||
       query.scalar_type() != at::kBFloat16 || query.dim() != 4 || query.is_nested()) {
     return {};
   }
   const auto width = query.size(3);
-  if (width < 32 || width > 128 || width % 8 != 0 ||
-      query.size(0) == 0 || query.size(1) == 0 || query.size(2) == 0) {
+  if (query.size(0) == 0 || query.size(1) == 0 || query.size(2) == 0) {
     return {};
   }
   for (const auto* input : {&query, &key, &value}) {
@@ -40,6 +62,18 @@ inline at::Tensor CudnnSdpa(
       key.size(2) != value.size(2) || (causal && query.size(2) != key.size(2)) ||
       (query.size(1) != key.size(1) &&
        (!enable_gqa || query.size(1) % key.size(1) != 0))) {
+    return {};
+  }
+#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
+  // The CUDA selector provides memory-efficient attention at head widths
+  // beyond the CUDA flash and cuDNN envelopes.
+  if (width > 256 && !causal && !enable_gqa && query.size(1) == key.size(1) &&
+      context.userEnabledMemEfficientSDP()) {
+    return WideSdpa(query, key, value, scale);
+  }
+#endif
+  if (width < 32 || width > 128 || width % 8 != 0 || !context.userEnabledCuDNNSDP() ||
+      (context.deterministicAlgorithms() && !context.deterministicAlgorithmsWarnOnly())) {
     return {};
   }
   const auto* properties = at::cuda::getDeviceProperties(query.device().index());

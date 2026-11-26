@@ -540,6 +540,37 @@ def patch_mean_last_dim(accelerator: str):
 _PATCH_LIBS = []
 
 
+def patch_normal(accelerator: str) -> None:
+    """Forward the generator and layout when calling the FlagGems normal kernel."""
+    if accelerator != "nvidia":
+        return
+    from flag_gems.ops.normal import normal_distribution, transform_func_float_float
+
+    from torch_fl import native_host
+
+    def normal_(self, mean=0.0, std=1.0, *, generator=None):
+        if not std >= 0:
+            raise RuntimeError("normal_ expects a nonnegative standard deviation")
+        if not self.numel():
+            return self
+        sample = normal_distribution
+        transform = transform_func_float_float
+        if native_host._hosts is not None:
+            sample = native_host._hosts.resolve(sample)
+            transform = native_host._hosts.resolve(transform)
+        with torch.flagos.device(self.device):
+            output = self
+            if not self.is_contiguous():
+                output = torch.empty_like(self, memory_format=torch.contiguous_format)
+            sample(output.shape, output.device, generator=generator, out=output)
+            transform(output, std, mean, out0=output)
+            return self if output is self else self.copy_(output)
+
+    library = torch.library.Library("aten", "IMPL", "PrivateUse1")
+    library.impl("normal_", normal_)
+    _PATCH_LIBS.append(library)
+
+
 def _flagos_index_put_roundtrip(self, indices, values, accumulate):
     """Scatter on the CPU when the caller permits the legacy fallback."""
     self_cpu = self.cpu()
@@ -608,6 +639,10 @@ def patch_index_put(accelerator: str):
     here, not broken, so this must not be able to take down device init.
     """
     try:
+        if accelerator == "nvidia" and hasattr(
+            torch.ops.flagos, "_activate_native_nvidia"
+        ):
+            return
         if not launch_patches_apply(accelerator):
             return
         import flag_gems

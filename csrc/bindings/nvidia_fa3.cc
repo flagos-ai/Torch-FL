@@ -3,6 +3,7 @@
 
 #include "nvidia_fa3.h"
 
+#include <aten/cuda_tensor_view.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_strided.h>
 #include <ATen/core/dispatch/Dispatcher.h>
@@ -22,6 +23,7 @@ namespace flagos::bindings {
 namespace {
 
 using torch::jit::Stack;
+using at::native::flagos::FlagosToCudaView;
 
 constexpr auto forward_name = "flash_attn_3::_flash_attn_forward";
 constexpr auto raw_forward_name = "flash_attn_3::fwd";

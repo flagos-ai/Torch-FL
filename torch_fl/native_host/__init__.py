@@ -36,6 +36,11 @@ def _bootstrap_launcher():
 
 def _activate():
     global _hosts
+    import torch
+
+    activate_nvidia = getattr(torch.ops.flagos, "_activate_native_nvidia", None)
+    if activate_nvidia is not None:
+        activate_nvidia()
     if not _prepared:
         return
     from torch_fl import _build_config

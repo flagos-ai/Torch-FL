@@ -3,11 +3,8 @@
 
 #pragma once
 
-#include <ATen/core/Tensor.h>
-
 namespace flagos::bindings {
 
-at::Tensor FlagosToCudaView(const at::Tensor& source);
 bool TryRegisterNvidiaFlashAttention3();
 
 } // namespace flagos::bindings

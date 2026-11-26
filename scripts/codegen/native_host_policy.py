@@ -174,11 +174,34 @@ _COHORTS = {
                 "reason": "FP32 softmax differences cross a BF16 rounding boundary and propagate into failing logits.",
             },
             {
+                "op": "add.Tensor",
+                "family": "pointwise",
+                "dtypes": ["Float", "BFloat16"],
+                "reason": "Use the CUDA iterator arithmetic for identical rounding through compiled BF16 and FP32 inference stages.",
+            },
+            {
                 "op": "bmm",
-                "family": "blas",
-                "rank": 3,
-                "dtypes": ["BFloat16"],
-                "reason": "An isolated decode attention product differs before error propagation.",
+                "family": "structured",
+                "dtypes": ["Float", "BFloat16"],
+                "reason": "Use the CUDA batched-matrix kernel selection to reproduce batched products at the FP32 and BF16 inference boundaries.",
+            },
+            {
+                "op": "cat",
+                "family": "concat",
+                "dtypes": ["Float", "BFloat16"],
+                "reason": "The CUDA structured implementation avoids Python launch overhead on the paired H100 inference requests and preserves the concatenated values bitwise.",
+            },
+            {
+                "op": "constant_pad_nd",
+                "family": "zero_pad",
+                "dtypes": ["Float", "BFloat16", "Int", "Long"],
+                "reason": "End-to-end H100 video generation issues hundreds of floating-point zero pads. The same stream-ordered CUDA fill and copy also handle the int32 and int64 cumulative offsets used by variable-length attention without generating a padding host at runtime.",
+            },
+            {
+                "op": "cos",
+                "family": "structured",
+                "dtypes": ["Float", "BFloat16"],
+                "reason": "Reproduce the vendor cosine rounding in rotary embeddings.",
             },
             {
                 "op": "mean.dim",
@@ -196,6 +219,18 @@ _COHORTS = {
                 "reason": "The original matrix reduction differs from the vendor BLAS result at identical inputs.",
             },
             {
+                "op": "mul.Tensor",
+                "family": "pointwise",
+                "dtypes": ["Float", "BFloat16"],
+                "reason": "Retain full-precision scalar values and the vendor product rounding, including strided BF16 inputs.",
+            },
+            {
+                "op": "pow.Scalar",
+                "family": "pointwise",
+                "dtypes": ["Float", "BFloat16"],
+                "reason": "Use the vendor scalar-base exponentiation arithmetic in the denoising scheduler.",
+            },
+            {
                 "op": "pow.Tensor_Scalar",
                 "family": "structured",
                 "dtypes": ["Float"],
@@ -204,7 +239,7 @@ _COHORTS = {
             {
                 "op": "reciprocal",
                 "family": "structured",
-                "dtypes": ["Float"],
+                "dtypes": ["Float", "BFloat16"],
                 "reason": "FP32 reciprocal changes the precomputed rotary frequencies and first denoiser output. The pinned CUDA reciprocal restores the full RoboDojo and RoboCasa V4 action and normalized-action arrays bitwise.",
             },
             {
@@ -222,8 +257,20 @@ _COHORTS = {
             {
                 "op": "silu",
                 "family": "structured",
-                "dtypes": ["Float"],
+                "dtypes": ["Float", "BFloat16"],
                 "reason": "Identical FP32 timestep projection inputs differ after FlagGems SiLU on H100, changing the next projection. The pinned CUDA SiLU makes the paired timestep embeddings bitwise equal.",
+            },
+            {
+                "op": "sin",
+                "family": "structured",
+                "dtypes": ["Float", "BFloat16"],
+                "reason": "Reproduce the vendor sine rounding in rotary embeddings.",
+            },
+            {
+                "op": "sub.Tensor",
+                "family": "pointwise",
+                "dtypes": ["Float", "BFloat16"],
+                "reason": "Use the vendor subtraction iterator for exact FP32 and BF16 denoising residuals.",
             },
         ],
         "sources": [

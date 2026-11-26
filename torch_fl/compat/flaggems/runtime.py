@@ -647,6 +647,7 @@ def initialize(accelerator: str, cuda_alias_active: bool) -> None:
     # kernel is claimed before the first routed op can reach it. See the
     # function for the measurement.
     ops.patch_index_put(accelerator)
+    ops.patch_normal(accelerator)
 
     # Same window again: these replace the launch path every FlagGems pointwise
     # op goes through, so they have to be in place before the first one runs.

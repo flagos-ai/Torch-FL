@@ -454,9 +454,16 @@ class Hosts:
         import torch
         from torch_fl import _build_config
 
-        if torch.version.cuda is not None or "boxing" in _build_config.KERNELS:
+        linked_nvidia = _build_config.ACCELERATOR == "nvidia" and hasattr(
+            torch.ops.flagos, "_activate_native_nvidia"
+        )
+        if (
+            torch.version.cuda is not None
+            and not linked_nvidia
+            or "boxing" in _build_config.KERNELS
+        ):
             raise RuntimeError(
-                "native host experiment requires the CPU-Torch vendor build"
+                "native hosts require CPU Torch or the linked NVIDIA CUDA build"
             )
         if getattr(_build_config, "NATIVE_HOSTS", False):
             torch.ops.flagos.strict_host_routes(True)
