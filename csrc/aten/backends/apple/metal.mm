@@ -4,6 +4,7 @@
 #include "metal.h"
 
 #include <ATen/native/mps/MetalShaderLibrary.h>
+#include <ATen/ops/empty.h>
 #include <runtime/accelerator/apple/mps.h>
 #include <runtime/allocator/caching_device_allocator.h>
 #include <runtime/functions.h>
@@ -200,6 +201,24 @@ bool RunMetalBinaryAlpha(const at::Tensor& out, const at::Tensor& input,
            std::nullopt, true);
   }
   return true;
+}
+
+bool RunMetalFp32ScaledAdd(const at::Tensor& out, const at::Tensor& input,
+                           const at::Tensor& left, const at::Tensor& right,
+                           const at::Scalar& alpha, const char* term_name) {
+  if (input.scalar_type() != at::kFloat ||
+      input.numel() > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  // Reuse the bundled dense kernels on devices that cannot run MPSGraph.
+  const auto term = at::empty(input.sizes(), input.options());
+  @autoreleasepool {
+    const auto pipeline = GetBundledPipeline(std::string(term_name) + "_dense_float_float");
+    const std::array<MetalArg, 3> args{term, left, right};
+    Submit(pipeline, args, {static_cast<uint64_t>(input.numel()), 1, 1},
+           std::nullopt, true);
+  }
+  return RunMetalBinaryAlpha(out, input, term, alpha, "add");
 }
 
 void RunMetalTernaryAlpha(const MetalKernel& kernel, const at::Tensor& out,

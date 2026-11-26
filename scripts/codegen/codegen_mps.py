@@ -1870,7 +1870,8 @@ mps::MpsRunGraph(
         MPSGraphTensor* weighted = [graph multiplicationWithPrimaryTensor:term
             secondaryTensor:factor name:nil];
         return [graph additionWithPrimaryTensor:args[0] secondaryTensor:weighted name:nil];
-      }})"""
+      }}) ||
+      mps::RunMetalFp32ScaledAdd(result, self, tensor1, tensor2, value, "{metal_term}")"""
 
 T_OPTIMIZER_POINTWISE_BF16 = """\
   if (dtype == at::kBFloat16 && out.is_contiguous() &&
@@ -6916,7 +6917,10 @@ def render():
                 operands=", ".join(operands),
                 run=(
                     T_OPTIMIZER_POINTWISE_GRAPH.format(
-                        op=op, operands=", ".join(operands), combine=combine
+                        op=op,
+                        operands=", ".join(operands),
+                        combine=combine,
+                        metal_term="div_true" if combine == "division" else "mul",
                     )
                     if combine is not None
                     else 'mps::RunMetalBinaryAlpha(result, self, end, weight, "lerp")'

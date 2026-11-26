@@ -43,6 +43,9 @@ bool RunMetalUnary(const at::Tensor& out, const at::Tensor& input,
 bool RunMetalBinaryAlpha(const at::Tensor& out, const at::Tensor& input,
                         const at::Tensor& other, const at::Scalar& alpha,
                         const char* name);
+bool RunMetalFp32ScaledAdd(const at::Tensor& out, const at::Tensor& input,
+                           const at::Tensor& left, const at::Tensor& right,
+                           const at::Scalar& alpha, const char* term_name);
 void RunMetalTernaryAlpha(const MetalKernel& kernel, const at::Tensor& out,
                           const at::Tensor& input, const at::Tensor& left,
                           const at::Tensor& right, float alpha);

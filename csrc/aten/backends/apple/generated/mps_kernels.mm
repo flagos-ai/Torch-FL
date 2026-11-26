@@ -5484,7 +5484,8 @@ at::Tensor & AddcdivOutKernelMps(const at::Tensor & self, const at::Tensor & ten
         MPSGraphTensor* weighted = [graph multiplicationWithPrimaryTensor:term
             secondaryTensor:factor name:nil];
         return [graph additionWithPrimaryTensor:args[0] secondaryTensor:weighted name:nil];
-      });
+      }) ||
+      mps::RunMetalFp32ScaledAdd(result, self, tensor1, tensor2, value, "div_true");
   if (!ran) return fallback();
   at::native::resize_output(out, result.sizes());
   out.copy_(result);
@@ -5549,7 +5550,8 @@ at::Tensor & AddcmulOutKernelMps(const at::Tensor & self, const at::Tensor & ten
         MPSGraphTensor* weighted = [graph multiplicationWithPrimaryTensor:term
             secondaryTensor:factor name:nil];
         return [graph additionWithPrimaryTensor:args[0] secondaryTensor:weighted name:nil];
-      });
+      }) ||
+      mps::RunMetalFp32ScaledAdd(result, self, tensor1, tensor2, value, "mul");
   if (!ran) return fallback();
   at::native::resize_output(out, result.sizes());
   out.copy_(result);
