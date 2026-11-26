@@ -33,9 +33,8 @@ Two sites, reached by different spellings:
 The fix is to pass `None` through in both, letting torch's own device guard
 resolve it -- so these tests assert on the *target* each site produces rather
 than on a device index, which needs no accelerator and no multi-rank job. The
-two functions are closures inside `install_alias` and are extracted by
-AST, in the style of tests/unit/test_kunlunxin_triton_stream.py; the structural
-check in tests/unit/test_cuda_alias_guard.py parses the same function.
+two functions are extracted by AST to exercise their device parsing without
+initializing an accelerator.
 
 Run: pytest tests/unit/test_cuda_alias_current_device.py -v
 """
@@ -51,14 +50,13 @@ import pytest
 torch = pytest.importorskip("torch")
 
 _SOURCE = Path(__file__).resolve().parents[2] / "torch_fl" / "compat" / "cuda.py"
-_OUTER = "install_alias"
 _UNDER_TEST = ("_remap", "_tensor_cuda")
 
 _FLAGOS = "flagos"
 
 
 def _load_closures():
-    """Compile the two device-target closures from `install_alias`.
+    """Compile the two device-target closures.
 
     They are nested functions, so `inspect.getsource` on the module attribute
     would hand back the whole 200-line installer. Pulling just these two out
@@ -67,25 +65,19 @@ def _load_closures():
     process-wide.
     """
     tree = ast.parse(_SOURCE.read_text())
-    outer = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == _OUTER
-    )
     wanted = [
         node
-        for node in ast.walk(outer)
+        for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name in _UNDER_TEST
     ]
-    assert {node.name for node in wanted} == set(_UNDER_TEST), (
-        f"{_SOURCE}:{_OUTER} no longer defines {_UNDER_TEST}"
-    )
+    assert {node.name for node in wanted} == set(_UNDER_TEST)
     module = types.ModuleType("cuda_alias_closures_under_test")
     module.__dict__.update(
         torch=torch,
-        # The names the closures capture from the installer's scope.
+        # The names the closures capture from their installers.
         _orig_device=torch.device,
         _flagos_type=_FLAGOS,
+        flagos_type=_FLAGOS,
         _VENDOR_DEVICE_ALIASES={"mthreads": ("cuda", "musa")},
         _platform=types.SimpleNamespace(
             build_info=lambda: types.SimpleNamespace(vendor="nvidia")
@@ -113,8 +105,8 @@ class _ToRecorder:
     torch does with the string afterwards.
     """
 
-    def to(self, target, non_blocking=False):
-        return target
+    def to(self, target, *, non_blocking=False, memory_format=torch.preserve_format):
+        return str(target)
 
 
 def test_a_bare_tensor_cuda_does_not_name_an_index(closures):
@@ -202,15 +194,10 @@ def test_neither_site_hardcodes_index_zero():
     the other.
     """
     tree = ast.parse(_SOURCE.read_text())
-    outer = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == _OUTER
-    )
     for name in _UNDER_TEST:
         function = next(
             node
-            for node in ast.walk(outer)
+            for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef) and node.name == name
         )
         # An index fallback reads a device index and substitutes a constant when

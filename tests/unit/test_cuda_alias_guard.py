@@ -89,9 +89,18 @@ def test_the_helper_answers_from_the_captured_probe(monkeypatch):
     assert cuda.has_real_cuda() is True
 
 
-@pytest.mark.parametrize("cuda_allocator", [False, True])
-def test_tensor_cuda_transfer_depends_on_the_allocator(monkeypatch, cuda_allocator):
-    """The driver shim does not imply that PyTorch can move tensors to CUDA."""
+@pytest.mark.parametrize(
+    ("cuda_allocator", "cuda_alias", "transfer_alias", "expect_alias"),
+    [
+        (False, "1", "0", True),
+        (True, "1", "0", False),
+        (True, "1", "1", True),
+        (True, "0", "1", False),
+    ],
+)
+def test_tensor_cuda_transfer_alias(
+    monkeypatch, cuda_allocator, cuda_alias, transfer_alias, expect_alias
+):
     original = torch.Tensor.cuda
     original_device = torch.device
     original_stream = torch.cuda.current_stream
@@ -102,7 +111,8 @@ def test_tensor_cuda_transfer_depends_on_the_allocator(monkeypatch, cuda_allocat
     monkeypatch.setattr(torch.cuda, "is_available", driver_probe)
     monkeypatch.setattr(torch.Tensor, "cuda", original)
     monkeypatch.setattr(cuda, "_cuda_probe", cuda._cuda_probe)
-    monkeypatch.setenv("FLAGOS_ALIAS_CUDA", "1")
+    monkeypatch.setenv("FLAGOS_ALIAS_CUDA", cuda_alias)
+    monkeypatch.setenv("FLAGOS_ALIAS_CUDA_TRANSFERS", transfer_alias)
 
     def dispatch_has_kernel(operator, key):
         assert (operator, key) == ("aten::empty.memory_format", "CUDA")
@@ -116,7 +126,7 @@ def test_tensor_cuda_transfer_depends_on_the_allocator(monkeypatch, cuda_allocat
     assert torch.cuda.is_available is driver_probe
     assert torch.cuda.current_stream is original_stream
     assert torch.device is original_device
-    if cuda_allocator:
+    if not expect_alias:
         assert torch.Tensor.cuda is original
         return
 
@@ -131,6 +141,8 @@ def test_tensor_cuda_transfer_depends_on_the_allocator(monkeypatch, cuda_allocat
         True,
         torch.channels_last,
     )
+    with pytest.raises(RuntimeError, match="Expected a CUDA device"):
+        torch.Tensor.cuda(transfer, "cpu")
 
 
 def test_the_probe_is_captured_after_vendor_compat_and_before_the_alias():

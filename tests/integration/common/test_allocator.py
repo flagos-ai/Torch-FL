@@ -71,6 +71,31 @@ def test_alloc_free_round_trip():
 
 
 @pytest.mark.anyplatform
+def test_torch_accelerator_memory_api_uses_flagos_allocator():
+    accelerator = torch.accelerator.current_accelerator(check_available=True)
+    assert accelerator.type == "flagos"
+    torch.accelerator.empty_cache()
+    buffer = torch.empty(1024 * 1024, dtype=torch.uint8, device=DEVICE)
+    allocated = torch_fl.flagos.memory_allocated()
+    assert torch.accelerator.memory_allocated(accelerator) == allocated
+    assert (
+        torch.accelerator.memory_reserved(accelerator)
+        == torch_fl.flagos.memory_reserved()
+    )
+    torch.accelerator.reset_peak_memory_stats(accelerator)
+    assert torch.accelerator.max_memory_allocated(accelerator) == allocated
+    torch.accelerator.reset_accumulated_memory_stats(accelerator)
+    stats = torch.accelerator.memory_stats(accelerator)
+    assert stats["allocation.all.allocated"] == stats["allocation.all.freed"] == 0
+    if hasattr(torch.accelerator, "get_memory_info"):
+        free, total = torch.accelerator.get_memory_info(accelerator)
+        assert 0 <= free <= total
+        assert total == torch_fl.flagos.mem_get_info()[1]
+    del buffer
+    torch.accelerator.empty_cache()
+
+
+@pytest.mark.anyplatform
 def test_reset_peak_memory_stats_flattens_the_peaks_to_current():
     torch_fl.flagos.reset_peak_memory_stats()
     stats = torch_fl.flagos.memory_stats()

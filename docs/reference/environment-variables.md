@@ -143,6 +143,7 @@ None is needed on a stock CUDA box; each platform guide states which apply.
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
 | `FLAGOS_ALIAS_CUDA` | Runtime | `1` (on) | Alias the `cuda` device string to `flagos` for drop-in compatibility. Set `0` to opt out |
+| `FLAGOS_ALIAS_CUDA_TRANSFERS` | Runtime | `0` (off) | Redirect `Tensor.cuda()` and `Module.cuda()` to FlagOS on stacks with native CUDA allocation. Requires `FLAGOS_ALIAS_CUDA=1`. Explicit `to("cuda")`, CUDA factories, and `torch.cuda` APIs retain their native behavior. |
 | `FLAGOS_DISABLE_CUDA_SHIM` | Runtime | `0` (off) | Skip registering the `torch.cuda` compatibility shim for generic GPU operations |
 | `FLAGOS_METAX_CUDART_SHIM` | Runtime | `0` (off) | Preload the libcudart version-tag shim before `import torch`. Required for MetaX with generic PyTorch wheels |
 | `FLAGOS_METAX_COMPAT` | Runtime | `0` (off) | Patch FlagGems `torch.cuda` device queries for MetaX compatibility |

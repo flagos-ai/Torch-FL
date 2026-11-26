@@ -770,7 +770,10 @@ def get_device_properties(device=None):
         device: device index, `torch.device`, `"<type>[:<index>]"` string, or
             None for the current device. Matches `torch.cuda.get_device_properties`.
     """
-    return _DeviceProperties(_device_index(device))
+    index = _device_index(device)
+    if build_info().vendor == "nvidia" and torch.version.cuda is not None:
+        return torch.cuda.get_device_properties(index)
+    return _DeviceProperties(index)
 
 
 def _utils_get_device_index(device, optional=False, allow_cpu=False):

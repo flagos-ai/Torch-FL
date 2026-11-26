@@ -456,6 +456,12 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "Alias the cuda device string to flagos for drop-in compatibility. Set "
         "0 to opt out",
     ),
+    "FLAGOS_ALIAS_CUDA_TRANSFERS": (
+        SCOPE_RUNTIME,
+        "0 (off)",
+        "Redirect Tensor.cuda() and Module.cuda() to FlagOS when native CUDA "
+        "tensor allocation is available. Requires FLAGOS_ALIAS_CUDA",
+    ),
     "FLAGOS_DISABLE_CUDA_SHIM": (
         SCOPE_RUNTIME,
         "0 (off)",
