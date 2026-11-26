@@ -14,6 +14,7 @@
 
 #include <ATen/Context.h>
 #include <ATen/ops/from_blob.h>
+#include <algorithm>
 #include <vector>
 #include <ATen/core/TensorBase.h>
 #include <c10/core/Storage.h>
@@ -66,71 +67,30 @@
 #include <aten/route.h>
 
 #include "dataparallel.h"
+#include "nvidia_fa3.h"
 
 #ifdef FLAGOS_METAL_BINDINGS
 int InitMetalBindings(PyObject* mod);
 #endif
 
-namespace {
-
-// Forward declarations
-at::Tensor flagos_to_cuda_view_impl(const at::Tensor& self);
-at::Tensor cuda_to_flagos_view_impl(const at::Tensor& self, int device_index);
-
-
-// Zero-copy view conversion: flagos -> CUDA
-// This version keeps a reference to the original flagos tensor to prevent memory from being freed
-at::Tensor flagos_to_cuda_view_impl(const at::Tensor& self) {
+at::Tensor flagos::bindings::FlagosToCudaView(const at::Tensor& self) {
   TORCH_CHECK(self.is_privateuseone(), "Expected flagos tensor, got ", self.device());
 
-  int device_index = self.device().index();
-  if (device_index < 0) device_index = 0;
-
-  // Get storage info from the original tensor directly (no contiguous call to avoid recursion)
-  auto storage_impl = self.storage().unsafeGetStorageImpl();
-  auto data_ptr = storage_impl->data_ptr().get();
-  auto nbytes = storage_impl->nbytes();
-
-  // Keep a copy of the original tensor to prevent its storage from being freed
-  auto flagos_tensor_holder = std::make_shared<at::Tensor>(self);
-
-  // Create CUDA storage sharing the same data pointer
-  // The deleter captures the shared_ptr to keep the flagos tensor alive
+  const auto device = c10::Device(c10::kCUDA, std::max<int>(self.device().index(), 0));
   auto storage = c10::Storage(
-      c10::Storage::use_byte_size_t(),
-      nbytes,
-      c10::DataPtr(
-          data_ptr,
-          new std::shared_ptr<at::Tensor>(flagos_tensor_holder),
-          [](void* ctx) {
-            // Release the reference to the flagos tensor
-            delete static_cast<std::shared_ptr<at::Tensor>*>(ctx);
-          },
-          c10::Device(c10::kCUDA, device_index)
-      ),
-      nullptr,
-      false
-  );
-
-  // Get the correct TypeMeta from the source tensor
-  auto dtype = self.scalar_type();
-  auto meta = c10::scalarTypeToTypeMeta(dtype);
-
-  // Use at::detail::make_tensor_base to create a tensor directly with storage
-  // This avoids the set_() call which has issues on flagos device
-  auto cuda_tensor = at::detail::make_tensor_base<c10::TensorImpl>(
-      std::move(storage),
-      c10::DispatchKeySet(c10::DispatchKey::CUDA),
-      meta
-  );
-
-  // Set the correct offset, sizes and strides
-  cuda_tensor.unsafeGetTensorImpl()->set_storage_offset(self.storage_offset());
-  cuda_tensor.unsafeGetTensorImpl()->set_sizes_and_strides(
-      self.sizes().vec(), self.strides().vec());
-
-  return cuda_tensor;
+      c10::Storage::use_byte_size_t(), self.storage().nbytes(),
+      c10::DataPtr(self.storage().data_ptr().get(), new at::Tensor(self),
+                   [](void* owner) { delete static_cast<at::Tensor*>(owner); }, device),
+      nullptr, false);
+  auto view = at::detail::make_tensor_base<c10::TensorImpl>(
+      std::move(storage), c10::DispatchKeySet(c10::DispatchKey::CUDA), self.dtype());
+  auto* metadata = view.unsafeGetTensorImpl();
+  metadata->set_storage_offset(self.storage_offset());
+  metadata->set_sizes_and_strides(self.sizes(), self.strides());
+  return view;
 }
+
+namespace {
 
 // Zero-copy view conversion: CUDA -> flagos
 // This version keeps a reference to the original CUDA tensor to prevent memory from being freed
@@ -576,10 +536,42 @@ PyObject* _flagos_to_cuda_view(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
   TORCH_CHECK(THPVariable_Check(arg), "Expected a tensor argument");
   auto tensor = THPVariable_Unpack(arg);
-  auto result = flagos_to_cuda_view_impl(tensor);
+  auto result = flagos::bindings::FlagosToCudaView(tensor);
   return THPVariable_Wrap(result);
   END_HANDLE_TH_ERRORS
 }
+
+#if defined(FLAGOS_NVIDIA_FA3_VENDOR)
+PyObject* _try_register_nvidia_fa3(PyObject*, PyObject*) {
+  HANDLE_TH_ERRORS
+  return PyBool_FromLong(flagos::bindings::TryRegisterNvidiaFlashAttention3());
+  END_HANDLE_TH_ERRORS
+}
+#endif
+
+#if defined(FLAGOS_NATIVE_NVIDIA_STREAM)
+PyObject* _record_flagos_cuda_borrows(PyObject*, PyObject* arg) {
+  HANDLE_TH_ERRORS
+  TORCH_CHECK(PyList_Check(arg) && PyList_GET_SIZE(arg) > 0,
+              "Expected a nonempty list of FlagOS tensors");
+  if (!c10::flagos::CachingDeviceAllocator::is_enabled()) Py_RETURN_FALSE;
+  auto* allocator = c10::flagos::GetCachingAllocator();
+  if (!allocator) Py_RETURN_FALSE;
+  const auto device = c10::flagos::CurrentDevice();
+  const auto stream = GetCurrentStreamForDevice(device);
+  bool safe = true;
+  for (Py_ssize_t i = 0; i < PyList_GET_SIZE(arg); ++i) {
+    auto* value = PyList_GET_ITEM(arg, i);
+    TORCH_CHECK(THPVariable_Check(value), "Expected a tensor argument");
+    const auto tensor = THPVariable_Unpack(value);
+    TORCH_CHECK(tensor.is_privateuseone() && tensor.device().index() == device,
+                "Expected FlagOS storage on the current device");
+    safe &= allocator->record_stream(tensor.storage().data_ptr(), stream);
+  }
+  return PyBool_FromLong(safe);
+  END_HANDLE_TH_ERRORS
+}
+#endif
 
 PyObject* _cuda_to_flagos_view(PyObject* self, PyObject* args) {
   HANDLE_TH_ERRORS
@@ -829,6 +821,12 @@ static PyMethodDef methods[] = {
     {"_get_device_count", _getDeviceCount, METH_NOARGS, nullptr},
     {"_synchronize", _synchronize, METH_NOARGS, nullptr},
     {"_flagos_to_cuda_view", _flagos_to_cuda_view, METH_O, nullptr},
+#if defined(FLAGOS_NVIDIA_FA3_VENDOR)
+    {"_try_register_nvidia_fa3", _try_register_nvidia_fa3, METH_NOARGS, nullptr},
+#endif
+#if defined(FLAGOS_NATIVE_NVIDIA_STREAM)
+    {"_record_flagos_cuda_borrows", _record_flagos_cuda_borrows, METH_O, nullptr},
+#endif
     {"_cuda_to_flagos_view", _cuda_to_flagos_view, METH_VARARGS, nullptr},
     {"_flagos_identity_view", _flagos_identity_view, METH_O, nullptr},
 #ifdef USE_BPU

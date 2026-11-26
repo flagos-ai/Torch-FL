@@ -522,28 +522,33 @@ void CachingDeviceAllocator::shutdown() {
   device_states_.clear();
 }
 
-void CachingDeviceAllocator::record_stream(
+bool CachingDeviceAllocator::record_stream(
     const at::DataPtr& ptr,
     Stream_t stream) {
   if (!ptr.get()) {
-    return;
+    return true;
   }
 
   if (backend_->provides_caching()) {
     backend_->caching_record_stream(ptr.get(), stream);
-    return;
+    return ptr.get_deleter() == &delegated_deleter;
   }
 
   // The Block* is stored as the DataPtr context by allocate(). Only trust it
   // when the deleter matches (i.e. this DataPtr came from our block pool, not
   // the delegation path or a foreign allocator).
   if (ptr.get_deleter() != &block_deleter) {
-    return;
+    return false;
   }
   Block* block = static_cast<Block*>(ptr.get_context());
   if (!block) {
-    return;
+    return false;
   }
+
+#if defined(FLAGOS_ACCEL_CUDA)
+  // The NVIDIA pool already orders a block's reuse on its allocation stream.
+  if (block->stream == stream) return true;
+#endif
 
   auto& state = get_device_state(block->device);
   std::lock_guard<std::recursive_mutex> lock(state.mutex);
@@ -559,6 +564,7 @@ void CachingDeviceAllocator::record_stream(
 
   block->event_count++;
   state.outstanding_events.push_back({event, block});
+  return true;
 }
 
 std::pair<size_t, size_t> CachingDeviceAllocator::get_memory_info(int device) {

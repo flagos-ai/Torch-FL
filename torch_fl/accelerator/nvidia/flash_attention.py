@@ -4,6 +4,7 @@
 """FlashAttention 3 inference on the NVIDIA backend."""
 
 from contextlib import contextmanager
+from functools import cache
 
 import torch
 
@@ -29,16 +30,26 @@ def _cuda_stream(device_index):
             torch.cuda._set_stream_by_id(*previous)
 
 
-def _cuda_view(value, device):
+def _cuda_view(value, device, borrowed):
     if not isinstance(value, torch.Tensor):
         return value
     if value.device != device:
         raise RuntimeError("FlashAttention 3 expects all tensors on the query device")
-    return _C._flagos_to_cuda_view(value.resolve_conj().resolve_neg())
+    value = value.resolve_conj().resolve_neg()
+    borrowed.append(value)
+    return _C._flagos_to_cuda_view(value)
+
+
+@cache
+def _register_native_forward():
+    register_native = getattr(_C, "_try_register_nvidia_fa3", None)
+    return register_native is not None and register_native()
 
 
 def _forward(q, k, v, *args, **kwargs):
     op = torch.ops.flash_attn_3._flash_attn_forward.default
+    if _register_native_forward():
+        return op(q, k, v, *args, **kwargs)
     options = {
         argument.name: value for argument, value in zip(op._schema.arguments[3:], args)
     }
@@ -57,10 +68,16 @@ def _forward(q, k, v, *args, **kwargs):
         raise RuntimeError("FlashAttention 3 expects a FlagOS query tensor")
 
     outputs = []
+    borrowed = []
     with _cuda_stream(q.device.index) as stream:
-        inputs = tuple(_cuda_view(tensor, q.device) for tensor in (q, k, v))
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "FlashAttention 3 on FlagOS requires an uncaptured stream"
+            )
+        inputs = tuple(_cuda_view(tensor, q.device, borrowed) for tensor in (q, k, v))
         native_options = {
-            name: _cuda_view(value, q.device) for name, value in options.items()
+            name: _cuda_view(value, q.device, borrowed)
+            for name, value in options.items()
         }
         try:
             for native in op(*inputs, **native_options):
@@ -73,10 +90,14 @@ def _forward(q, k, v, *args, **kwargs):
                 outputs.append(output)
                 _C._flagos_to_cuda_view(output).copy_(native)
         finally:
-            # The views borrow FlagOS storage. Drain the shared queue before
-            # releasing the borrows. Outputs retain the FlagOS allocator and
-            # the CUDA result strides, including the logsumexp layout.
-            stream.synchronize()
+            # Keep borrowed FlagOS blocks alive on the queue until FA3 and its
+            # result copies finish. Foreign storage still needs a queue drain.
+            safe = False
+            try:
+                safe = _C._record_flagos_cuda_borrows(borrowed)
+            finally:
+                if not safe:
+                    stream.synchronize()
     return tuple(outputs)
 
 

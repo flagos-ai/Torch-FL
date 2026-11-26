@@ -76,3 +76,30 @@ def test_flash_attention_3_forward(flash_attention, varlen, dtype, causal, side_
             result.cpu().contiguous().view(torch.uint8),
             reference.cpu().contiguous().view(torch.uint8),
         )
+
+
+@torch.inference_mode()
+def test_flash_attention_3_keeps_inputs_alive_across_streams(flash_attention):
+    from torch_fl.accelerator.nvidia.flash_attention import _cuda_stream
+
+    attention = flash_attention.flash_attn_func
+    shape = (1, 128, 4, 64)
+    rng = torch.Generator().manual_seed(91)
+    inputs = [torch.randn(shape, dtype=torch.bfloat16, generator=rng) for _ in range(3)]
+    expected = attention(*(tensor.cuda() for tensor in inputs)).cpu()
+    flagos = torch.device("flagos:0")
+    main = torch.accelerator.current_stream(0)
+    side = torch.Stream(device=flagos)
+    transferred = [tensor.to(flagos) for tensor in inputs]
+    side.wait_stream(main)
+    with side:
+        with _cuda_stream(0):
+            torch.cuda._sleep(20_000_000)
+        actual = attention(*transferred)
+    del transferred
+    replacements = [
+        torch.zeros(shape, dtype=torch.bfloat16, device=flagos) for _ in inputs
+    ]
+    main.wait_stream(side)
+    assert torch.equal(actual.cpu(), expected)
+    assert all(not tensor.cpu().any() for tensor in replacements)
