@@ -281,9 +281,8 @@ bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs) {
   return true;
 }
 
-#if defined(FLAGOS_ACCEL_PPU)
-bool TryEmptyPpuMatmul(const at::Tensor& lhs, const at::Tensor& rhs,
-                      int64_t rank, at::Tensor& result) {
+bool TryEmptyMatmul(const at::Tensor& lhs, const at::Tensor& rhs,
+                    int64_t rank, at::Tensor& result) {
   if (lhs.numel() != 0 && rhs.numel() != 0) return false;
   TORCH_CHECK(lhs.dim() == rank && rhs.dim() == rank,
               "expected two rank-", rank, " matmul operands");
@@ -301,7 +300,6 @@ bool TryEmptyPpuMatmul(const at::Tensor& lhs, const at::Tensor& rhs,
   if (result.numel() > 0) result.zero_();
   return true;
 }
-#endif
 
 bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
                                   at::Tensor& result) {

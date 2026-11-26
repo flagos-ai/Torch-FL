@@ -167,13 +167,11 @@ def _dot_contract_prelude(op, args):
     empty = ""
     if op in ("mm", "bmm"):
         rank = 2 if op == "mm" else 3
-        # The PPU FlagGems dot kernel can access an empty operand.
+        # Empty products are defined by their metadata and need no dot launch.
         empty = (
-            "#if defined(FLAGOS_ACCEL_PPU)\n"
             "  at::Tensor empty_product;\n"
-            f"  if (at::native::flagos::TryEmptyPpuMatmul({lhs}, {rhs}, {rank}, empty_product)) "
+            f"  if (at::native::flagos::TryEmptyMatmul({lhs}, {rhs}, {rank}, empty_product)) "
             "{ return empty_product; }\n"
-            "#endif\n"
         )
     native = ""
     if op in NATIVE_BMM_ADAPTATIONS["metax"]["operators"]:
@@ -2153,6 +2151,11 @@ def gen_flaggems_out_adapters(funcs):
         f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{op}>::call({call_args});",
         "  }",
         "#if defined(USE_KUNLUNXIN)",
+        "  if (scale_grad_by_freq && index_dtype == at::kLong &&",
+        "      !grad_output.is_neg() && !indices.is_neg() && padding_idx >= -1 && padding_idx < num_weights) {",
+        f"    if (const auto vendor = {dispatcher}.KernelFor(Backend::kKunlunxin))",
+        f"      return vendor({call_args});",
+        "  }",
         "  // Apply the frequency before the published unscaled accumulation.",
         "  auto grad = grad_output;",
         "  if (scale_grad_by_freq) {",
@@ -2286,6 +2289,8 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         ("mean.dim", "functional_pure", {"dtype"}),
         ("sum.dim_IntList", "functional_pure", {"dtype"}),
         ("cat", "tensorlist_dim", set()),
+        ("mm", "functional_pure", set()),
+        ("bmm", "functional_pure", set()),
         ("pow.Tensor_Scalar", "functional_pure", set()),
         ("full", "factory", {"size", "fill_value"}),
         ("index_copy_", "inplace", set()),
@@ -2320,6 +2325,8 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "mean.dim": "mean_dim",
                 "sum.dim_IntList": "sum_dim",
                 "cat": "cat",
+                "mm": "mm",
+                "bmm": "bmm",
                 "pow.Tensor_Scalar": "pow_tensor_scalar",
                 "full": "full",
                 "index_copy_": "index_copy_",

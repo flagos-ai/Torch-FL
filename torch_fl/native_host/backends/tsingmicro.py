@@ -43,26 +43,6 @@ _EAGER_CONFIGS = {
         num_ctas=1,
     ),
     (
-        "bmm_kernel",
-        "e07964330ae4b2a4fffea5144d5382e275bc5f4b11deab9cea714705b5e7e509",
-    ): dict(
-        TILE_M=64,
-        TILE_N=64,
-        TILE_K=32,
-        GROUP_M=2,
-        num_warps=4,
-        num_stages=2,
-        num_ctas=1,
-    ),
-    (
-        "softmax_backward_kernel_inner",
-        "d7c6eef628fba956403c1f43f4a2c94dea1142ec8fa532359de5016e3bf9488d",
-    ): dict(TILE_N=128, num_warps=4, num_stages=2, num_ctas=1),
-    (
-        "log_softmax_backward_kernel",
-        "eb890f9b6d9caec2555d9d26a1c1b2ab091f65f3edc16f7c566e10a9c224d948",
-    ): dict(BLOCK_M=16, BLOCK_N=512, num_warps=8, num_stages=2, num_ctas=1),
-    (
         "sum_dim_kernel",
         "5259b9f60445ef4a99e85387bc1e4c7a2264681170c695c6fc9b94378fa6348b",
     ): dict(BLOCK_M=4, BLOCK_N=1024, num_warps=1, num_stages=1, num_ctas=1),

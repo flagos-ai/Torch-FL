@@ -126,6 +126,7 @@ class KernelEntry:
         compile_before_enqueue=False,
         permit_single_config=False,
         eager_config=None,
+        power_of_two_heuristics=(),
     ):
         self.original = original
         self.entry = entry
@@ -139,6 +140,7 @@ class KernelEntry:
         self.compile_before_enqueue = compile_before_enqueue
         self.permit_single_config = permit_single_config
         self.eager_config = eager_config
+        self.power_of_two_heuristics = power_of_two_heuristics
         self.native_cache = _launcher.KernelCache(
             self.arg_names, self.defaults, self.returns_constants, reuse_runtime_floats
         )
@@ -251,7 +253,10 @@ class KernelEntry:
         while type(wrapper) is Heuristics:
             named = dict(zip(wrapper.arg_names, args))
             for name, heuristic in wrapper.values.items():
-                options[name] = heuristics[name] = heuristic({**named, **options})
+                value = heuristic({**named, **options})
+                if name in self.power_of_two_heuristics and value > 0:
+                    value = 1 << (operator.index(value) - 1).bit_length()
+                options[name] = heuristics[name] = value
             wrapper = wrapper.fn
         if wrapper is self.entry.jit_function:
             return options, tuned, heuristics

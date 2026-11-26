@@ -1797,6 +1797,7 @@ void {kernel}(at::TensorList self, const at::Scalar& scalar) {{
   for (size_t off = 0; off < self.size(); off += {chunk}) {{
     size_t n = std::min<size_t>({chunk}, self.size() - off);
     {kernel}Chunk(self.slice(off, n), scalar);
+    BumpForeachVersions(self.slice(off, n));
   }}
 }}
 
@@ -1848,6 +1849,7 @@ void {kernel}(at::TensorList self, at::TensorList tensors1, const at::Scalar& we
   for (size_t off = 0; off < self.size(); off += {chunk}) {{
     size_t n = std::min<size_t>({chunk}, self.size() - off);
     {kernel}Chunk(self.slice(off, n), tensors1.slice(off, n), weight);
+    BumpForeachVersions(self.slice(off, n));
   }}
 }}
 
@@ -1897,6 +1899,7 @@ void {kernel}(at::TensorList self, at::TensorList tensor1, at::TensorList tensor
   for (size_t off = 0; off < self.size(); off += {chunk}) {{
     size_t n = std::min<size_t>({chunk}, self.size() - off);
     {kernel}Chunk(self.slice(off, n), tensor1.slice(off, n), tensor2.slice(off, n), value);
+    BumpForeachVersions(self.slice(off, n));
   }}
 }}
 
@@ -1984,6 +1987,7 @@ void {kernel}(at::TensorList self, at::ArrayRef<at::Scalar> scalars) {{
   for (size_t off = 0; off < self.size(); off += {chunk}) {{
     size_t n = std::min<size_t>({chunk}, self.size() - off);
     {kernel}Chunk(self.slice(off, n), scalars.slice(off, n));
+    BumpForeachVersions(self.slice(off, n));
   }}
 }}
 
@@ -2081,6 +2085,7 @@ void {kernel}(at::TensorList self, at::TensorList tensor1, at::TensorList tensor
     size_t n = std::min<size_t>({chunk}, self.size() - off);
     {kernel}Chunk(self.slice(off, n), tensor1.slice(off, n), tensor2.slice(off, n),
         scalars.slice(off, n));
+    BumpForeachVersions(self.slice(off, n));
   }}
 }}
 
@@ -2183,6 +2188,7 @@ void {kernel}(at::TensorList self, const at::Scalar& scalar) {{
   for (size_t off = 0; off < self.size(); off += {chunk}) {{
     size_t n = std::min<size_t>({chunk}, self.size() - off);
     {kernel}Chunk(self.slice(off, n), scalar);
+    BumpForeachVersions(self.slice(off, n));
   }}
 }}
 
@@ -2241,6 +2247,7 @@ void {kernel}(at::TensorList self, const at::Tensor& other) {{
   for (size_t off = 0; off < self.size(); off += {chunk}) {{
     size_t n = std::min<size_t>({chunk}, self.size() - off);
     {kernel}Chunk(self.slice(off, n), other);
+    BumpForeachVersions(self.slice(off, n));
   }}
 }}
 
@@ -5020,6 +5027,7 @@ FILE_HEADER = """\
 #include "../op_preparation.h"
 #include "../op_api_common.h"
 #include "../dtype_support.h"
+#include "../../../foreach_utils.h"
 #include "runtime/generator.h"
 
 namespace at::native::flagos {

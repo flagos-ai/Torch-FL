@@ -45,11 +45,14 @@ def _run_nll_subprocess(
 ) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(extra_env)
+    env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
     code = """
 import sys
 import torch
 import torch_fl
 
+# Match the device initialization of the integration fixture in the parent.
+torch_fl.flagos.init()
 op_forward = torch.ops.aten.nll_loss_forward.default
 op_backward = torch.ops.aten.nll_loss_backward.default
 device = "flagos:0"

@@ -38,6 +38,81 @@ _SINGLETON_TUNER_SOURCES = {
     "flag_gems.utils.libentry": "a6bcda6d615748d4ec1be4119f245e62002d5347a4b5e983a21cb6dff933d720",
 }
 
+# These configurations are shared by the published kernels. The launcher
+# accepts them only when the source hash and active tuning domain agree.
+_MUL_SOURCE = "df1d9068fbe35596b74bad406446b39901deb6777e2439cc09bb2b6d1de0f348"
+_MUL_CONFIG = dict(BLOCK_SIZE=1024, num_warps=4, num_stages=3, num_ctas=1)
+_METAX_LOG_SOFTMAX_SOURCE = (
+    "77fcf532bc130edd67f5b452316a87e212fbab47cd585f65ea942ecd35c229fe"
+)
+_METAX_LOG_SOFTMAX_CONFIG = dict(BLOCK_M=4, num_warps=4, num_stages=2, num_ctas=1)
+_PUBLISHED_EAGER_CONFIGS = {
+    ("mul_scalar_kernel", _MUL_SOURCE): _MUL_CONFIG,
+    ("mul_broadcast_2d_kernel", _MUL_SOURCE): _MUL_CONFIG,
+    ("mul_generic_nd_kernel", _MUL_SOURCE): _MUL_CONFIG,
+    (
+        "bmm_kernel",
+        "e07964330ae4b2a4fffea5144d5382e275bc5f4b11deab9cea714705b5e7e509",
+    ): dict(
+        TILE_M=64,
+        TILE_N=64,
+        TILE_K=32,
+        GROUP_M=2,
+        num_warps=4,
+        num_stages=2,
+        num_ctas=1,
+    ),
+    (
+        "bmm_kernel",
+        "ccc70322242e8917809ec128cd5128f3275f921085196792480fb671bffc354e",
+    ): dict(
+        TILE_M=64,
+        TILE_N=64,
+        TILE_K=64,
+        GROUP_M=1,
+        num_warps=4,
+        num_stages=2,
+        num_ctas=1,
+    ),
+    (
+        "mm_kernel",
+        "8480dcaecfb6961653bc7663fc0a86d0ae32b7387af378adf2d23cba4c9aeb12",
+    ): dict(
+        BLOCK_M=128,
+        BLOCK_N=128,
+        BLOCK_K=128,
+        SPLIT_K=1,
+        num_warps=4,
+        num_stages=2,
+        num_ctas=1,
+    ),
+    (
+        "sum_dim_kernel",
+        "5259b9f60445ef4a99e85387bc1e4c7a2264681170c695c6fc9b94378fa6348b",
+    ): dict(BLOCK_M=4, BLOCK_N=1024, num_warps=4, num_stages=2, num_ctas=1),
+    (
+        "softmax_backward_kernel_inner",
+        "d7c6eef628fba956403c1f43f4a2c94dea1142ec8fa532359de5016e3bf9488d",
+    ): dict(TILE_N=128, num_warps=4, num_stages=2, num_ctas=1),
+    (
+        "log_softmax_backward_kernel",
+        "eb890f9b6d9caec2555d9d26a1c1b2ab091f65f3edc16f7c566e10a9c224d948",
+    ): dict(BLOCK_M=16, BLOCK_N=512, num_warps=8, num_stages=2, num_ctas=1),
+    ("log_softmax_kernel", _METAX_LOG_SOFTMAX_SOURCE): _METAX_LOG_SOFTMAX_CONFIG,
+    ("log_softmax_backward_kernel", _METAX_LOG_SOFTMAX_SOURCE): (
+        _METAX_LOG_SOFTMAX_CONFIG
+    ),
+}
+
+# This published kernel uses TILE_N as an arange extent. The vendor heuristic
+# can return a short reduction length directly (for example 3 instead of 4).
+_POWER_OF_TWO_HEURISTICS = {
+    (
+        "mean_dim_kernel_non_inner",
+        "c968ad14d3ba76ed87c29e5e9346a0e392cdaeaeb01c0774cfd7c5c489394d1c",
+    ): ("TILE_N",),
+}
+
 _native_commands = []
 _admitted_kernels = {}
 _launched_kernels = {}
@@ -374,12 +449,14 @@ class Hosts:
                 self.provenance[-1]["generator"] = generated[1]
             _admitted_kernels[id(jit)] = self.provenance[-1]
             eager_configs = getattr(self.backend, "eager_kernel_configs", {})
+            key = jit.__name__, source_hash
             found = self.runtime.KernelEntry(
                 value,
                 entry,
                 compile_before_enqueue=vendor in _COMPILE_BEFORE_ENQUEUE,
                 permit_single_config=_verified_singleton_tuner(),
-                eager_config=eager_configs.get((jit.__name__, source_hash)),
+                eager_config=eager_configs.get(key, _PUBLISHED_EAGER_CONFIGS.get(key)),
+                power_of_two_heuristics=_POWER_OF_TWO_HEURISTICS.get(key, ()),
             )
         elif isinstance(value, types.FunctionType):
             identity = function_identity(value)

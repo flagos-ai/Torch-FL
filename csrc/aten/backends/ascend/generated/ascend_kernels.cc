@@ -67,6 +67,7 @@
 #include "../op_preparation.h"
 #include "../op_api_common.h"
 #include "../dtype_support.h"
+#include "../../../foreach_utils.h"
 #include "runtime/generator.h"
 
 namespace at::native::flagos {
@@ -7228,6 +7229,7 @@ void ForeachMulInplaceScalarKernelAscend(at::TensorList self, const at::Scalar& 
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachMulInplaceScalarKernelAscendChunk(self.slice(off, n), scalar);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7271,6 +7273,7 @@ void ForeachAddInplaceScalarKernelAscend(at::TensorList self, const at::Scalar& 
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachAddInplaceScalarKernelAscendChunk(self.slice(off, n), scalar);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7339,6 +7342,7 @@ void ForeachLerpInplaceScalarKernelAscend(at::TensorList self, at::TensorList te
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachLerpInplaceScalarKernelAscendChunk(self.slice(off, n), tensors1.slice(off, n), weight);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7394,6 +7398,7 @@ void ForeachAddcmulInplaceScalarKernelAscend(at::TensorList self, at::TensorList
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachAddcmulInplaceScalarKernelAscendChunk(self.slice(off, n), tensor1.slice(off, n), tensor2.slice(off, n), value);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7492,6 +7497,7 @@ void ForeachDivInplaceScalarlistKernelAscend(at::TensorList self, at::ArrayRef<a
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachDivInplaceScalarlistKernelAscendChunk(self.slice(off, n), scalars.slice(off, n));
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7599,6 +7605,7 @@ void ForeachAddcdivInplaceScalarlistKernelAscend(at::TensorList self, at::Tensor
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachAddcdivInplaceScalarlistKernelAscendChunk(self.slice(off, n), tensor1.slice(off, n), tensor2.slice(off, n),
         scalars.slice(off, n));
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7695,6 +7702,7 @@ void ForeachClampMinInplaceScalarKernelAscend(at::TensorList self, const at::Sca
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachClampMinInplaceScalarKernelAscendChunk(self.slice(off, n), scalar);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7736,6 +7744,7 @@ void ForeachClampMaxInplaceScalarKernelAscend(at::TensorList self, const at::Sca
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachClampMaxInplaceScalarKernelAscendChunk(self.slice(off, n), scalar);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7834,6 +7843,7 @@ void ForeachMulInplaceTensorKernelAscend(at::TensorList self, const at::Tensor& 
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachMulInplaceTensorKernelAscendChunk(self.slice(off, n), other);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 

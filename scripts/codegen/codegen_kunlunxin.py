@@ -1199,33 +1199,44 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kKunlunxin, {kernel})
 """
 
 # For a full vocabulary, the published reduction scans every token for each
-# output element. XDNN scatters into a zeroed result for unscaled BF16 gradients.
-# The published host remains the fallback for other supported contracts.
+# output element. XDNN handles the unscaled accumulation for the admitted
+# BF16 gradients and for FP32 gradients with separate frequency scaling.
 T_EMBEDDING_DENSE_BACKWARD = """\
 at::Tensor {kernel}(const at::Tensor& grad_output, const at::Tensor& indices,
     int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq) {{
-  if (grad_output.scalar_type() != at::kBFloat16 || indices.scalar_type() != at::kLong ||
+  const auto dtype = grad_output.scalar_type();
+  const bool scaled_float = dtype == at::kFloat && scale_grad_by_freq &&
+      padding_idx >= -1 && padding_idx < num_weights;
+  const bool unscaled_bf16 = dtype == at::kBFloat16 && !scale_grad_by_freq && padding_idx == -1;
+  if ((!scaled_float && !unscaled_bf16) || indices.scalar_type() != at::kLong ||
       grad_output.device() != indices.device() || grad_output.dim() < 2 ||
       grad_output.layout() != at::kStrided || indices.layout() != at::kStrided ||
       grad_output.is_neg() || indices.is_neg() ||
       !grad_output.sizes().slice(0, grad_output.dim() - 1).equals(indices.sizes()) ||
       grad_output.numel() == 0 || grad_output.numel() > INT32_MAX || num_weights <= 0 ||
-      num_weights > INT32_MAX / grad_output.size(-1) || padding_idx != -1 || scale_grad_by_freq) {{
+      num_weights > INT32_MAX / grad_output.size(-1)) {{
     if (auto published = {disp}.KernelFor(Backend::kFlagGems)) {{
       return published(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
     }}
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::embedding_dense_backward>::call(
         grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
   }}
-  auto grad = grad_output.contiguous();
   auto index = indices.contiguous();
-  auto out = at::empty({{num_weights, grad.size(-1)}}, grad.options());
-  kunlunxin::KunlunxinDeviceGuard guard(grad);
-  auto* context = kunlunxin::GetKunlunxinContext(grad);
-  kunlunxin::XdnnTensorWrapper t_grad(grad), t_index(index), t_out(out);
-  KUNLUNXIN_EXEC({vendor_op}, xdnn_pytorch::{vendor_op}(
-      context, t_grad.get(), t_index.get(), num_weights, padding_idx, scale_grad_by_freq, t_out.get()));
-  return out;
+  auto accumulate = [&](const at::Tensor& values, int64_t padding) {{
+    auto grad = values.contiguous();
+    auto out = at::empty({{num_weights, grad.size(-1)}}, grad.options());
+    kunlunxin::KunlunxinDeviceGuard guard(grad);
+    auto* context = kunlunxin::GetKunlunxinContext(grad);
+    kunlunxin::XdnnTensorWrapper t_grad(grad), t_index(index), t_out(out);
+    KUNLUNXIN_EXEC({vendor_op}, xdnn_pytorch::{vendor_op}(
+        context, t_grad.get(), t_index.get(), num_weights, padding, false, t_out.get()));
+    return out;
+  }};
+  if (!scaled_float) return accumulate(grad_output, padding_idx);
+  auto grad = ScaleEmbeddingGradByFrequency(grad_output, index, [&](const at::Tensor& ones) {{
+    return accumulate(ones, -1);
+  }});
+  return accumulate(grad, padding_idx);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kKunlunxin, {kernel})
@@ -1441,6 +1452,7 @@ FILE_HEADER = """\
 #include <optional>
 #include <unordered_map>
 #include <vector>
+#include "../../../embedding_utils.h"
 #include "../../../fallback.h"
 #include "../../../foreach_utils.h"
 #include "../kunlunxin_common.h"

@@ -1220,10 +1220,8 @@ at::Tensor BlackmanWindowPeriodicKernelPython(int64_t window_length, bool period
 
 static TypedSourceSlot BmmFnSource("aten::bmm", "flag_gems.bmm", "e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268", "{\"abi\": \"e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm\", \"op\": \"aten::bmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BmmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
-#if defined(FLAGOS_ACCEL_PPU)
   at::Tensor empty_product;
-  if (at::native::flagos::TryEmptyPpuMatmul(self, mat2, 3, empty_product)) { return empty_product; }
-#endif
+  if (at::native::flagos::TryEmptyMatmul(self, mat2, 3, empty_product)) { return empty_product; }
   at::Tensor native_product;
   if (at::native::flagos::TryNativeHostBmmOuterProduct(self, mat2, native_product)) { return native_product; }
   at::Tensor self_dotpad = self;
@@ -3294,10 +3292,8 @@ at::Tensor MmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
   if (at::native::flagos::FlagGemsMatmulNeedsHost(self.scalar_type())) {
     return at::native::flagos::MatmulOnHost(self, mat2);
   }
-#if defined(FLAGOS_ACCEL_PPU)
   at::Tensor empty_product;
-  if (at::native::flagos::TryEmptyPpuMatmul(self, mat2, 2, empty_product)) { return empty_product; }
-#endif
+  if (at::native::flagos::TryEmptyMatmul(self, mat2, 2, empty_product)) { return empty_product; }
   at::Tensor self_dotpad = self;
   at::Tensor mat2_dotpad = mat2;
   at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
@@ -5858,6 +5854,11 @@ at::Tensor EmbeddingDenseBackwardNative(const at::Tensor & grad_output, const at
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::embedding_dense_backward>::call(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
   }
 #if defined(USE_KUNLUNXIN)
+  if (scale_grad_by_freq && index_dtype == at::kLong &&
+      !grad_output.is_neg() && !indices.is_neg() && padding_idx >= -1 && padding_idx < num_weights) {
+    if (const auto vendor = embedding_dense_backward_dispatcher.KernelFor(Backend::kKunlunxin))
+      return vendor(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
+  }
   // Apply the frequency before the published unscaled accumulation.
   auto grad = grad_output;
   if (scale_grad_by_freq) {
