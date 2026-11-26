@@ -70,6 +70,19 @@ wheel records its kernel sets in `torch_fl/_build_config.py`, and the
 integration conftest collects those tests exactly when `flaggems_cpp` is in that
 record — see [Testing](../../development/testing.md).
 
+### FlashAttention 3 inference
+
+On NVIDIA with a CUDA PyTorch wheel and a compatible FlashAttention 3 package,
+the extension's dense and packed variable-length forward APIs accept FlagOS
+tensors. Torch-FL registers the `flash_attn_3::_flash_attn_forward` operator for
+PrivateUse1. Use the installed package's usual Python API with tensors on
+`flagos`.
+
+H100 parity tests cover FP16 and BF16, causal and non-causal attention, and the
+default and a separate FlagOS stream. The forward route runs the CUDA kernel on
+the active FlagOS stream and copies its results into FlagOS-owned storage before
+returning. The supported scope is eager forward inference with read-only inputs.
+
 ## Verification
 
 ### Basic Device Check

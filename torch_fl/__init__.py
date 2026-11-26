@@ -551,6 +551,10 @@ def _phase_ecosystem() -> None:
     device.prepare_cuda(accelerator)
 
     cuda.install_alias(flagos)
+    if accelerator == "nvidia" and torch.version.cuda:
+        from .accelerator.nvidia import flash_attention
+
+        flash_attention.register()
 
     # Both of these have to precede the flag_gems import below, which happens
     # here rather than in _phase_vendor_compat for exactly that reason. That
