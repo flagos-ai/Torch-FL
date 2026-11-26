@@ -11,6 +11,7 @@
 
 #include <ATen/native/Resize.h>
 #include <ATen/MemoryOverlap.h>
+#include <ATen/ops/_conj_native.h>
 #include <ATen/ops/_pin_memory.h>
 #include <ATen/ops/_to_copy.h>
 #include <ATen/ops/_to_copy_ops.h>
@@ -541,6 +542,17 @@ at::Tensor _copy_from(
     bool non_blocking) {
   TORCH_CHECK(self.defined(), "Source tensor (self) is not defined.");
   TORCH_CHECK(dst.defined(), "Destination tensor (dst) is not defined.");
+
+#if defined(USE_DCU)
+  // A conjugate destination stores the conjugate of the logical source.
+  // Convert both views to the equivalent copy into physical storage.
+  if (dst.is_privateuseone() && dst.is_conj()) {
+    auto physical_dst = at::native::_conj(dst);
+    auto physical_src = self.is_complex() ? at::native::_conj(self) : self;
+    at::native::flagos::_copy_from(physical_src, physical_dst, non_blocking);
+    return dst;
+  }
+#endif
 
   // Raw memcpy copies storage bytes and therefore bypasses lazy Conjugate and
   // Negative math bits. Materialize those bits once before entering any of the
