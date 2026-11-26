@@ -1389,6 +1389,22 @@ def gen_flaggems_python_kernel(
                 f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{op}>::call(self, dim, index, src);\n"
                 "  }\n"
             )
+        elif op == "sort.stable":
+            # FlagGems makes the result contiguous even for a transposed
+            # input. ATen's sort metadata preserves the dense stride order.
+            prelude += (
+                "  if (!self.is_contiguous()) {\n"
+                "    auto [values, indices] = at::native::call_fallback_fn<&cpu_fallback, at::_ops::sort_stable>::call(self, stable, dim, descending);\n"
+                "    const auto strides = self.is_non_overlapping_and_dense() ? self.strides().vec() : at::infer_dense_strides(self.sizes(), self.strides());\n"
+                "    auto restore_layout = [&](const at::Tensor& tensor) {\n"
+                "      if (tensor.strides().equals(strides)) return tensor;\n"
+                "      auto result = at::empty_strided(tensor.sizes(), strides, tensor.options());\n"
+                "      result.copy_(tensor);\n"
+                "      return result;\n"
+                "    };\n"
+                "    return {restore_layout(values), restore_layout(indices)};\n"
+                "  }\n"
+            )
         elif typed and op == "pow.Tensor_Scalar":
             # Match the existing floating-square decomposition while keeping
             # the nested multiply on its configured dispatcher route.
@@ -1801,6 +1817,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
             '#include "ops.h"', '#include "ops.h"\n' + metadata_include, 1
         )
     for header in (
+        "#include <ATen/ExpandUtils.h>",
         "#include <ATen/native/CPUFallback.h>",
         "#include <ATen/native/ReduceOpsUtils.h>",
         '#include "../fallback.h"',
@@ -1812,6 +1829,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         ("mean.dim", "functional_pure", {"dtype"}),
         ("scatter_add", "functional_pure", set()),
         ("scatter_add_", "inplace", set()),
+        ("sort.stable", "tuple_return", {"stable", "dim", "descending"}),
         ("cat", "tensorlist_dim", set()),
         ("pow.Tensor_Scalar", "functional_pure", set()),
         *((op, "functional_pure", set()) for op in FLAGGEMS_HCU_METADATA_ADAPTERS),
@@ -1838,6 +1856,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "mean.dim": "mean_dim",
                 "scatter_add": "scatter_add",
                 "scatter_add_": "scatter_add_",
+                "sort.stable": "sort_stable",
                 "cat": "cat",
                 "pow.Tensor_Scalar": "pow_tensor_scalar",
                 "_unsafe_view": "_unsafe_view",
@@ -2626,6 +2645,7 @@ def main():
         "#ifdef FLAGOS_FLAGGEMS_PYTHON",
         "",
         '#include "ops.h"',
+        "#include <ATen/ExpandUtils.h>",
         '#include "../device_boxing.h"',
         '#include "../backends/flagos/python_op_caller.h"',
         '#include "../backends/flagos/typed_source_host.h"',

@@ -6,6 +6,7 @@
 #include "ops.h"
 #include "../strided_ops.h"
 #include <ATen/native/BinaryOps.h>
+#include <ATen/ExpandUtils.h>
 #include "../fallback.h"
 #include <ATen/native/CPUFallback.h>
 #include <ATen/native/ReduceOpsUtils.h>
@@ -4307,6 +4308,17 @@ static TypedSourceSlot SortFnSource("aten::sort", "flag_gems.sort", "5de43d7fe66
 
 static TypedSourceSlot SortStableFnSource("aten::sort.stable", "flag_gems.sort_stable", "d5873babf3702ad4e23554065218f0a5c7e7ae808bed34f11c24ca4aa8ea02d9", "{\"abi\": \"d5873babf3702ad4e23554065218f0a5c7e7ae808bed34f11c24ca4aa8ea02d9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"stable\", \"type\": \"::std::optional<bool>\"}, {\"keyword\": \"dim\", \"type\": \"int64_t\"}, {\"keyword\": \"descending\", \"type\": \"bool\"}], \"host\": \"flag_gems.sort_stable\", \"op\": \"aten::sort.stable\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> SortStableKernelPython(const at::Tensor & self, ::std::optional<bool> stable, int64_t dim, bool descending) {
+  if (!self.is_contiguous()) {
+    auto [values, indices] = at::native::call_fallback_fn<&cpu_fallback, at::_ops::sort_stable>::call(self, stable, dim, descending);
+    const auto strides = self.is_non_overlapping_and_dense() ? self.strides().vec() : at::infer_dense_strides(self.sizes(), self.strides());
+    auto restore_layout = [&](const at::Tensor& tensor) {
+      if (tensor.strides().equals(strides)) return tensor;
+      auto result = at::empty_strided(tensor.sizes(), strides, tensor.options());
+      result.copy_(tensor);
+      return result;
+    };
+    return {restore_layout(values), restore_layout(indices)};
+  }
   auto result = SortStableFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.sort_stable", {self}, {PyKwarg{"stable", stable}, PyKwarg{"dim", dim}, PyKwarg{"descending", descending}}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<bool>&>(stable), static_cast<const int64_t&>(dim), static_cast<const bool&>(descending));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
