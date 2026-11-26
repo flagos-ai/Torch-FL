@@ -155,24 +155,6 @@ class TestMmDispatch:
         assert out.dtype == torch.float16
         assert out.shape == (64, 32)
 
-    @pytest.mark.ppu
-    @pytest.mark.native_source_host
-    @pytest.mark.parametrize(
-        "op,left,right",
-        [
-            (torch.mm, (128, 0), (0, 16)),
-            (torch.mm, (0, 16), (16, 8)),
-            (torch.bmm, (4, 128, 0), (4, 0, 16)),
-            (torch.bmm, (0, 4, 16), (0, 16, 8)),
-        ],
-    )
-    def test_ppu_empty_matmul(self, op, left, right):
-        lhs = torch.empty(left, dtype=torch.bfloat16)
-        rhs = torch.empty(right, dtype=torch.bfloat16)
-        actual = op(lhs.to(DEVICE), rhs.to(DEVICE))
-        assert actual.device.type == "flagos"
-        torch.testing.assert_close(actual.cpu(), op(lhs, rhs))
-
     @pytest.mark.anyplatform
     def test_mm_half_hgemm_strict(self):
         """

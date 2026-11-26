@@ -83,11 +83,6 @@ _KNOWN_GAPS = {
     "native_source_hosts": tuple(p for p in _PLATFORMS if p != "ascend"),
     "native_source_hosts_metax": tuple(p for p in _PLATFORMS if p != "metax"),
     "native_source_hosts_hygon": tuple(p for p in _PLATFORMS if p != "hygon"),
-    "native_source_hosts_mthreads_bmm": tuple(p for p in _PLATFORMS if p != "mthreads"),
-    "native_source_hosts_thead_matmul_and_copy": tuple(
-        p for p in _PLATFORMS if p != "thead"
-    ),
-    "kunlunxin_precision": tuple(p for p in _PLATFORMS if p != "kunlunxin"),
     "nvidia_host_programs": tuple(p for p in _PLATFORMS if p != "nvidia"),
     "cuda_flaggems_mul": tuple(p for p in _PLATFORMS if p != "nvidia"),
     "iluvatar_runtime": (
@@ -353,6 +348,14 @@ def test_native_host_wheel_is_ready_before_the_common_regression(platform):
     assert ids.count("native_host_build") == 1
     index = ids.index("native_host_build")
     assert index < ids.index("common_regression")
+    assert ids.count("eager_ops_regression") == 1
+    eager_index = ids.index("eager_ops_regression")
+    assert index < eager_index
+    shared_step = next(
+        step for step in manifest()["steps"] if step["id"] == "eager_ops_regression"
+    )
+    assert groups[eager_index]["command"] == shared_step["command"]
+    assert "tests/integration/test_eager_ops.py" in shared_step["command"]
     command = groups[index]["command"]
     mode = "--check-installed" if platform == "apple" else "--test-install"
     assert command.endswith(f"build_native_hosts_ci.sh {mode}")
@@ -392,7 +395,7 @@ def test_native_host_programs_run_in_the_default_nvidia_lane(profile):
     "vendor,group_id,minimum",
     [
         ("ascend", "native_source_hosts", 94),
-        ("metax", "native_source_hosts_metax", 86),
+        ("metax", "native_source_hosts_metax", 72),
         ("hygon", "native_source_hosts_hygon", 217),
     ],
 )

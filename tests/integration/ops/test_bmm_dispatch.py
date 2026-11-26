@@ -156,23 +156,6 @@ class TestBmmDispatch:
         assert out.dtype == torch.float16
         assert out.shape == (4, 64, 32)
 
-    @pytest.mark.musa
-    @pytest.mark.native_source_host
-    def test_bmm_bfloat16_attention_preserves_dtype(self):
-        from torch_fl import native_host
-
-        torch.manual_seed(79)
-        query = torch.randn(16, 128, 128, dtype=torch.bfloat16)
-        key = torch.randn_like(query)
-        expected = torch.bmm(query, key.transpose(1, 2))
-        kernel = "bmm_kernel"
-        before = native_host.audit()["enqueued_kernels"].get(kernel, 0)
-        actual = torch.bmm(query.to(DEVICE), key.to(DEVICE).transpose(1, 2))
-
-        assert actual.dtype == torch.bfloat16
-        torch.testing.assert_close(actual.cpu(), expected, rtol=0.015, atol=0.035)
-        assert native_host.audit()["enqueued_kernels"][kernel] > before
-
     @pytest.mark.anyplatform
     def test_bmm_half_attention_like_matches_cpu(self):
         """

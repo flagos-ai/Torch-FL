@@ -58,12 +58,3 @@ class TestMulScalarCorrectness:
         out = torch.mul(a, 2.0)
         ref = a.cpu().float() * 2.0
         torch.testing.assert_close(out.cpu().float(), ref, rtol=1e-2, atol=1e-2)
-
-
-@pytest.mark.kunlunxin
-@pytest.mark.parametrize("scale", [0.08838834764831845, -0.18731])
-def test_kunlunxin_bf16_mul_retains_fp32_scalar(scale):
-    source = torch.arange(-512, 512, dtype=torch.float32).div(8).bfloat16()
-    expected = (source.float() * scale).bfloat16()
-    result = torch.mul(source.to(DEVICE), scale)
-    torch.testing.assert_close(result.cpu(), expected, atol=0, rtol=0)

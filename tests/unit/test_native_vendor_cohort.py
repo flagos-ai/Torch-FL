@@ -144,20 +144,24 @@ def test_hcu_bundle_must_use_the_existing_dtk_builder(tmp_path):
         )
 
 
-def test_thead_bundle_checks_device_hashes_and_copies_published_flat_licenses(tmp_path):
-    policy = cohort.load_build_policy(ROOT).precision_policy("thead")
+@pytest.mark.parametrize("vendor", ["metax", "thead"])
+def test_device_only_cohort_bundles_gpu_libraries_and_flat_licenses(tmp_path, vendor):
+    policy = cohort.load_build_policy(ROOT).precision_policy(vendor)
     library = tmp_path / "torch/lib"
     library.mkdir(parents=True)
     (library.parent / "version.py").write_text(
         f"__version__ = {policy['vendor_torch']!r}\n"
         f"git_version = {policy['torch_git_version']!r}\n"
-        f"cuda = {policy['cuda']!r}\n"
+        f"cuda = {policy.get('cuda', '11.6')!r}\n"
     )
-    assert set(policy["libraries"]) == set(cohort.CUDA_DEVICE_LIBRARIES)
-    for name in policy["libraries"]:
+    expected_hashes = {}
+    for name in cohort.CUDA_DEVICE_LIBRARIES:
         asset = library / name
         asset.write_text(name)
-        policy["libraries"][name] = cohort.digest(asset)
+        expected_hashes[name] = cohort.digest(asset)
+    if "libraries" in policy:
+        assert policy["libraries"].keys() == expected_hashes.keys()
+        policy["libraries"] = expected_hashes
     for name in policy["host_headers"]:
         header = library.parent / "include" / name
         header.parent.mkdir(parents=True, exist_ok=True)
@@ -175,20 +179,24 @@ def test_thead_bundle_checks_device_hashes_and_copies_published_flat_licenses(tm
 
     record = cohort.describe(library, policy)
     assert record["requirements"] == []
-    assert record["git_version"] != policy["cpu_torch_git_version"]
+    assert record["git_version"] == policy["torch_git_version"]
     destination = tmp_path / "package"
-    assert cohort.bundle(record, destination) == policy["libraries"]
-    assert not (destination / "lib_thead").exists()
+    assert cohort.bundle(record, destination) == expected_hashes
+    assert not (destination / f"lib_{vendor}").exists()
     root = destination / "native_host/_generated"
-    assert {asset.name for asset in (root / "thead_vendor").iterdir()} == set(
-        policy["libraries"]
-    )
+    assert {
+        asset.name for asset in (root / f"{vendor}_vendor").iterdir()
+    } == expected_hashes.keys()
     assert {asset.name for asset in (root / "licenses").iterdir()} == {
         "vendor_torch_LICENSE",
         "vendor_torch_NOTICE",
     }
-    (library / "libtorch_cuda.so").write_text("different published bits")
-    with pytest.raises(ValueError, match="published T-Head device library changed"):
+    asset = library / "libtorch_cuda.so"
+    if "libraries" in policy:
+        asset.write_text("different published bits")
+    else:
+        asset.unlink()
+    with pytest.raises(ValueError, match="published"):
         cohort.describe(library, policy)
 
 

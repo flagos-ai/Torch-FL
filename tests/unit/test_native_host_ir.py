@@ -19,6 +19,7 @@ RUNTIME_FLAG = True
 INITIALIZED_WIDTH = int("11")
 RUNTIME_DEVICE = SimpleNamespace(name="vendor_device", vendor_name="test_vendor")
 PUBLISHED_GEMS = SimpleNamespace(device=RUNTIME_DEVICE.name)
+runtime = SimpleNamespace(device=RUNTIME_DEVICE)
 runtime_device = RUNTIME_DEVICE
 _DEVICE_NAME = runtime_device.name
 
@@ -107,6 +108,12 @@ def initialized_global_host(value):
 def arange_start(device=None):
     if device is None:
         device = device.name
+    return torch.empty([1], device=device)
+
+
+def arange_start_from_runtime(device=None):
+    if device is None:
+        device = runtime.device.name
     return torch.empty([1], device=device)
 
 
@@ -747,18 +754,26 @@ def test_device_index_preserves_unspecified_and_zero_indices(compiled_hosts, dev
     assert compiled_hosts.DeviceIndex(device) == device.index
 
 
-def test_metax_arange_defaults_to_the_native_factory_device(
-    compiled_hosts, monkeypatch
+@pytest.mark.parametrize(
+    "provider,function",
+    [
+        ("flag_gems.ops.arange", arange_start_from_runtime),
+        ("_ascend.ops.arange", arange_start_from_runtime),
+        ("_metax.ops.arange", arange_start),
+    ],
+)
+def test_arange_defaults_to_the_native_factory_device(
+    compiled_hosts, monkeypatch, provider, function
 ):
     package = sys.modules["test_native_host_compiler.frontend"]
-    provider = "_metax.ops.arange"
-    monkeypatch.setattr(arange_start, "__module__", provider)
+    monkeypatch.setattr(function, "__module__", provider)
+    monkeypatch.setattr(function, "__name__", "arange_start")
     hosts = SimpleNamespace(
         originals={provider: sys.modules[__name__]}, resolve=lambda value: value
     )
     compiler = package.Frontend(hosts, SimpleNamespace())
     source = compiler.source(
-        arange_start,
+        function,
         "def f(device: Optional[torch.device]=None) -> torch.Tensor: pass",
     )
     assert not compiler.fallback_functions, compiler.fallback_reasons

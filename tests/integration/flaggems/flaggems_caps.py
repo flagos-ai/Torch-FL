@@ -283,19 +283,22 @@ def conf_path() -> Path:
     return Path(torch_fl.backend_config_path())
 
 
-def load_routes() -> dict[str, str]:
-    """Every ``op -> backend`` route in the conf, as written (``none`` included).
-
-    Parsed the same way the C++ reader does: drop anything after ``#`` and split
-    the remainder on the first ``=``. The value is the raw conf backend, before
-    input-dtype clauses and the log-name mapping ``route_reason`` apply.
-    """
+def load_routes(dtype: str | None = None) -> dict[str, str]:
+    """Read the base routes or apply the clauses for the requested ATen dtype."""
     routes: dict[str, str] = {}
     with open(conf_path()) as f:
         for line in f:
             name, sep, value = line.split("#")[0].partition("=")
             if sep:
-                routes[name.strip()] = value.split(";", 1)[0].strip()
+                base, *clauses = value.split(";")
+                backend = base.strip()
+                if dtype is not None:
+                    for clause in clauses:
+                        types, _, override = clause.partition(":")
+                        if dtype in {item.strip() for item in types.split(",")}:
+                            backend = override.strip()
+                            break
+                routes[name.strip()] = backend
     return routes
 
 

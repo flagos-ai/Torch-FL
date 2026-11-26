@@ -130,12 +130,6 @@ def _native_vendor_precision_enabled() -> bool:
     return bool(getattr(_build_config, "NATIVE_VENDOR", False))
 
 
-def _kunlunxin_xblaslt_enabled() -> bool:
-    import torch
-
-    return torch._C._dispatch_has_kernel_for_dispatch_key("aten::linear", "PrivateUse1")
-
-
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
@@ -145,22 +139,6 @@ def pytest_collection_modifyitems(
         markers_to_skip += ("gcu",)
     flaggems_cpp_on = _flaggems_cpp_enabled()
     for item in items:
-        required_platform = next(
-            (
-                name
-                for name in ("kunlunxin", "tsingmicro")
-                if item.get_closest_marker(name)
-            ),
-            None,
-        )
-        if required_platform and platform != required_platform:
-            add_platform_skip(
-                item,
-                gate="platform_support",
-                detail=f"case requires the {required_platform} runtime",
-                reason=f"{required_platform} runtime contract",
-            )
-            continue
         # Legacy @metax cases assert the unbuilt handwritten mxcc operator
         # backend. Native-source-host cases instead exercise published FlagGems
         # kernels on the MetaX runtime and must reach their build-record gate.
@@ -185,15 +163,11 @@ def pytest_collection_modifyitems(
                     reason="Enflame native-host contract",
                 )
                 continue
-        nvidia_only = (
+        if (
             item.get_closest_marker("nvidia")
             or item.get_closest_marker("host_compiler")
-            or (
-                item.get_closest_marker("native_vendor_precision")
-                and not item.get_closest_marker("ppu")
-            )
-        )
-        if nvidia_only and platform != "cuda":
+            or item.get_closest_marker("native_vendor_precision")
+        ) and platform != "cuda":
             add_platform_skip(
                 item,
                 gate="platform_support",
@@ -206,27 +180,12 @@ def pytest_collection_modifyitems(
             "dcu",
             "metax",
             "ascend",
-            "musa",
-            "ppu",
-            "tsingmicro",
         }:
             add_platform_skip(
                 item,
                 gate="platform_support",
                 detail="case requires an admitted native-host backend",
                 reason="native-host backend contract",
-            )
-            continue
-        if (
-            item.get_closest_marker("native_source_host")
-            and item.get_closest_marker("ppu")
-            and platform != "ppu"
-        ):
-            add_platform_skip(
-                item,
-                gate="platform_support",
-                detail="case requires the T-Head native-host backend",
-                reason="T-Head native-host backend contract",
             )
             continue
         if (
@@ -249,17 +208,6 @@ def pytest_collection_modifyitems(
                 gate="build_record",
                 detail="wheel has no published native vendor precision module",
                 reason="native vendor precision build contract",
-            )
-            continue
-        if (
-            item.get_closest_marker("kunlunxin_xblaslt")
-            and not _kunlunxin_xblaslt_enabled()
-        ):
-            add_platform_skip(
-                item,
-                gate="build_record",
-                detail="wheel has no XBLAS linear SDK entry",
-                reason="Kunlunxin XBLAS linear contract",
             )
             continue
         if item.get_closest_marker("host_compiler") and not _host_compiler_enabled():
@@ -359,8 +307,6 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA platform")
     config.addinivalue_line("markers", "dcu: requires Hygon DCU platform")
     config.addinivalue_line("markers", "mps: requires Apple Silicon (Metal) platform")
-    config.addinivalue_line("markers", "kunlunxin: requires the Kunlunxin runtime")
-    config.addinivalue_line("markers", "kunlunxin_xblaslt: requires XBLAS linear")
     config.addinivalue_line(
         "markers", "soft_lowp: requires the DCU or MetaX software lowp path"
     )

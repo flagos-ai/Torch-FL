@@ -54,26 +54,29 @@ def test_build_stages_only_verified_device_artifacts(tmp_path):
         artifacts.bundle([source, different], tmp_path / "combined", "fatbin")
 
 
-def test_tsingmicro_bundle_merges_identical_kernels_from_separate_builds(tmp_path):
+@pytest.mark.parametrize(
+    "backend,extension", [("cuda", "cubin"), ("musa", "mubin"), ("txda", "so")]
+)
+def test_bundle_merges_identical_kernels_from_separate_builds(
+    tmp_path, backend, extension
+):
     key = "2" * 64
     builds = [tmp_path / name for name in ("first", "second")]
     for build in builds:
         group = build / "compile-key"
         group.mkdir(parents=True)
-        binary = group / "kernel.so"
+        binary = group / f"kernel.{extension}"
         binary.write_bytes(b"device binary")
-        (group / "kernel.json").write_text(
-            json.dumps(
-                {
-                    "hash": key,
-                    "target": {"backend": "txda", "arch": 1, "warp_size": 16},
-                    "kernel_path": str(binary),
-                    "shared": 0,
-                }
-            )
-        )
+        record = {
+            "hash": key,
+            "target": {"backend": backend, "arch": 1, "warp_size": 16},
+            "shared": 0,
+        }
+        if backend == "txda":
+            record["kernel_path"] = str(binary)
+        (group / "kernel.json").write_text(json.dumps(record))
     output = tmp_path / "bundle"
-    artifacts.bundle(builds, output, "so")
+    artifacts.bundle(builds, output, extension)
     records, _ = artifacts._read_index(output)
     assert list(records["artifacts"]) == [key]
 
@@ -82,7 +85,7 @@ def test_tsingmicro_bundle_merges_identical_kernels_from_separate_builds(tmp_pat
     payload["shared"] = 64
     metadata.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="Conflicting device artifacts"):
-        artifacts.bundle(builds, tmp_path / "conflict", "so")
+        artifacts.bundle(builds, tmp_path / "conflict", extension)
 
 
 def test_required_device_artifacts_load_without_compiler_fallback(
@@ -199,14 +202,29 @@ def test_wheel_loads_packaged_pointwise_bytecode_at_the_installed_source_path(tm
         installed.pointwise_module("uncovered")
 
 
-def test_pinned_legacy_cambricon_compiler_uses_its_published_key(monkeypatch):
-    monkeypatch.setattr("importlib.metadata.version", lambda _: "3.4.0+mlu2.1.1")
+@pytest.mark.parametrize(
+    "version,published",
+    [("3.5.0", True), ("3.4.0+mlu2.1.1", False), ("3.4.0", False)],
+)
+def test_device_specialization_uses_the_admitted_compiler_key(
+    monkeypatch, version, published
+):
+    monkeypatch.setattr("importlib.metadata.version", lambda _: version)
     compiler = SimpleNamespace(triton_key=lambda: "compiler")
     source = SimpleNamespace(hash=lambda: "source")
     backend = SimpleNamespace(hash=lambda: "backend")
     options = SimpleNamespace(hash=lambda: "options")
-    key = artifacts._specialization_key_function(compiler)
     env = {"Z": "2", "A": "1"}
-    assert key(source, backend, options, env) == (
-        "compiler-source-backend-options-[('A', '1'), ('Z', '2')]"
-    )
+    if published:
+        compiler.get_cache_key = lambda *args: "published key"
+        assert (
+            artifacts._specialization_key_function(compiler) is compiler.get_cache_key
+        )
+    elif version == "3.4.0+mlu2.1.1":
+        key = artifacts._specialization_key_function(compiler)
+        assert key(source, backend, options, env) == (
+            "compiler-source-backend-options-[('A', '1'), ('Z', '2')]"
+        )
+    else:
+        with pytest.raises(RuntimeError, match="device specialization key"):
+            artifacts._specialization_key_function(compiler)

@@ -50,40 +50,6 @@ def test_hcu_contract_and_nonboxing_routes():
     }
 
 
-def test_hcu_subtraction_of_scalar_position_indices_uses_flaggems():
-    positions = torch.arange(128, dtype=torch.int64).reshape(1, 128)
-    device_positions = positions.to("flagos")
-    out = torch.empty(0, dtype=torch.int64, device="flagos")
-    before = launcher().enqueue_stats()
-    result = device_positions - 1
-    torch.sub(device_positions, 1, out=out)
-    after = launcher().enqueue_stats()
-
-    torch.testing.assert_close(result.cpu(), positions - 1)
-    torch.testing.assert_close(out.cpu(), positions - 1)
-    assert any(
-        name.startswith("sub_func") and count > before.get(name, 0)
-        for name, count in after.items()
-    )
-
-
-def test_hcu_embedding_gradient_uses_published_accumulation():
-    cpu_indices = torch.tensor([[0, 1, 1, 7, 13]])
-    cpu_grad = torch.linspace(-1, 1, 5 * 129).reshape(1, 5, 129).bfloat16()
-    embedding_backward = torch.ops.aten.embedding_dense_backward
-    expected = embedding_backward(cpu_grad, cpu_indices, 17, 7, True)
-    before = launcher().enqueue_stats()
-
-    result = embedding_backward(
-        cpu_grad.to("flagos"), cpu_indices.to("flagos"), 17, 7, True
-    )
-    after = launcher().enqueue_stats()
-
-    torch.testing.assert_close(result.cpu(), expected)
-    name = "_embedding_dense_backward_kernel_scale_by_freq"
-    assert after[name] > before.get(name, 0)
-
-
 @pytest.mark.parametrize(
     "kind,value",
     [

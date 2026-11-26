@@ -210,9 +210,12 @@ def test_cohort_changes_fail_before_admission(policy, published, monkeypatch, ch
         variants.load(policy, sources)
 
 
-def test_published_vendor_source_accepts_only_a_verified_registration_alias(tmp_path):
-    module = "flag_gems.runtime.backend._tsingmicro.ops.argmax"
-    alias = "_tsingmicro.ops.argmax"
+@pytest.mark.parametrize("vendor", ["kunlunxin", "metax", "tsingmicro"])
+def test_published_vendor_source_accepts_only_a_verified_registration_alias(
+    tmp_path, vendor
+):
+    alias = f"_{vendor}.ops.argmax"
+    module = f"flag_gems.runtime.backend.{alias}"
     source = tmp_path.joinpath(*module.split(".")[1:]).with_suffix(".py")
     source.parent.mkdir(parents=True)
     source.write_text("def argmax(): pass\n")

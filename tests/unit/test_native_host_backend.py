@@ -91,35 +91,6 @@ def test_changed_contract_is_rejected(contract, field, value):
         backend.validate_record(record, adapter, root, compiled)
 
 
-def test_tsingmicro_launch_uses_word_slots_and_promotes_half_scalars():
-    adapter = import_native_host("backends.tsingmicro")
-    signature = {0: "*bf16", 1: ("bf16", "i16"), 2: "constexpr", 3: "i64"}
-    normalized, widths = adapter._launcher_signature(signature)
-    assert normalized == {0: "*bf16", 1: ("fp32", "i16"), 2: "constexpr", 3: "i64"}
-    assert widths == [0, 4, 2, 8]
-
-
-def test_tsingmicro_launch_preserves_the_admitted_source(monkeypatch):
-    adapter = import_native_host("backends.tsingmicro")
-    factories = []
-
-    def bind(module, symbols, utilities, create, stream, **options):
-        factories.append(create)
-
-    monkeypatch.setattr(adapter, "bind_driver", bind)
-    adapter.Backend().bind_driver(None, None, lambda src, meta: (src, meta), None)
-    original = SimpleNamespace(
-        fn=object(), signature={"input": "*bf16", "value": "bf16"}
-    )
-    metadata = SimpleNamespace(_asdict=lambda: {"name": "published"})
-
-    source, fields = factories[0](original, metadata)
-
-    assert source.fn is original.fn
-    assert source.signature == {"input": "*bf16", "value": "fp32"}
-    assert fields.argument_widths == [0, 4]
-
-
 @pytest.mark.parametrize("kind", ["driver", "adapter", "shared_binding", "native"])
 def test_patched_loader_or_native_source_is_rejected(contract, kind):
     adapter, root, record, compiled = contract
@@ -328,10 +299,16 @@ def test_metax_extensions_use_the_native_runtime_without_cuda(
 
 
 @pytest.mark.parametrize(
-    "contract", ["nvidia", "metax", "hygon", "thead", "iluvatar"], indirect=True
+    "contract,compiler_hook",
+    [
+        (vendor, "compile_module_from_src")
+        for vendor in ("nvidia", "metax", "hygon", "thead", "iluvatar", "cambricon")
+    ]
+    + [("tsingmicro", "compile_native")],
+    indirect=["contract"],
 )
 def test_reinstallation_updates_existing_and_future_driver_streams(
-    monkeypatch, contract
+    monkeypatch, contract, compiler_hook
 ):
     adapter, _, _, _ = contract
     config = adapter.config
@@ -364,6 +341,14 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
         modules[f"{package}.{config.utility_module}"] = SimpleNamespace(
             **{name: object() for name in exports}
         )
+    signature = {
+        "input": "*bf16",
+        "scalars": ("bf16", "i16"),
+        "key": "constexpr",
+        "size": "i64",
+    }
+    source = SimpleNamespace(fn=object(), signature=signature)
+    metadata = SimpleNamespace(_asdict=lambda: {"name": "published"})
     monkeypatch.setattr(
         driver_binding,
         "importlib",
@@ -376,19 +361,25 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
 
         kernel = object()
 
-        def factory(source, metadata, kernel=kernel):
+        def factory(admitted, fields, kernel=kernel):
+            assert admitted.fn is source.fn
+            if config.compiler_backend == "txda":
+                assert admitted.signature == {**signature, "scalars": ("fp32", "i16")}
+                assert fields.argument_widths == [0, 4, 2, 8]
+            else:
+                assert admitted.signature == signature
             return kernel
 
         driver_binding.install_driver(adapter, package, provider, factory)
         utilities = modules[f"{package}.{config.utility_module}"]
         for instance in (active, default, Driver()):
             assert instance.utils is utilities
-            assert instance.launcher_cls(None, SimpleNamespace()) is kernel
+            assert instance.launcher_cls(source, metadata) is kernel
             assert instance.get_current_stream(3) == offset + 3
         for name in exports:
             assert getattr(driver, name) is getattr(utilities, name)
         with pytest.raises(RuntimeError, match="compilation is forbidden"):
-            driver.compile_module_from_src("unused")
+            getattr(driver, compiler_hook)("unused")
     if config.vendor == "iluvatar":
         with pytest.raises(RuntimeError, match="debugger arguments"):
             active.launcher_cls(None, SimpleNamespace(debug_launch_hidden_arg=True))

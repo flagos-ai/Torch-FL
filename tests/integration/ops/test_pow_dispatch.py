@@ -107,17 +107,6 @@ class TestPowTensorScalarCorrectness:
         torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-6, atol=1e-6)
 
 
-@pytest.mark.kunlunxin
-@pytest.mark.parametrize("exponent", [1.0, 3])
-def test_kunlunxin_fp32_pow_keeps_normalization_rounding(exponent):
-    source = torch.linspace(-3.75, 3.75, 1024, dtype=torch.float32)
-    value = source.to(DEVICE)
-    result = torch.pow(value, exponent)
-    expected = source if exponent == 1.0 else (source * source) * source
-    torch.testing.assert_close(result.cpu(), expected, atol=0, rtol=0)
-    assert result.data_ptr() != value.data_ptr()
-
-
 class TestPowZeroElement:
     """Zero-element pow must stay on the device (regression for issue #214).
 

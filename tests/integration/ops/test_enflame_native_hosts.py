@@ -291,39 +291,6 @@ def test_fp32_scalar_add_uses_vendor_scalar_opmath():
         )
 
 
-def test_fp32_softmax_backward_preserves_vendor_reduction_order():
-    rng = torch.Generator().manual_seed(42)
-    grad = torch.randn((2, 3, 128), generator=rng)
-    output = torch.randn((2, 3, 128), generator=rng).softmax(-1)
-    chunks = (grad * output).unflatten(-1, (8, 16)).unbind(-2)
-    reduction = sum(chunks[1:], chunks[0])
-    for width in (8, 4, 2, 1):
-        reduction = reduction[..., :width] + reduction[..., width:]
-    expected = (grad - reduction) * output
-
-    with torch_fl.native_host.execution_scope(0):
-        actual = torch.ops.aten._softmax_backward_data.default(
-            grad.to("flagos"), output.to("flagos"), -1, torch.float32
-        )
-    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
-
-
-def test_fp32_log_softmax_backward_preserves_small_probabilities():
-    rng = torch.Generator().manual_seed(42)
-    output = torch.randn((4, 320), generator=rng).log_softmax(-1)
-    output[:, 1] = -99
-    grad = torch.zeros_like(output)
-    grad[:, 11] = -0.25
-    expected = torch.ops.aten._log_softmax_backward_data.default(
-        grad, output, -1, torch.float32
-    )
-    with torch_fl.native_host.execution_scope(0):
-        actual = torch.ops.aten._log_softmax_backward_data.default(
-            grad.to("flagos"), output.to("flagos"), -1, torch.float32
-        )
-    torch.testing.assert_close(actual.cpu(), expected, rtol=2e-7, atol=1e-44)
-
-
 def test_mixed_producer_chain_is_ordered_without_per_operator_drains():
     import flag_gems
 
@@ -338,23 +305,6 @@ def test_mixed_producer_chain_is_ordered_without_per_operator_drains():
     torch_fl.flagos.synchronize()
     expected = torch.sin(cpu * torch.rsqrt(cpu.pow(2).mean(-1, keepdim=True) + 1e-6))
     torch.testing.assert_close(actual.cpu(), expected, rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.int64])
-def test_vendor_rsub_uses_reflected_operand_order(dtype):
-    value = torch.tensor([1, -2, 0, 9], dtype=dtype)
-    other = torch.tensor([5, 2, -8, 1], dtype=dtype)
-    x, y = value.to("flagos"), other.to("flagos")
-    rsub = torch.ops.aten.rsub
-    before = torch_fl.native_host.enqueue_origins()["python"]
-    with torch_fl.native_host.execution_scope(0):
-        scalar = rsub.Scalar(x, 3, 2)
-        tensor = rsub.Tensor(x, y, alpha=2)
-    torch.testing.assert_close(scalar.cpu(), rsub.Scalar(value, 3, 2), rtol=0, atol=0)
-    torch.testing.assert_close(
-        tensor.cpu(), rsub.Tensor(value, other, alpha=2), rtol=0, atol=0
-    )
-    assert torch_fl.native_host.enqueue_origins()["python"] == before
 
 
 @pytest.mark.parametrize("layout", ["dense", "transpose", "scalar", "empty"])

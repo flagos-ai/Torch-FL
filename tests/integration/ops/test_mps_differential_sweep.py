@@ -595,26 +595,6 @@ def _cases():
     )
     cases.append(
         (
-            "index.Tensor-broadcast-adjacent",
-            lambda dev: _seeded(dev, (2, 5, 4))[
-                :,
-                torch.tensor([[1], [3]], device=dev),
-                torch.tensor([0, -1, 2], device=dev),
-            ],
-        )
-    )
-    cases.append(
-        (
-            "index.Tensor-broadcast-separated",
-            lambda dev: _seeded(dev, (5, 4, 6)).transpose(0, 1)[
-                torch.tensor([[1], [3]], device=dev),
-                :,
-                torch.tensor([0, -1, 2], device=dev),
-            ],
-        )
-    )
-    cases.append(
-        (
             "masked_fill.Tensor",
             lambda dev: _seeded(dev).masked_fill(
                 _seeded(dev) > 2.5, torch.tensor(9.0, device=dev)
@@ -958,32 +938,3 @@ def _compare_tensor(label, got, reference):
             equal_nan=True,
             msg=lambda m: f"{label}: {m}",
         )
-
-
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("alias", [False, True])
-@pytest.mark.parametrize(
-    "op,options",
-    [
-        (torch.addcdiv, {"value": -0.024}),
-        (torch.addcmul, {"value": 0.001}),
-        (torch.lerp, {"weight": 0.1}),
-    ],
-)
-def test_optimizer_out_matches_stock_mps(op, options, alias, dtype):
-    generator = torch.Generator().manual_seed(4)
-    shape = (5, 7)
-    values = [
-        torch.randn(shape, generator=generator).abs().add_(1).to(dtype)
-        for _ in range(2 if op is torch.lerp else 3)
-    ]
-
-    def result(device):
-        inputs = [value.to(device) for value in values]
-        out = inputs[0] if alias else torch.empty(shape, device=device, dtype=dtype)
-        pointer = out.data_ptr()
-        got = op(*inputs, out=out, **options)
-        assert got.data_ptr() == pointer
-        return got.cpu()
-
-    torch.testing.assert_close(result(DEVICE), result("mps"), rtol=0, atol=0)

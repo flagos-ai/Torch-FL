@@ -1756,7 +1756,7 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # operands' own, which the dtype gate above accepted nothing else for.
 T_BINARY = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param}) {{
-  // Evaluate the reference's broadcast and alpha checks before the graph. They
+{scalar_tensor_dispatch}  // Evaluate the reference's broadcast and alpha checks before the graph. They
   // are also needed when the call takes the CPU round-trip below.
   std::vector<int64_t> out_shape;
   try {{
@@ -1797,6 +1797,23 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param}
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+T_MUL_SCALAR_TENSOR_DISPATCH = """\
+  // A CPU scalar contributes its value while the tensor owns the output device.
+  if (self.device() != other.device()) {
+    const auto& scalar = self.is_cpu() ? self : other;
+    const auto& tensor = self.is_cpu() ? other : self;
+    const auto dtype = tensor.scalar_type();
+    if (scalar.is_cpu() && scalar.dim() == 0 &&
+        tensor.device().type() == at::kPrivateUse1 &&
+        at::result_type(self, other) == dtype) {
+      // ATen keeps the full scalar in the FP32 multiply for reduced dtypes.
+      const auto compute = (dtype == at::kHalf || dtype == at::kBFloat16)
+          ? at::kFloat : dtype;
+      return at::mul(tensor.to(compute), scalar.item()).to(dtype);
+    }
+  }
 """
 
 OPTIMIZER_BINARY_OUT = {
@@ -6810,6 +6827,9 @@ def render():
                 alpha_param=alpha_param,
                 alpha_arg=alpha_arg,
                 alpha_operand=alpha_operand,
+                scalar_tensor_dispatch=(
+                    T_MUL_SCALAR_TENSOR_DISPATCH if op == "mul.Tensor" else ""
+                ),
                 finish=FINISH.get(op, ""),
                 largest="true" if op in ("argmax", "max.dim") else "false",
                 key_parts=KEY_PARTS[op],

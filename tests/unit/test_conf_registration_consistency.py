@@ -659,6 +659,21 @@ def test_flaggems_conformance_counts_match_committed_confs(monkeypatch):
     assert measured == caps.EXPECTED_FLAGGEMS_ROUTES
 
 
+@pytest.mark.parametrize(
+    "dtype,expected",
+    [(None, "none"), ("Float", "flaggems"), ("BFloat16", "flaggems"), ("Long", "none")],
+)
+def test_device_capabilities_include_configured_dtype_routes(
+    tmp_path, monkeypatch, dtype, expected
+):
+    from tests.integration.flaggems import flaggems_caps
+
+    conf = tmp_path / "backend.conf"
+    conf.write_text("sum.dim_IntList = none; Float, BFloat16:flaggems # typed route\n")
+    monkeypatch.setattr(flaggems_caps, "conf_path", lambda: conf)
+    assert flaggems_caps.load_routes(dtype) == {"sum.dim_IntList": expected}
+
+
 @pytest.mark.anyplatform
 def test_conf_route_counts_are_stable():
     """Snapshot of the route counts per conf.  A change here means an op

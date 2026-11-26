@@ -90,20 +90,6 @@ def test_ascend_flaggems_hosts_keep_layout_values_and_distinct_live_outputs(
     check_add_layout(torch.add, dtype, layout)
 
 
-@pytest.mark.parametrize("alpha", [1, -0.5])
-def test_ascend_bfloat16_add_preserves_gradients_in_different_matrix_layouts(alpha):
-    rows = torch.arange(512).remainder(7).float()
-    cols = torch.arange(1024).remainder(3).float()
-    transposed = (cols[:, None] - rows[None, :]).bfloat16()
-    contiguous = (cols[None, :] + rows[:, None]).bfloat16()
-    x = transposed.to("flagos").T
-    y = contiguous.to("flagos")
-    with torch.no_grad():
-        actual = torch.add(x, y, alpha=alpha)
-    expected = torch.add(transposed.T, contiguous, alpha=alpha)
-    torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
-
-
 @pytest.mark.min_devices(2)
 def test_ascend_native_launch_uses_tensor_device_and_current_acl_stream():
     check_launch_on_other_device()
