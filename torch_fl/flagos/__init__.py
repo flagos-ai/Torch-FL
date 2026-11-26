@@ -401,6 +401,39 @@ def _real_current_stream(device=None):
     return _streams.current_stream(device)
 
 
+def _install_record_stream_compat() -> None:
+    """Allow ``Tensor.record_stream`` on ``flagos`` tensors to accept FlagOS streams.
+
+    FSDP calls ``tensor.record_stream(device_handle.current_stream())`` in
+    ``_post_forward`` and ``tensor.record_stream(state._post_backward_stream)``
+    in ``_post_backward_hook``. On CPU-torch and native vendor builds where
+    ``current_stream()`` or ``flagos.Stream()`` returns a Python stream facade
+    rather than a ``torch.Stream`` subclass, C++ ``THPVariable_record_stream``
+    rejects the argument with ``RuntimeError: unknown parameter type`` before
+    reaching ``WrapperRecordStream``. Coercing FlagOS stream wrappers into a
+    borrowed ``PrivateUse1`` ``torch.Stream`` bridges the C++ check while
+    preserving ``unknown parameter type`` for invalid arguments.
+    """
+    current = torch.Tensor.record_stream
+    if getattr(current, "_flagos_orig", None) is not None:
+        return
+
+    @torch._dynamo.disable
+    def _record_stream(self, stream):
+        if self.device.type in ("flagos", "privateuseone"):
+            fallback_idx = 0 if self.device.index is None else int(self.device.index)
+            coerced = _streams.coerce_privateuse1_stream(stream, fallback_idx)
+            if coerced is not None:
+                return current(self, coerced)
+        return current(self, stream)
+
+    _record_stream._flagos_orig = current  # type: ignore[attr-defined]
+    torch.Tensor.record_stream = _record_stream  # type: ignore[method-assign]
+
+
+_install_record_stream_compat()
+
+
 class _HostTimedEvent:
     """Host-clock event for backends with no CUDA event under the hood.
 

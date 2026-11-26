@@ -14,6 +14,7 @@
 #include <ATen/ops/bitwise_and.h>
 #include <ATen/ops/bitwise_right_shift.h>
 #include <ATen/ops/add.h>
+#include <ATen/ops/addmm.h>
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/eq.h>
@@ -250,9 +251,14 @@ bool DecodedPairCanRoute(const at::Tensor& self, const at::Tensor& mat2) {
   return !IsPackedFp4(self.scalar_type()) && !IsPackedFp4(mat2.scalar_type());
 }
 
-void CheckMatrixInputs(const at::Tensor& self, const at::Tensor& mat2) {
-  TORCH_CHECK(HasLowpInput(self) || HasLowpInput(mat2),
-              "soft-lowp matrix kernel requires a low-precision input");
+void CheckMatrixInputs(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    const at::Tensor* bias = nullptr) {
+  TORCH_CHECK(
+      HasLowpInput(self) || HasLowpInput(mat2) ||
+          (bias != nullptr && HasLowpInput(*bias)),
+      "soft-lowp matrix kernel requires a low-precision input");
   CheckDevice(self, "matrix operation");
   CheckDevice(mat2, "matrix operation");
   TORCH_CHECK(self.is_contiguous() && mat2.is_contiguous(),
@@ -937,8 +943,38 @@ at::Tensor RunMatrix(
   const bool has_bias = bias.defined();
   const char* const key = variant;
   const auto& entry = *LookupVariant(variant);
-  if (IsOrdinaryMatrixPair(self, mat2)) {
+  if (IsOrdinaryMatrixPair(self, mat2) && !HasLowpInput(bias)) {
     const auto output_dtype = DefaultOutputDtype(self, out_dtype);
+    if (entry.shape == DecodedShape::kAddmm) {
+      TORCH_CHECK(has_bias, "soft-lowp ordinary addmm needs its bias");
+      static thread_local bool in_ordinary_addmm = false;
+      at::Tensor result;
+      if (!in_ordinary_addmm && AnswerKeyHasRoute("addmm")) {
+        struct OrdinaryAddmmGuard {
+          bool previous;
+          OrdinaryAddmmGuard() : previous(in_ordinary_addmm) {
+            in_ordinary_addmm = true;
+          }
+          ~OrdinaryAddmmGuard() {
+            in_ordinary_addmm = previous;
+          }
+        } reentrancy_guard;
+        DispatchSuppressionGuard suppression_guard;
+        result = at::addmm(bias, self, mat2, beta, alpha);
+      } else {
+        auto mm_out = ComputeOrdinary(false, self, mat2);
+        if (beta.toComplexDouble() == 0.0) {
+          result = alpha.toComplexDouble() == 1.0 ? mm_out
+                                                  : at::mul(mm_out, alpha);
+        } else {
+          auto scaled_bias =
+              beta.toComplexDouble() == 1.0 ? bias : at::mul(bias, beta);
+          result = at::add(scaled_bias, mm_out, alpha);
+        }
+      }
+      return output_dtype == result.scalar_type() ? result
+                                                  : result.to(output_dtype);
+    }
     // Test the call's route before borrowing the plain matrix kernel. A
     // fallback wrapper takes the local computation path to avoid recursion.
     const char* plain_key = entry.batch ? "bmm" : "mm";
@@ -965,7 +1001,7 @@ at::Tensor RunMatrix(
       "soft-lowp ",
       variant,
       " cannot answer a new tensor");
-  CheckMatrixInputs(self, mat2);
+  CheckMatrixInputs(self, mat2, has_bias ? &bias : nullptr);
   if (has_bias) {
     CheckDevice(bias, "addmm");
   }
@@ -1003,7 +1039,7 @@ at::Tensor& RunMatrixOut(
     const at::Scalar& alpha,
     at::Tensor& out) {
   const bool has_bias = bias.defined();
-  const bool ordinary = IsOrdinaryMatrixPair(self, mat2);
+  const bool ordinary = IsOrdinaryMatrixPair(self, mat2) && !HasLowpInput(bias);
   const auto& entry = *LookupVariant(variant);
   // The answer the caller asked of this form, before the pair is looked at:
   // `out`'s own dtype when the form does not take one, the .dtype form's when
@@ -1021,7 +1057,7 @@ at::Tensor& RunMatrixOut(
     // be one: a rank-3 addmm does not exist, and a non-contiguous `out` is
     // computed and copied below (`out.copy_` takes any layout).
     if (out.dim() == rank && out.is_contiguous()) {
-      CheckMatrixInputs(self, mat2);
+      CheckMatrixInputs(self, mat2, has_bias ? &bias : nullptr);
       if (has_bias) {
         CheckDevice(bias, "addmm");
       }
@@ -1127,7 +1163,7 @@ at::Tensor AddmmDtype(
   // computed here rather than routed (the variant table has no entry for that
   // key, and dispatching by it would be "backend not registered"). An ordinary
   // pair keeps its fused call, the way it always has.
-  if (IsOrdinaryMatrixPair(mat1, mat2)) {
+  if (IsOrdinaryMatrixPair(mat1, mat2) && !HasLowpInput(self)) {
     // `addmm.dtype` has no variant entry, so its route is the key the
     // dispatcher answers for, asked of it by name.
     const auto output_dtype = DefaultOutputDtype(mat1, out_dtype);

@@ -191,6 +191,10 @@ class _DcuDeviceProperties:
     warp_size: int = 64
     L2_cache_size: int = 0
     max_threads_per_multi_processor: int = 2560
+    # Inductor's coordinate-descent tuner (`get_max_numwarps`) reads this off
+    # `torch.cuda.get_device_properties()` under `mode="max-autotune"`. Every
+    # Hygon/ROCm wavefront architecture caps one workgroup at 1024 threads.
+    max_threads_per_block: int = 1024
     regs_per_multiprocessor: int = 196608
     shared_memory_per_block: int = 65536
     shared_memory_per_block_optin: int = 65536

@@ -388,3 +388,84 @@ class TestDcuLauncherDeviceInterfaceRegistration:
             assert "cuda" not in registered
         else:
             assert registered["cuda"] is di.FlagOSDeviceInterface
+
+
+class TestFlagosRecordStreamCompat:
+    def test_coerce_privateuse1_stream_unwraps_vendor_and_flagos_facades(
+        self, monkeypatch
+    ):
+        _ensure_flagos_backend_renamed()
+        streams = pytest.importorskip("torch_fl.flagos._streams")
+        streams._privateuse1_device_type.cache_clear()
+        monkeypatch.setattr(
+            torch.accelerator,
+            "current_stream",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("Ambiguous accelerator on dual-backend build")
+            ),
+        )
+
+        class _FakeVendorStream:
+            def __init__(self, handle, device_index=1):
+                self.handle = handle
+                self.device_index = device_index
+
+            def synchronize(self):
+                pass
+
+        vendor_stream = _FakeVendorStream(0x7F00ABCD, device_index=1)
+        coerced = streams.coerce_privateuse1_stream(
+            vendor_stream, fallback_device_index=0
+        )
+        assert isinstance(coerced, torch.Stream)
+        assert coerced.stream_id == 0x7F00ABCD
+        assert coerced.device_index == 1
+        assert coerced.device.type in ("flagos", "privateuseone")
+
+        facade = types.SimpleNamespace(_stream=vendor_stream)
+        coerced_facade = streams.coerce_privateuse1_stream(
+            facade, fallback_device_index=0
+        )
+        assert isinstance(coerced_facade, torch.Stream)
+        assert coerced_facade.stream_id == 0x7F00ABCD
+        assert coerced_facade.device_index == 1
+
+        null_handle_stream = _FakeVendorStream(None, device_index=2)
+        coerced_null = streams.coerce_privateuse1_stream(
+            null_handle_stream, fallback_device_index=0
+        )
+        assert isinstance(coerced_null, torch.Stream)
+        assert coerced_null.stream_id == 0
+        assert coerced_null.device_index == 2
+
+    def test_coerce_privateuse1_stream_rejects_non_streams(self):
+        streams = pytest.importorskip("torch_fl.flagos._streams")
+        for invalid in ("not_a_stream", 123, None, object(), torch.ones(2)):
+            assert streams.coerce_privateuse1_stream(invalid, 0) is None
+        cpu_tensor = torch.ones(2)
+        with pytest.raises(RuntimeError, match="unknown parameter type"):
+            cpu_tensor.record_stream("not_a_stream")  # type: ignore[arg-type]
+
+    def test_record_stream_is_dynamo_disabled_inside_no_dispatch(self):
+        pytest.importorskip("torch_fl.flagos")
+        assert getattr(torch.Tensor.record_stream, "_torchdynamo_disable", False)
+
+        # Reproduce FSDP's `_no_dispatch_record_stream` called after a graph
+        # break while Dynamo's C eval_frame callback remains active on thread.
+        def fsdp_like_step(x):
+            y = x * 2.0
+            torch._dynamo.graph_break()
+            with torch.utils._mode_utils.no_dispatch():
+                with pytest.raises(RuntimeError, match="unknown parameter type"):
+                    y.record_stream("not_a_stream")  # type: ignore[arg-type]
+            return y + 1.0
+
+        torch._dynamo.reset()
+        compiled = torch.compile(fsdp_like_step, backend="eager")
+        inp = torch.ones(4)
+        torch.testing.assert_close(compiled(inp), inp * 2.0 + 1.0)
+
+    def test_dcu_device_properties_exposes_max_threads_per_block(self):
+        dcu = _load_dcu_compat_isolated()
+        props = dcu._DcuDeviceProperties(name="Hygon DCU 0")
+        assert props.max_threads_per_block == 1024

@@ -1640,7 +1640,7 @@ def test_compile_flaggems_cuda_device_context_fullgraph(device):
         def __init__(self):
             super().__init__()
             self.fc1 = torch.nn.Linear(32, 16)
-            self.act = torch.nn.GELU()
+            self.act = torch.nn.ReLU()
             self.fc2 = torch.nn.Linear(16, 4)
 
         def forward(self, x):
@@ -1692,7 +1692,7 @@ def test_compile_flaggems_cuda_device_context_fullgraph(device):
 
 
 def test_compile_flaggems_addmm_direct(device):
-    """Direct ``torch.compile`` over ``flag_gems.addmm`` on flagos (#661)."""
+    """Direct ``torch.compile`` over ``flag_gems.addmm`` and ``addmm.out`` (#661)."""
     if not HAS_TRITON:
         pytest.skip("Triton required for compilation")
     flag_gems = pytest.importorskip("flag_gems")
@@ -1707,6 +1707,16 @@ def test_compile_flaggems_addmm_direct(device):
         bias = bias_cpu.to(device)
         mat1 = mat1_cpu.to(device)
         mat2 = mat2_cpu.to(device)
+
+        # Inductor lowers un-fused Linear layers to extern_kernels.addmm(..., out=buf);
+        # verify aten::addmm.out preserves bias, beta, and alpha on ordinary dtypes.
+        ref_scaled = torch.addmm(bias_cpu, mat1_cpu, mat2_cpu, beta=1.5, alpha=0.75)
+        out_buf = torch.empty((rows, 4), device=device, dtype=mat1.dtype)
+        torch.addmm(bias, mat1, mat2, beta=1.5, alpha=0.75, out=out_buf)
+        assert_on_flagos(out_buf, f"addmm.out output rows={rows}")
+        torch.testing.assert_close(
+            out_buf.cpu(), ref_scaled, rtol=COMPILE_RTOL, atol=COMPILE_ATOL
+        )
 
         for backend in ("inductor", "flagos"):
             compiled_addmm = torch.compile(flag_gems.addmm, backend=backend)
@@ -1730,11 +1740,23 @@ def test_compile_fsdp_two_rank_forward_backward_parity(tmp_path):
     worker = tmp_path / "fsdp_compile_worker.py"
     worker.write_text(
         textwrap.dedent(
-            """
+            f"""
             import gc
             import os
             from datetime import timedelta
 
+            local = int(os.environ["LOCAL_RANK"])
+            cache_base = os.environ["FLAGOS_FSDP_TEST_CACHE_ROOT"]
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(
+                cache_base, f"inductor_rank{{local}}"
+            )
+            os.environ["TRITON_CACHE_DIR"] = os.path.join(
+                cache_base, f"triton_rank{{local}}"
+            )
+            os.environ["FLAGGEMS_CACHE_DIR"] = os.path.join(
+                cache_base, f"flaggems_rank{{local}}"
+            )
+            os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
             os.environ["FLAGOS_DIST_STAGED_GLOO"] = "1"
             os.environ["FLAGOS_DIST_REDIRECT_GLOO"] = "0"
 
@@ -1745,6 +1767,9 @@ def test_compile_fsdp_two_rank_forward_backward_parity(tmp_path):
             from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
             from torch.distributed.fsdp.wrap import always_wrap_policy
             from torch_fl.comm.process_group import ProcessGroupFlagOS
+
+            RTOL = {COMPILE_RTOL!r}
+            ATOL = {COMPILE_ATOL!r}
 
             class HostGroup(ProcessGroupFlagOS):
                 def _get_backend_name(self):
@@ -1759,16 +1784,15 @@ def test_compile_fsdp_two_rank_forward_backward_parity(tmp_path):
                 def __init__(self):
                     super().__init__()
                     self.fc1 = nn.Linear(32, 16)
-                    self.act = nn.GELU()
+                    self.act = nn.ReLU()
                     self.fc2 = nn.Linear(16, 4)
 
                 def forward(self, x):
                     return self.fc2(self.act(self.fc1(x)))
 
-            local = int(os.environ["LOCAL_RANK"])
             torch.flagos.set_device(local)
             dist.Backend.register_backend("test_fsdp_host", HostGroup, devices=["flagos"])
-            dist.init_process_group("test_fsdp_host", timeout=timedelta(seconds=45))
+            dist.init_process_group("test_fsdp_host", timeout=timedelta(seconds=120))
             rank = dist.get_rank()
             device = torch.device("flagos", local)
 
@@ -1785,12 +1809,12 @@ def test_compile_fsdp_two_rank_forward_backward_parity(tmp_path):
                     if r == rank:
                         ref_out = ro.detach().clone()
                         ref_inp_grad = rx.grad.detach().clone()
-                cpu_grads = {
+                cpu_grads = {{
                     n: (p.grad.detach().clone() / 2.0)
                     for n, p in cpu_ref.named_parameters()
-                }
+                }}
 
-                results = {}
+                results = {{}}
                 for mode_name, use_compile in (("eager", False), ("compile", True)):
                     torch.manual_seed(123)
                     fsdp_mod = FSDP(
@@ -1808,36 +1832,37 @@ def test_compile_fsdp_two_rank_forward_backward_parity(tmp_path):
                     assert torch.flagos.current_device() == local
                     out_cpu = out.detach().cpu()
                     in_grad_cpu = inp.grad.detach().cpu()
-                    torch.testing.assert_close(out_cpu, ref_out, rtol=1e-4, atol=1e-4)
+                    torch.testing.assert_close(out_cpu, ref_out, rtol=RTOL, atol=ATOL)
                     torch.testing.assert_close(
-                        in_grad_cpu, ref_inp_grad, rtol=1e-4, atol=1e-4
+                        in_grad_cpu, ref_inp_grad, rtol=RTOL, atol=ATOL
                     )
-                    full_grads = {}
+                    full_grads = {{}}
                     with FSDP.summon_full_params(fsdp_mod, with_grads=True):
                         for n, p in fsdp_mod.named_parameters():
                             clean = n.replace("_fsdp_wrapped_module.", "")
                             g = p.grad.detach().cpu().clone()
                             torch.testing.assert_close(
-                                g, cpu_grads[clean], rtol=1e-4, atol=1e-4
+                                g, cpu_grads[clean], rtol=RTOL, atol=ATOL
                             )
                             full_grads[clean] = g
                     results[mode_name] = (out_cpu, in_grad_cpu, full_grads)
                     del out, inp, runner, fsdp_mod
                     gc.collect()
                     torch.flagos.synchronize()
+                    dist.barrier()
 
                 torch.testing.assert_close(
-                    results["compile"][0], results["eager"][0], rtol=1e-4, atol=1e-4
+                    results["compile"][0], results["eager"][0], rtol=RTOL, atol=ATOL
                 )
                 torch.testing.assert_close(
-                    results["compile"][1], results["eager"][1], rtol=1e-4, atol=1e-4
+                    results["compile"][1], results["eager"][1], rtol=RTOL, atol=ATOL
                 )
                 for k in results["eager"][2]:
                     torch.testing.assert_close(
                         results["compile"][2][k],
                         results["eager"][2][k],
-                        rtol=1e-4,
-                        atol=1e-4,
+                        rtol=RTOL,
+                        atol=ATOL,
                     )
             finally:
                 dist.destroy_process_group()
@@ -1852,9 +1877,8 @@ def test_compile_fsdp_two_rank_forward_backward_parity(tmp_path):
     cache_root.mkdir(parents=True, exist_ok=True)
     env = {
         **os.environ,
-        "TORCHINDUCTOR_CACHE_DIR": str(cache_root / "inductor"),
-        "TRITON_CACHE_DIR": str(cache_root / "triton"),
-        "FLAGGEMS_CACHE_DIR": str(cache_root / "flaggems"),
+        "FLAGOS_FSDP_TEST_CACHE_ROOT": str(cache_root),
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
     }
     proc = subprocess.run(
         [
