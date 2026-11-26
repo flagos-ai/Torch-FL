@@ -308,27 +308,86 @@ class _CudaDefaultGenerators:
 
 
 class _DcuStreamShim:
-    """Minimal stream object exposing ``.cuda_stream`` for triton-hcu.
+    """Stream stand-in exposing the ``torch.cuda.Stream`` surface on DCU.
 
-    Native builds read the device runtime's queue. Boxing uses the null queue.
-    Triton's GPUDriver can read the handle here or through
-    ``torch._C._cuda_getCurrentRawStream(idx)``.
+    Native builds read the device runtime's queue; boxing uses the null queue.
+    Triton's GPUDriver reads ``.cuda_stream`` or
+    ``torch._C._cuda_getCurrentRawStream(idx)``, while ``torch.cuda.stream(...)``
+    (``StreamContext``) and ``torch_fl.flagos.Stream`` read ``.device``,
+    ``.stream_id``, ``.handle``, ``.device_type``, and the event/wait methods.
     """
 
     def __init__(self, index=0, handle=0):
         self.cuda_stream = handle
         self.device_index = index
 
+    @property
+    def device(self):
+        import torch
+
+        return torch.device("cuda", self.device_index)
+
+    @property
+    def stream_id(self):
+        return self.cuda_stream
+
+    @property
+    def handle(self):
+        return self.cuda_stream
+
+    @property
+    def device_type(self):
+        # DeviceType::CUDA, matching torch.cuda.Stream on CUDA-ABI shims.
+        return 1
+
     def synchronize(self):
         import torch
 
-        torch.flagos.synchronize()
+        if self.cuda_stream != 0:
+            hip = _load_hip()
+            if hip is not None:
+                try:
+                    if hip.hipStreamSynchronize(ctypes.c_void_p(self.cuda_stream)) == 0:
+                        return
+                except (AttributeError, OSError):
+                    pass
+        torch.flagos.synchronize(self.device_index)
+
+    def record_event(self, event=None):
+        import torch
+
+        if event is None:
+            event = torch.cuda.Event()
+        event.record(self)
+        return event
+
+    def wait_event(self, event):
+        if event is None:
+            return None
+        return event.wait(self)
 
     def wait_stream(self, other):
-        return None
+        if other is None:
+            return None
+        return self.wait_event(other.record_event())
 
     def query(self):
+        if self.cuda_stream != 0:
+            hip = _load_hip()
+            if hip is not None:
+                try:
+                    return hip.hipStreamQuery(ctypes.c_void_p(self.cuda_stream)) == 0
+                except (AttributeError, OSError):
+                    pass
         return True
+
+    def __eq__(self, other):
+        if not hasattr(other, "cuda_stream") or not hasattr(other, "device_index"):
+            return NotImplemented
+        return (
+            self.device_index == other.device_index
+            and self.cuda_stream == other.cuda_stream
+        )
 
 
 def is_dcu_available() -> bool:
@@ -501,16 +560,35 @@ def patch_torch_cuda_for_dcu() -> bool:
     # raises "Tried to instantiate dummy base class Event". flagos.Event provides
     # the host-timed fallback when no native CUDA event is available (and uses the
     # native event in legacy DTK mode), so expose it through the CUDA namespace.
-    flagos_event = getattr(torch, "flagos", None)
-    flagos_event = getattr(flagos_event, "Event", None)
+    flagos_mod = getattr(torch, "flagos", None)
+    flagos_event = getattr(flagos_mod, "Event", None)
     if flagos_event is not None:
         torch.cuda.Event = flagos_event
+    flagos_stream = getattr(flagos_mod, "Stream", None)
+    if flagos_stream is not None:
+        torch.cuda.Stream = flagos_stream
     torch.cuda._lazy_init = lambda: None
     torch.cuda.device_count = lambda: max(torch.flagos.device_count(), 1)
     if hasattr(torch.cuda, "_initialized"):
         torch.cuda._initialized = True
     if hasattr(torch.cuda, "_queued_calls"):
         torch.cuda._queued_calls.clear()
+
+    # Accept flagos/privateuseone torch.device objects in torch.cuda.device(...),
+    # which StreamContext enters when switching to a flagos-typed guard stream.
+    _orig_device_ctx_init = torch.cuda.device.__init__
+
+    def _patched_device_ctx_init(self, device):
+        if hasattr(device, "type") and hasattr(device, "index"):
+            if device.type in ("privateuseone", "flagos"):
+                device = 0 if device.index is None else device.index
+        try:
+            return _orig_device_ctx_init(self, device)
+        except Exception:
+            self.idx = _device_index(device)
+            self.prev_idx = -1
+
+    torch.cuda.device.__init__ = _patched_device_ctx_init
 
     # Route set_device/current_device to the flagos runtime. Stock
     # torch.cuda.set_device calls torch._C._cuda_setDevice, which does not exist
@@ -555,6 +633,54 @@ def patch_torch_cuda_for_dcu() -> bool:
 
     torch.cuda.current_stream = lambda device=None: _stream_view(device, current_stream)
     torch.cuda.default_stream = lambda device=None: _stream_view(device, default_stream)
+
+    if not hasattr(torch._C, "_cuda_setStream"):
+        # CPU wheels omit torch._C._cuda_setStream, which StreamContext calls on
+        # entry and exit via torch.cuda.set_stream / _set_stream_by_id. Route
+        # non-null handles through the flagos stream registry so `with
+        # torch.cuda.stream(s):` genuinely switches and restores the DCU queue.
+        def _set_stream_by_id(stream_id=0, device_index=0, device_type=1):
+            del device_type
+            if not stream_id:
+                return
+            streams_mod = getattr(getattr(torch, "flagos", None), "_streams", None)
+            if streams_mod is None:
+                return
+            try:
+                cur = streams_mod.current_stream(device_index)
+                flagos_dev_type = getattr(cur, "device_type", None)
+                if isinstance(flagos_dev_type, int):
+                    streams_mod.set_stream_by_id(
+                        stream_id, device_index, flagos_dev_type
+                    )
+            except Exception:
+                pass
+
+        def _set_stream(stream):
+            if stream is None:
+                return
+            streams_mod = getattr(getattr(torch, "flagos", None), "_streams", None)
+            dev = getattr(stream, "device", None)
+            if streams_mod is not None and getattr(dev, "type", None) in (
+                "flagos",
+                "privateuseone",
+            ):
+                try:
+                    streams_mod.set_stream(stream)
+                    return
+                except Exception:
+                    pass
+            _set_stream_by_id(
+                stream_id=getattr(
+                    stream, "stream_id", getattr(stream, "cuda_stream", 0)
+                ),
+                device_index=getattr(stream, "device_index", _current_device()),
+                device_type=getattr(stream, "device_type", 1),
+            )
+
+        torch.cuda._set_stream_by_id = _set_stream_by_id
+        torch.cuda.set_stream = _set_stream
+
     # Both Triton entry points resolve the same current queue.
     try:
         torch._C._cuda_getCurrentRawStream = lambda idx=0: current_stream(idx)
