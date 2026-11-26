@@ -3201,6 +3201,7 @@ at::Tensor MeanKernelPython(const at::Tensor & self, ::std::optional<at::ScalarT
 
 static TypedSourceSlot MeanDimFnSource("aten::mean.dim", "flag_gems.mean_dim", "0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c", "{\"abi\": \"0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.mean_dim\", \"op\": \"aten::mean.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
+  at::native::make_dim_mask(dim, self.dim());
 #if defined(USE_DCU)
   const auto output_dtype = dtype.value_or(self.scalar_type());
   TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");
@@ -3682,6 +3683,13 @@ at::Tensor PowScalarKernelPython(const at::Scalar & self, const at::Tensor & exp
 
 static TypedSourceSlot PowTensorScalarFnSource("aten::pow.Tensor_Scalar", "flag_gems.pow_tensor_scalar", "16bf27f73e9f912188b5fa351fce8a83d819ab07d8c949bbdc1555c5f6de5522", "{\"abi\": \"16bf27f73e9f912188b5fa351fce8a83d819ab07d8c949bbdc1555c5f6de5522\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.pow_tensor_scalar\", \"op\": \"aten::pow.Tensor_Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PowTensorScalarKernelPython(const at::Tensor & self, const at::Scalar & exponent) {
+#if defined(FLAGOS_NATIVE_HOSTS)
+  if (self.scalar_type() == at::kFloat &&
+      (exponent.isIntegral(false) || exponent.isFloatingPoint()) &&
+      exponent.toDouble() == 3.0 && MulTensorFnSource.Available()) {
+    return at::mul(at::mul(self, self), self);
+  }
+#endif
 #if defined(USE_DCU)
   if (MulTensorFnSource.Available() && c10::isFloatingType(self.scalar_type()) &&
       (exponent.isIntegral(false) || exponent.isFloatingPoint()) && exponent.toDouble() == 2.0)
@@ -5819,6 +5827,9 @@ REGISTER_IMPL_TO_DISPATCHER(CatOutFn, cat_out_dispatcher, Backend::kFlagGems, Ca
 #include <ATen/native/CPUFallback.h>
 #include <ATen/ops/embedding_dense_backward_ops.h>
 #include "../fallback.h"
+#if defined(USE_KUNLUNXIN)
+#include "../embedding_utils.h"
+#endif
 namespace at::native::flagos {
 static TypedSourceSlot EmbeddingDenseBackwardFnSource("aten::embedding_dense_backward", "flag_gems.embedding_dense_backward", "0bef44696b97b126df5f4a43f8aec5d69fe1082ec8bdb7dfb58f3ae9febe97db", "{\"abi\": \"0bef44696b97b126df5f4a43f8aec5d69fe1082ec8bdb7dfb58f3ae9febe97db\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.embedding_dense_backward\", \"op\": \"aten::embedding_dense_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor EmbeddingDenseBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & indices, int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq) {
@@ -5846,15 +5857,25 @@ at::Tensor EmbeddingDenseBackwardNative(const at::Tensor & grad_output, const at
       ) {
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::embedding_dense_backward>::call(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
   }
-  auto result = EmbeddingDenseBackwardKernelPython(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
 #if defined(USE_KUNLUNXIN)
+  // Apply the frequency before the published unscaled accumulation.
+  auto grad = grad_output;
+  if (scale_grad_by_freq) {
+    grad = ScaleEmbeddingGradByFrequency(
+        grad_output, indices, [&](const at::Tensor& ones) {
+          return EmbeddingDenseBackwardKernelPython(ones, indices, num_weights, -1, false);
+        });
+  }
+  auto result = EmbeddingDenseBackwardKernelPython(grad, indices, num_weights, padding_idx, false);
   // The published XPU reduction can leave the padding row populated.
   if (padding_idx >= 0 && padding_idx < num_weights) {
     const auto offset = result.storage_offset() + padding_idx * result.stride(0);
     result.as_strided({result.size(1)}, {result.stride(1)}, offset).zero_();
   }
-#endif
   return result;
+#else
+  return EmbeddingDenseBackwardKernelPython(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
+#endif
 }
 REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardFn, embedding_dense_backward_dispatcher, Backend::kFlagGems, EmbeddingDenseBackwardNative)
 } // namespace at::native::flagos

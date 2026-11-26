@@ -62,11 +62,12 @@ NATIVE_SDK_PRECISION = {
         "flagtree": "0.7.0+ppu3.6",
         "measured_sdk_version": "2.1.0-a5f865",
         "vendor_torch": "2.10.0",
-        "evidence": "Direct SDK BF16 output with FP32 accumulation matches stock Torch bitwise on captured eager Qwen3 matrix products and forward/backward batched products, including dense and transposed weights.",
+        "evidence": "Direct SDK BF16 output with FP32 accumulation matches stock Torch bitwise on captured eager Qwen3 matrix products and forward/backward batched products, including dense and transposed weights. The SDK-compiled SiLU matches the vendor rounding on all BF16 inputs, including the shared midpoint regression.",
         "retirement": "Remove each exception once a published FlagGems wheel matches paired eager training and inference precision.",
         "operators": [
             {"op": "mm", "rank": 2, "dtypes": ["BFloat16"]},
             {"op": "bmm", "rank": 3, "dtypes": ["BFloat16"]},
+            {"op": "silu", "dtypes": ["BFloat16"]},
         ],
     },
 }

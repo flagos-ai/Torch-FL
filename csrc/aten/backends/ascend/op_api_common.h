@@ -4,6 +4,7 @@
 
 #include <flagos.h>
 #include "aten/common.h"
+#include "native_host/enqueue_trace.h"
 #include "runtime/accelerator/ascend/acl_stream.h"
 #include "runtime/allocator/caching_device_allocator.h"
 
@@ -377,6 +378,12 @@ struct AclTensorListWrapper {
 // by-value float/double are NOT -- pass scalars as aclScalar*).
 typedef int (*GwsFunc)(...);
 
+inline void RecordNativeEnqueue(aclrtStream stream) {
+#if defined(FLAGOS_NATIVE_HOSTS)
+  ::flagos::native_host::EnqueueTrace::record(reinterpret_cast<uintptr_t>(stream), true);
+#endif
+}
+
 inline void GetRebindFuncs(void*& set_repeatable, void*& set_in_addr,
                            void*& set_out_addr) {
   void* h = GetOpBaseLibHandle();
@@ -543,6 +550,7 @@ void ExecAscendCached(const char* api_name, const char* ws_name,
     auto ef = reinterpret_cast<ExecFunc>(opApiFuncAddr);
     int er = ef(wsa, ws, ex, acl_stream);
     TORCH_CHECK(er == 0, api_name, " execution failed, ret=", er);
+    RecordNativeEnqueue(acl_stream);
     if (ws > 0) RecordWorkspaceStream(wst, acl_stream);
   };
 #if defined(FLAGOS_NATIVE_HOSTS)
@@ -640,6 +648,7 @@ void ExecAscendCached(const char* api_name, const char* ws_name,
       SubmitAscendEager({
           device_index, api_name, reinterpret_cast<Execute>(opApiFuncAddr),
           workspace.get(), workspace_size, executor, acl_stream, std::move(descriptors)});
+      RecordNativeEnqueue(acl_stream);
       return;
     }
   }
@@ -826,6 +835,7 @@ void ExecAscendCached(const char* api_name, const char* ws_name,
         workspace_addr, workspace_size, executor, acl_stream);                \
     TORCH_CHECK(exec_ret == 0, #aclnn_api " execution failed, ret=",         \
         exec_ret);                                                            \
+    at::native::flagos::ascend::RecordNativeEnqueue(acl_stream);               \
     /* No per-op aclrtSynchronizeStream: ops enqueue asynchronously on the    \
      * shared default stream (FIFO on-device), overlapping host dispatch with \
      * device compute. Correctness is preserved by (1) draining the default   \

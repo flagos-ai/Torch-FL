@@ -2,13 +2,19 @@
 #if defined(FLAGOS_NATIVE_THEAD_VENDOR)
 #include "ops.h"
 #include "../backends/flagos/thead_native_precision.h"
+#include "native_host/enqueue_trace.h"
+#include <ATen/ops/empty_like.h>
+#include <cuda_runtime_api.h>
 #include <ATen/record_function.h>
 #include <torch/library.h>
 #include <atomic>
 
 namespace at::native::flagos {
+namespace cuda_precision {
+cudaError_t LaunchSiluBFloat16(const void*, void*, int64_t, cudaStream_t);
+}  // namespace cuda_precision
 namespace {
-std::atomic<int64_t> hits[2]{};
+std::atomic<int64_t> hits[3]{};
 at::Tensor TheadNativeBmm(const at::Tensor& self, const at::Tensor& mat2) {
   ++hits[0];
   RECORD_FUNCTION("flagos::thead::bmm", std::vector<c10::IValue>());
@@ -21,19 +27,41 @@ at::Tensor TheadNativeMm(const at::Tensor& self, const at::Tensor& mat2) {
   return thead_precision::Matrix<2>(self, mat2);
 }
 
+at::Tensor TheadNativeSilu(const at::Tensor& self) {
+  ++hits[2];
+  RECORD_FUNCTION("flagos::thead::silu", std::vector<c10::IValue>());
+  TORCH_CHECK(self.scalar_type() == at::kBFloat16, "native SiLU requires BF16 input");
+  const c10::OptionalDeviceGuard device_guard(self.device());
+  auto result = at::empty_like(self, {}, c10::MemoryFormat::Preserve);
+  const int64_t size = self.numel();
+  if (size == 0) return result;
+
+  const auto input = self.is_non_overlapping_and_dense() ? self : self.contiguous();
+  auto output = input.strides().equals(result.strides()) ? result : at::empty_like(input);
+  const auto stream = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(self.device().index()));
+  const auto status = cuda_precision::LaunchSiluBFloat16(
+      input.const_data_ptr(), output.mutable_data_ptr(), size, stream);
+  TORCH_CHECK(status == cudaSuccess, "native BF16 SiLU launch failed: ", cudaGetErrorString(status));
+  ::flagos::native_host::EnqueueTrace::record(reinterpret_cast<uintptr_t>(stream), true);
+  if (!output.is_same(result)) result.copy_(output);
+  return result;
+}
+
 REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kThead, TheadNativeBmm)
 REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kThead, TheadNativeMm)
+REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kThead, TheadNativeSilu)
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(flagos, m) {
   m.def("native_thead_sdk_catalog() -> str", []() {
-    return std::string(R"catalog({"policy": {"evidence": "Direct SDK BF16 output with FP32 accumulation matches stock Torch bitwise on captured eager Qwen3 matrix products and forward/backward batched products, including dense and transposed weights.", "flag_gems": "5.4.0", "flagtree": "0.7.0+ppu3.6", "measured_sdk_version": "2.1.0-a5f865", "operators": [{"dtypes": ["BFloat16"], "op": "mm", "rank": 2}, {"dtypes": ["BFloat16"], "op": "bmm", "rank": 3}], "retirement": "Remove each exception once a published FlagGems wheel matches paired eager training and inference precision.", "schema_version": 1, "vendor": "thead", "vendor_torch": "2.10.0"}, "policy_sha256": "c3d3b93eff6343377256051825b05510dc16acc882bfe6a6da4cf25c9cfcc120"})catalog");
+    return std::string(R"catalog({"policy": {"evidence": "Direct SDK BF16 output with FP32 accumulation matches stock Torch bitwise on captured eager Qwen3 matrix products and forward/backward batched products, including dense and transposed weights. The SDK-compiled SiLU matches the vendor rounding on all BF16 inputs, including the shared midpoint regression.", "flag_gems": "5.4.0", "flagtree": "0.7.0+ppu3.6", "measured_sdk_version": "2.1.0-a5f865", "operators": [{"dtypes": ["BFloat16"], "op": "mm", "rank": 2}, {"dtypes": ["BFloat16"], "op": "bmm", "rank": 3}, {"dtypes": ["BFloat16"], "op": "silu"}], "retirement": "Remove each exception once a published FlagGems wheel matches paired eager training and inference precision.", "schema_version": 1, "vendor": "thead", "vendor_torch": "2.10.0"}, "policy_sha256": "b924c80dcd85cb380795af8724a6b2aa6e4ee4b5da974910c3c77ebc38feb353"})catalog");
   });
   m.def("native_thead_sdk_libraries() -> Dict(str, str)", &thead_precision::Libraries);
   m.def("native_thead_sdk_hits() -> Dict(str, int)", []() {
     c10::Dict<std::string, int64_t> result;
     result.insert("bmm", hits[0].load());
     result.insert("mm", hits[1].load());
+    result.insert("silu", hits[2].load());
     return result;
   });
 }

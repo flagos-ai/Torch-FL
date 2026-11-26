@@ -32,6 +32,22 @@ file(GLOB _runtime_sources
 list(APPEND SOURCE_FILES ${_runtime_sources})
 list(SORT SOURCE_FILES)
 
+list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/cuda_bfloat16_silu\\.cu$")
+if(_flagos_is_ppu AND FLAGOS_NATIVE_HOSTS AND FLAGOS_BUILD_VENDOR)
+  # The PPU SDK driver requires its explicit compile form for a device object.
+  set(_silu_source "${CMAKE_CURRENT_SOURCE_DIR}/aten/generated/cuda_bfloat16_silu.cu")
+  set(_silu_object "${CMAKE_CURRENT_BINARY_DIR}/cuda_bfloat16_silu.o")
+  add_custom_command(
+    OUTPUT "${_silu_object}"
+    COMMAND "${CMAKE_CUDA_COMPILER}" -std=c++17 -arch=sm_80 -O2 -Xcompiler=-fPIC
+      -c "${_silu_source}" -o "${_silu_object}"
+    DEPENDS "${_silu_source}"
+    VERBATIM
+  )
+  set_source_files_properties("${_silu_object}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+  list(APPEND SOURCE_FILES "${_silu_object}")
+endif()
+
 # The TsingMicro rocprofiler tool is built as its own shared library (below)
 # and must never be linked into libtorch_fl.so: rocprofiler dlopens its tools
 # during its own initialization, and the main library pulls in libhpgr.so.

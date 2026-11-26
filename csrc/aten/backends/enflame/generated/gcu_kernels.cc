@@ -53,6 +53,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "../../../embedding_utils.h"
 #include "../../../fallback.h"
 #include "../../../foreach_utils.h"
 #include "../topsaten_common.h"
@@ -3461,13 +3462,15 @@ at::Tensor EmbeddingDenseBackwardKernelGcu(const at::Tensor& grad, const at::Ten
   if (scale_grad_by_freq && grad.scalar_type() == at::kFloat) {
     // TOPS can leave the last feature unscaled on an FP32 row. Compute
     // the counts on-device and scale each token before the SDK reduction.
-    auto ones = at::empty({num_indices, 1}, grad_c.options()).fill_(1);
-    auto counts = at::empty({num_weights, 1}, grad_c.options());
-    gcu::TopsatenTensorWrapper t_ones(ones), t_counts(counts);
-    EXEC_TOPSATEN_CMD(topsatenEmbeddingDenseBackward, grad, t_counts.get(), t_ones.get(), t_indices.get(),
-        num_weights, -1, false);
-    const auto frequency = at::embedding(counts, indices_i32.reshape({num_indices}));
-    grad_2d = at::div(grad_2d, frequency);
+    const auto flat_indices = indices_i32.reshape({num_indices});
+    grad_2d = ScaleEmbeddingGradByFrequency(
+        grad_2d, flat_indices, [&](const at::Tensor& ones) {
+          auto counts = at::empty({num_weights, 1}, grad_c.options());
+          gcu::TopsatenTensorWrapper t_ones(ones), t_counts(counts);
+          EXEC_TOPSATEN_CMD(topsatenEmbeddingDenseBackward, grad, t_counts.get(), t_ones.get(), t_indices.get(),
+              num_weights, -1, false);
+          return counts;
+        });
     scale_grad_by_freq = false;
   }
 

@@ -1385,15 +1385,23 @@ def gen_flaggems_python_kernel(
             )
         elif op == "mean.dim":
             prelude += (
+                "  at::native::make_dim_mask(dim, self.dim());\n"
                 "#if defined(USE_DCU)\n"
                 "  const auto output_dtype = dtype.value_or(self.scalar_type());\n"
                 '  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
                 "#endif\n"
             )
         elif typed and op == "pow.Tensor_Scalar":
-            # Match the vendor's measured FP32 multiplication order using the
-            # published multiply on its configured Native Host route.
+            # PyTorch's FP32 cube uses two multiplications. The general pow
+            # kernel can round these exact products in the device math library.
             prelude += (
+                "#if defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (self.scalar_type() == at::kFloat &&\n"
+                "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) &&\n"
+                "      exponent.toDouble() == 3.0 && MulTensorFnSource.Available()) {\n"
+                "    return at::mul(at::mul(self, self), self);\n"
+                "  }\n"
+                "#endif\n"
                 "#if defined(USE_DCU)\n"
                 "  if (MulTensorFnSource.Available() && c10::isFloatingType(self.scalar_type()) &&\n"
                 "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) && exponent.toDouble() == 2.0)\n"
@@ -2109,6 +2117,9 @@ def gen_flaggems_out_adapters(funcs):
         "#include <ATen/native/CPUFallback.h>",
         "#include <ATen/ops/embedding_dense_backward_ops.h>",
         '#include "../fallback.h"',
+        "#if defined(USE_KUNLUNXIN)",
+        '#include "../embedding_utils.h"',
+        "#endif",
         "namespace at::native::flagos {",
         gen_flaggems_python_kernel(
             op,
@@ -2141,15 +2152,25 @@ def gen_flaggems_out_adapters(funcs):
         "      ) {",
         f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{op}>::call({call_args});",
         "  }",
-        f"  auto result = {fn_type[:-2]}KernelPython({call_args});",
         "#if defined(USE_KUNLUNXIN)",
+        "  // Apply the frequency before the published unscaled accumulation.",
+        "  auto grad = grad_output;",
+        "  if (scale_grad_by_freq) {",
+        "    grad = ScaleEmbeddingGradByFrequency(",
+        "        grad_output, indices, [&](const at::Tensor& ones) {",
+        f"          return {fn_type[:-2]}KernelPython(ones, indices, num_weights, -1, false);",
+        "        });",
+        "  }",
+        f"  auto result = {fn_type[:-2]}KernelPython(grad, indices, num_weights, padding_idx, false);",
         "  // The published XPU reduction can leave the padding row populated.",
         "  if (padding_idx >= 0 && padding_idx < num_weights) {",
         "    const auto offset = result.storage_offset() + padding_idx * result.stride(0);",
         "    result.as_strided({result.size(1)}, {result.stride(1)}, offset).zero_();",
         "  }",
-        "#endif",
         "  return result;",
+        "#else",
+        f"  return {fn_type[:-2]}KernelPython({call_args});",
+        "#endif",
         "}",
         f"REGISTER_IMPL_TO_DISPATCHER({fn_type}, {dispatcher}, Backend::kFlagGems, EmbeddingDenseBackwardNative)",
     ]
