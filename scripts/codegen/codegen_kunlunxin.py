@@ -1344,7 +1344,7 @@ void {kernel}(at::TensorList self{operands}, {value_type} value) {{
   RunStreamOrderedXdnn(self.front(), "{vendor}", [&] {{
     return xdnn_pytorch::{vendor}(context, source.tensors{tensors}, scalar, result.tensors);
   }});
-  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+  BumpForeachVersions(self);
 }}
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kKunlunxin, {kernel});
 """

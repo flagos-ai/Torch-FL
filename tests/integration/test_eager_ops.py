@@ -387,7 +387,10 @@ def test_out_preserves_aliasing(
 ):
     require_ops(aten_dtype, f"{name}.{overload}")
     cpu = [values((5, 7), dtype) + 1, values((5, 7), dtype) + 2]
-    if name in ("addcdiv", "addcmul"):
+    if name == "div":
+        # Use exact quotients so this case isolates the output storage contract.
+        cpu[1] = torch.where(cpu[1] > 2, 0.5, -2.0).to(dtype)
+    elif name in ("addcdiv", "addcmul"):
         cpu.append(torch.full_like(cpu[0], 2))
     op = getattr(torch, name)
 

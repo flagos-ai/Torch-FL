@@ -10,6 +10,10 @@
 
 namespace at::native::flagos {
 
+inline void BumpForeachVersions(at::TensorList tensors) {
+  for (const auto& tensor : tensors) tensor.unsafeGetTensorImpl()->bump_version();
+}
+
 // Batched in-place kernels cannot reorder writes to overlapping views or
 // tensors shared by two entries. The ATen sequential path handles those lists.
 inline bool CanBatchForeach(

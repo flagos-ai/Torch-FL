@@ -3528,10 +3528,6 @@ at::Tensor ForeachWorkspace(const at::Tensor& input, size_t bytes) {
   return at::empty({static_cast<int64_t>(bytes)}, input.options().dtype(at::kByte));
 }
 
-void BumpForeachVersions(at::TensorList tensors) {
-  for (const auto& tensor : tensors) tensor.unsafeGetTensorImpl()->bump_version();
-}
-
 void RunForeachBinary(at::TensorList self, cnnlForeachOpMode_t op,
                       cnnlForeachBinaryMode_t mode, at::ArrayRef<float> scalars) {
   CambriconDeviceGuard device_guard(self.front());

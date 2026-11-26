@@ -1387,7 +1387,7 @@ void ForeachAddInplaceScalarKernelKunlunxin(at::TensorList self, const at::Scala
   RunStreamOrderedXdnn(self.front(), "_foreach_add_scalar", [&] {
     return xdnn_pytorch::_foreach_add_scalar(context, source.tensors, scalar, result.tensors);
   });
-  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+  BumpForeachVersions(self);
 }
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceScalarFn, foreach_add_inplace_scalar_dispatcher, Backend::kKunlunxin, ForeachAddInplaceScalarKernelKunlunxin);
 
@@ -1402,7 +1402,7 @@ void ForeachMulInplaceScalarKernelKunlunxin(at::TensorList self, const at::Scala
   RunStreamOrderedXdnn(self.front(), "_foreach_mul_scalar", [&] {
     return xdnn_pytorch::_foreach_mul_scalar(context, source.tensors, scalar, result.tensors);
   });
-  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+  BumpForeachVersions(self);
 }
 REGISTER_IMPL_TO_DISPATCHER(ForeachMulInplaceScalarFn, foreach_mul_inplace_scalar_dispatcher, Backend::kKunlunxin, ForeachMulInplaceScalarKernelKunlunxin);
 
@@ -1417,7 +1417,7 @@ void ForeachDivInplaceScalarlistKernelKunlunxin(at::TensorList self, at::ArrayRe
   RunStreamOrderedXdnn(self.front(), "_foreach_div_scalarList", [&] {
     return xdnn_pytorch::_foreach_div_scalarList(context, source.tensors, scalar, result.tensors);
   });
-  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+  BumpForeachVersions(self);
 }
 REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceScalarlistFn, foreach_div_inplace_scalarlist_dispatcher, Backend::kKunlunxin, ForeachDivInplaceScalarlistKernelKunlunxin);
 
@@ -1434,7 +1434,7 @@ void ForeachAddcmulInplaceScalarKernelKunlunxin(at::TensorList self, at::TensorL
   RunStreamOrderedXdnn(self.front(), "_foreach_addcmul_scalar", [&] {
     return xdnn_pytorch::_foreach_addcmul_scalar(context, source.tensors, left.tensors, right.tensors, scalar, result.tensors);
   });
-  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+  BumpForeachVersions(self);
 }
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddcmulInplaceScalarFn, foreach_addcmul_inplace_scalar_dispatcher, Backend::kKunlunxin, ForeachAddcmulInplaceScalarKernelKunlunxin);
 
@@ -1451,7 +1451,7 @@ void ForeachAddcdivInplaceScalarlistKernelKunlunxin(at::TensorList self, at::Ten
   RunStreamOrderedXdnn(self.front(), "_foreach_addcdiv_scalarList", [&] {
     return xdnn_pytorch::_foreach_addcdiv_scalarList(context, source.tensors, left.tensors, right.tensors, scalar, result.tensors);
   });
-  for (const auto& tensor : self) tensor.unsafeGetTensorImpl()->bump_version();
+  BumpForeachVersions(self);
 }
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddcdivInplaceScalarlistFn, foreach_addcdiv_inplace_scalarlist_dispatcher, Backend::kKunlunxin, ForeachAddcdivInplaceScalarlistKernelKunlunxin);
 

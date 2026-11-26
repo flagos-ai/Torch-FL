@@ -5846,7 +5846,15 @@ at::Tensor EmbeddingDenseBackwardNative(const at::Tensor & grad_output, const at
       ) {
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::embedding_dense_backward>::call(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
   }
-  return EmbeddingDenseBackwardKernelPython(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
+  auto result = EmbeddingDenseBackwardKernelPython(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq);
+#if defined(USE_KUNLUNXIN)
+  // The published XPU reduction can leave the padding row populated.
+  if (padding_idx >= 0 && padding_idx < num_weights) {
+    const auto offset = result.storage_offset() + padding_idx * result.stride(0);
+    result.as_strided({result.size(1)}, {result.stride(1)}, offset).zero_();
+  }
+#endif
+  return result;
 }
 REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardFn, embedding_dense_backward_dispatcher, Backend::kFlagGems, EmbeddingDenseBackwardNative)
 } // namespace at::native::flagos

@@ -1208,10 +1208,8 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
-# sum/mean over an optional dim list. An absent or empty list reduces every
-# dim; negative dims are wrapped. Dims are erased high-to-low so an earlier
-# erase does not shift a later index. sum promotes integral inputs to int64,
-# matching PyTorch.
+# Use ATen reduction metadata to normalize and validate axes before the SDK
+# dispatch. An absent or empty dim list reduces every axis.
 T_REDUCE_DIMS_DTYPE = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
@@ -1225,20 +1223,10 @@ at::Tensor {kernel}(
       (dtype.has_value() && !gcu::TopsatenSupportsDtype(dtype.value()))) {{
     return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
   }}
-  int64_t ndim = self.dim();
-  std::vector<int64_t> norm_dims;
-  if (dim.has_value() && !dim.value().empty()) {{
-    for (int64_t d : dim.value()) norm_dims.push_back(d < 0 ? d + ndim : d);
-  }} else {{
-    for (int64_t d = 0; d < ndim; ++d) norm_dims.push_back(d);
-  }}
-  auto out_shape = self.sizes().vec();
-  std::vector<int64_t> sorted_dims(norm_dims);
-  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
-  for (int64_t d : sorted_dims) {{
-    if (keepdim) out_shape[d] = 1;
-    else out_shape.erase(out_shape.begin() + d);
-  }}
+  const auto normalized_dim = dim && dim->empty() ? at::OptionalIntArrayRef() : dim;
+  auto norm_dims = at::native::make_dim_vector(normalized_dim, self.dim());
+  at::maybe_wrap_dims(norm_dims, self.dim());
+  const auto out_shape = at::meta::get_reduction_shape(self, norm_dims, keepdim);
 
   auto out_dtype = dtype.value_or(
       {promote_integral} && at::isIntegralType(self.scalar_type(), true)
@@ -2657,9 +2645,21 @@ at::Tensor {kernel}(const at::Tensor& grad, const at::Tensor& indices, int64_t n
   }}
   auto grad_2d = grad_c.reshape({{-1, embed_dim}});
   auto indices_2d = indices_i32.reshape({{-1, 1}});
+  gcu::TopsatenTensorWrapper t_indices(indices_2d);
+  if (scale_grad_by_freq && grad.scalar_type() == at::kFloat) {{
+    // TOPS can leave the last feature unscaled on an FP32 row. Compute
+    // the counts on-device and scale each token before the SDK reduction.
+    auto ones = at::empty({{num_indices, 1}}, grad_c.options()).fill_(1);
+    auto counts = at::empty({{num_weights, 1}}, grad_c.options());
+    gcu::TopsatenTensorWrapper t_ones(ones), t_counts(counts);
+    EXEC_TOPSATEN_CMD({tops}, grad, t_counts.get(), t_ones.get(), t_indices.get(),
+        num_weights, -1, false);
+    const auto frequency = at::embedding(counts, indices_i32.reshape({{num_indices}}));
+    grad_2d = at::div(grad_2d, frequency);
+    scale_grad_by_freq = false;
+  }}
 
   gcu::TopsatenTensorWrapper t_grad(grad_2d);
-  gcu::TopsatenTensorWrapper t_indices(indices_2d);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD({tops}, grad, t_out.get(), t_grad.get(), t_indices.get(), num_weights, padding_idx, scale_grad_by_freq);
   return out;
@@ -3279,6 +3279,7 @@ void {kernel}(at::TensorList self) {{
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD({tops}, self[0], t_out.get(), t_self.get());
+  BumpForeachVersions(self);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -3318,6 +3319,7 @@ void {kernel}(at::TensorList self, const at::Scalar& scalar) {{
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD({tops}, self[0], t_out.get(), t_self.get(), t_scalar);
+  BumpForeachVersions(self);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -3334,6 +3336,7 @@ void {kernel}(at::TensorList self, const at::Scalar& scalar) {{
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD({tops}, self[0], t_out.get(), t_self.get(), t_scalar);
+  BumpForeachVersions(self);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -3355,6 +3358,7 @@ void {kernel}(at::TensorList self, at::ArrayRef<at::Scalar> scalars) {{
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD({tops}, self[0], t_out.get(), t_self.get(), t_scalars);
+  BumpForeachVersions(self);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -3373,6 +3377,7 @@ void {kernel}(at::TensorList self, at::TensorList other) {{
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(
       {tops}, self[0], t_out.get(), t_self.get(), t_other.get());
+  BumpForeachVersions(self);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -3397,6 +3402,7 @@ void {kernel}(
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(
       {tops}, self[0], t_out.get(), t_self.get(), t_other.get(), t_alpha);
+  BumpForeachVersions(self);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -3425,6 +3431,7 @@ void {kernel}(
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(
       {tops}, self[0], t_out.get(), t_self.get(), t_other.get(), t_alpha);
+  BumpForeachVersions(self);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -3449,6 +3456,7 @@ void {kernel}(
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(
       {tops}, self[0], t_out.get(), t_self.get(), t_end.get(), t_weight);
+  BumpForeachVersions(self);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -3478,6 +3486,7 @@ void {kernel}(
   EXEC_TOPSATEN_CMD(
       {tops}, self[0], t_out.get(), t_self.get(), t_t1.get(), t_t2.get(),
       t_value);
+  BumpForeachVersions(self);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -3511,6 +3520,7 @@ void {kernel}(
   EXEC_TOPSATEN_CMD(
       {tops}, self[0], t_out.get(), t_self.get(), t_t1.get(), t_t2.get(),
       t_scalars);
+  BumpForeachVersions(self);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -4014,6 +4024,7 @@ FILE_HEADER = """\
 #include <ATen/ops/bitwise_or_ops.h>
 #include <ATen/native/CPUFallback.h>
 #include <ATen/native/RangeUtils.h>
+#include <ATen/native/ReduceOpsUtils.h>
 #include <ATen/native/Resize.h>
 #include <ATen/ops/all.h>
 #include <ATen/ops/arange.h>
@@ -4048,6 +4059,7 @@ FILE_HEADER = """\
 #include <string>
 #include <vector>
 #include "../../../fallback.h"
+#include "../../../foreach_utils.h"
 #include "../topsaten_common.h"
 #include "../gcu_copy.h"
 #include "runtime/functions.h"
