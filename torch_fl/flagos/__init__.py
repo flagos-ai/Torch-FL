@@ -85,7 +85,8 @@ class device:
         return False
 
 
-def is_available():
+@torch.compiler.assume_constant_result
+def is_available() -> bool:
     return _C._get_device_count() > 0
 
 
@@ -93,7 +94,10 @@ def device_count() -> int:
     return _C._get_device_count()
 
 
-def current_device():
+def current_device() -> int:
+    if torch.compiler.is_dynamo_compiling():
+        # Dynamo guards this public query on the selected accelerator index.
+        return torch.accelerator.current_device_index()
     return _C._get_device()
 
 
@@ -770,7 +774,11 @@ def get_device_properties(device=None):
         device: device index, `torch.device`, `"<type>[:<index>]"` string, or
             None for the current device. Matches `torch.cuda.get_device_properties`.
     """
-    index = _device_index(device)
+    return _get_device_properties(_device_index(device))
+
+
+@torch.compiler.assume_constant_result
+def _get_device_properties(index: int):
     if build_info().vendor == "nvidia" and torch.version.cuda is not None:
         return torch.cuda.get_device_properties(index)
     return _DeviceProperties(index)
