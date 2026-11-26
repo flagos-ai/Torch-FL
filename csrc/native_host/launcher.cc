@@ -908,17 +908,20 @@ class KernelCache {
       metadata.attr("update")(variant.constants);
       grid = grid(metadata);
     }
+    auto dimensions = py::cast<py::sequence>(grid);
+    if (dimensions.empty()) throw std::invalid_argument("Triton grid must not be empty");
+    unsigned x = py::cast<unsigned>(dimensions[0]);
+    unsigned y = dimensions.size() > 1 ? py::cast<unsigned>(dimensions[1]) : 1;
+    unsigned z = dimensions.size() > 2 ? py::cast<unsigned>(dimensions[2]) : 1;
+    const int64_t native_grid[] = {x, y, z};
+    if (variant.native && RunFromCompiledHost(args, kwargs, native_grid, device))
+      return variant.result;
     for (auto item : variant.hooks) {
       auto hook = py::cast<py::tuple>(item);
       auto values = py::reinterpret_steal<py::dict>(PyDict_Copy(named.ptr()));
       values.attr("update")(hook[1]);
       hook[0](values);
     }
-    auto dimensions = py::cast<py::sequence>(grid);
-    if (dimensions.empty()) throw std::invalid_argument("Triton grid must not be empty");
-    unsigned x = py::cast<unsigned>(dimensions[0]);
-    unsigned y = dimensions.size() > 1 ? py::cast<unsigned>(dimensions[1]) : 1;
-    unsigned z = dimensions.size() > 2 ? py::cast<unsigned>(dimensions[2]) : 1;
     std::vector<py::handle> values;
     values.reserve(variant.bindings.size());
     for (const auto& binding : variant.bindings) {
@@ -1142,6 +1145,24 @@ class KernelCache {
   }
 
  private:
+  bool RunFromCompiledHost(py::tuple args, py::dict kwargs,
+                           at::IntArrayRef grid, int device) {
+    c10::impl::GenericList arguments(c10::AnyType::get());
+    auto keywords = c10::impl::toTypedDict<std::string, c10::IValue>(
+        c10::impl::GenericDict(c10::StringType::get(), c10::AnyType::get()));
+    try {
+      arguments.reserve(args.size());
+      for (auto arg : args) arguments.push_back(FromPython(arg));
+      keywords.reserve(kwargs.size());
+      for (auto entry : kwargs)
+        keywords.insert(py::cast<std::string>(entry.first), FromPython(entry.second));
+    } catch (const std::exception&) {
+      PyErr_Clear();
+      return false;
+    }
+    return RunNative(arguments, keywords, grid, device);
+  }
+
   static uint64_t FastKey(int device, size_t count, size_t keywords, const at::Tensor& tensor) {
     uint64_t key = static_cast<uint32_t>(device);
     for (uint64_t value : {uint64_t(count), uint64_t(keywords), uint64_t(tensor.scalar_type()),

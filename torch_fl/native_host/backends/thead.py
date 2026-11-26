@@ -16,19 +16,7 @@ from ..backend import (
 )
 
 
-# These are entries from the published PPU tuning domains. Resolve the
-# configurations against the live wrapper before using them for eager launch.
-_EAGER_CONFIGS = {
-    (
-        "mm_kernel_general",
-        "d37eb3ca6511b79340f2c199428873baf7d1e704f34146e154c61c1801aa8d89",
-    ): dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=64, num_warps=4, num_stages=4, num_ctas=1),
-}
-
-
 class Backend(BackendInterface):
-    eager_kernel_configs = _EAGER_CONFIGS
-
     config = BackendConfig(
         vendor="thead",
         compiler_backend="ppu",

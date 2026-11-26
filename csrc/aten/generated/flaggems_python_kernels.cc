@@ -5913,6 +5913,7 @@ REGISTER_IMPL_TO_DISPATCHER(MeanOutFn, mean_out_dispatcher, Backend::kFlagGems, 
 #include <ATen/MemoryOverlap.h>
 #include <ATen/core/Reduction.h>
 #include <ATen/native/CPUFallback.h>
+#include <ATen/native/ReduceOpsUtils.h>
 #include <ATen/native/Resize.h>
 #include <ATen/ops/_log_softmax_backward_data_ops.h>
 #include <ATen/ops/_softmax_backward_data_ops.h>
@@ -6018,7 +6019,7 @@ at::Tensor & LogSoftmaxBackwardOutNvidia(const at::Tensor & grad_output, const a
       grad_output.scalar_type() != input_dtype || output.scalar_type() != input_dtype || out.scalar_type() != input_dtype ||
       output.device() != grad_output.device() || out.device() != output.device() ||
       output.dim() < 2 || output.dim() > 3 || !output.is_contiguous() ||
-      !out.is_contiguous() || !grad_output.sizes().equals(output.sizes()) ||
+      out.layout() != at::kStrided || !grad_output.sizes().equals(output.sizes()) ||
       output.numel() == 0 || output.numel() > std::numeric_limits<int32_t>::max()) {
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::_log_softmax_backward_data_out>::call(
         grad_output, output, dim, input_dtype, out);
@@ -6026,6 +6027,12 @@ at::Tensor & LogSoftmaxBackwardOutNvidia(const at::Tensor & grad_output, const a
   at::assert_no_internal_overlap(out);
   at::assert_no_overlap(out, grad_output);
   at::assert_no_overlap(out, output);
+  if (!out.is_contiguous()) {
+    auto buffer = at::empty(output.sizes(), output.options());
+    PrivLogSoftmaxBackwardDataOutKernelPython(grad_output, output, dim, input_dtype, buffer);
+    at::native::resize_output(out, buffer.sizes());
+    return out.copy_(buffer);
+  }
   return PrivLogSoftmaxBackwardDataOutKernelPython(grad_output, output, dim, input_dtype, out);
 }
 
@@ -6034,7 +6041,7 @@ at::Tensor & SoftmaxBackwardOutNvidia(const at::Tensor & grad_output, const at::
       grad_output.scalar_type() != input_dtype || output.scalar_type() != input_dtype || grad_input.scalar_type() != input_dtype ||
       output.device() != grad_output.device() || grad_input.device() != output.device() ||
       output.dim() < 2 || output.dim() > 4 || !output.is_contiguous() ||
-      !grad_input.is_contiguous() || !grad_output.sizes().equals(output.sizes()) ||
+      grad_input.layout() != at::kStrided || !grad_output.sizes().equals(output.sizes()) ||
       output.numel() == 0 || output.numel() > std::numeric_limits<int32_t>::max()) {
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::_softmax_backward_data_out>::call(
         grad_output, output, dim, input_dtype, grad_input);
@@ -6042,20 +6049,33 @@ at::Tensor & SoftmaxBackwardOutNvidia(const at::Tensor & grad_output, const at::
   at::assert_no_internal_overlap(grad_input);
   at::assert_no_overlap(grad_input, grad_output);
   at::assert_no_overlap(grad_input, output);
+  if (!grad_input.is_contiguous()) {
+    auto buffer = at::empty(output.sizes(), output.options());
+    PrivSoftmaxBackwardDataOutKernelPython(grad_output, output, dim, input_dtype, buffer);
+    at::native::resize_output(grad_input, buffer.sizes());
+    return grad_input.copy_(buffer);
+  }
   return PrivSoftmaxBackwardDataOutKernelPython(grad_output, output, dim, input_dtype, grad_input);
 }
 
 at::Tensor & SumIntlistOutNvidia(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
   const auto output_dtype = dtype.value_or(out.scalar_type());
-  if (!SumIntlistOutFnSource.Available() || !dim || dim->empty() || self.numel() == 0 ||
+  if (!SumIntlistOutFnSource.Available() ||
       (self.scalar_type() != at::kFloat && self.scalar_type() != at::kBFloat16) ||
       (output_dtype != at::kFloat && output_dtype != at::kBFloat16) ||
-      output_dtype != out.scalar_type() || !out.is_contiguous() || out.device() != self.device()) {
+      output_dtype != out.scalar_type() || !out.is_contiguous() || out.device() != self.device() ||
+      (self.numel() != 0 && (!dim || dim->empty()))) {
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::sum_IntList_out>::call(
         self, dim, keepdim, dtype, out);
   }
   at::assert_no_internal_overlap(out);
   at::assert_no_overlap(out, self);
+  if (self.numel() == 0) {
+    const auto axes = at::native::make_dim_mask(dim, self.dim());
+    at::native::resize_reduction_result(out, self, axes, keepdim, output_dtype);
+    if (out.numel() != 0) out.zero_();
+    return out;
+  }
   return SumIntlistOutKernelPython(self, dim, keepdim, output_dtype, out);
 }
 }

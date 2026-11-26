@@ -51,6 +51,10 @@ _PUBLISHED_EAGER_CONFIGS = {
     ("mul_broadcast_2d_kernel", _MUL_SOURCE): _MUL_CONFIG,
     ("mul_generic_nd_kernel", _MUL_SOURCE): _MUL_CONFIG,
     (
+        "mm_kernel_general",
+        "d37eb3ca6511b79340f2c199428873baf7d1e704f34146e154c61c1801aa8d89",
+    ): dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=64, num_warps=4, num_stages=4, num_ctas=1),
+    (
         "bmm_kernel",
         "e07964330ae4b2a4fffea5144d5382e275bc5f4b11deab9cea714705b5e7e509",
     ): dict(

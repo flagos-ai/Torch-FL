@@ -22,10 +22,27 @@ SPEC.loader.exec_module(build)
 
 
 @pytest.mark.parametrize("grid_kind", ["tuple", "callable"])
-def test_native_warmup_passes_serializable_grid_metadata(monkeypatch, grid_kind):
+@pytest.mark.parametrize("entry_method", ["prepare", "run"])
+def test_native_warmup_passes_serializable_grid_metadata(
+    monkeypatch, grid_kind, entry_method
+):
     expected = (3, 1, 1)
+    launches = []
+    prepared = False
+    result = object()
+
+    def prepare(*_):
+        nonlocal prepared
+        prepared = True
+
+    def launch(*_):
+        if not prepared:
+            return b"compile"
+        launches.append(result)
+        return result
+
     cache = types.SimpleNamespace(
-        missing_key=lambda *_: b"compile", prepare=lambda *_: None
+        missing_key=lambda *_: b"compile", prepare=prepare, run=launch
     )
     launcher = types.SimpleNamespace(KernelCache=lambda *_: cache)
     core = types.SimpleNamespace(_get_device=lambda: 0, _get_device_count=lambda: 1)
@@ -67,7 +84,12 @@ def test_native_warmup_passes_serializable_grid_metadata(monkeypatch, grid_kind)
     )
     kernel = runtime.KernelEntry(entry, entry, compile_before_enqueue=True)
     grid = operator.itemgetter("GRID") if grid_kind == "callable" else expected
-    assert kernel.prepare_native(grid=grid)
+    if entry_method == "run":
+        assert kernel.run(grid=grid) is result
+        assert launches == [result]
+    else:
+        assert kernel.prepare_native(grid=grid)
+        assert not launches
     assert len(calls) == 1
 
 

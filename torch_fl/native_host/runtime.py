@@ -320,6 +320,10 @@ class KernelEntry:
             return self.original.run(*values, grid=grid, **options)
         device = _C._get_device()
         native = self.native_cache.run(args, kwargs, grid, device)
+        if isinstance(native, bytes) and self.prepare_native(
+            *args, grid=grid, **kwargs
+        ):
+            native = self.native_cache.run(args, kwargs, grid, device)
         if native is not None and not isinstance(native, bytes):
             return native
         key = (
