@@ -1731,143 +1731,225 @@ def test_compile_fsdp_two_rank_forward_backward_parity(tmp_path):
     """2-rank unadorned ``FSDP + torch.compile`` matches eager and CPU (#661)."""
     if not HAS_TRITON:
         pytest.skip("Triton required for compilation")
-    if torch_fl.flagos.device_count() < 2:
+    dev_count = torch_fl.flagos.device_count()
+    if dev_count < 2:
         pytest.skip("2 flagos devices required for 2-rank FSDP compile test")
 
+    import gc as _gc
     import subprocess
     import textwrap
+
+    _gc.collect()
+    torch_fl.flagos.synchronize()
+    torch_fl.flagos.empty_cache()
+    # Earlier tests in this pytest session already hold an active vendor runtime
+    # context on device 0 (e.g. MetaX MACA). Use devices 1 and 2 whenever >=3
+    # accelerators are present so neither spawned rank shares device 0 with the
+    # parent pytest process.
+    dev_offset = 1 if dev_count >= 3 else 0
 
     worker = tmp_path / "fsdp_compile_worker.py"
     worker.write_text(
         textwrap.dedent(
             f"""
+            import faulthandler
             import gc
+            import multiprocessing as mp
             import os
+            import signal
+            import socket
+            import sys
             from datetime import timedelta
-
-            local = int(os.environ["LOCAL_RANK"])
-            cache_base = os.environ["FLAGOS_FSDP_TEST_CACHE_ROOT"]
-            os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(
-                cache_base, f"inductor_rank{{local}}"
-            )
-            os.environ["TRITON_CACHE_DIR"] = os.path.join(
-                cache_base, f"triton_rank{{local}}"
-            )
-            os.environ["FLAGGEMS_CACHE_DIR"] = os.path.join(
-                cache_base, f"flaggems_rank{{local}}"
-            )
-            os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
-            os.environ["FLAGOS_DIST_STAGED_GLOO"] = "1"
-            os.environ["FLAGOS_DIST_REDIRECT_GLOO"] = "0"
-
-            import torch_fl  # noqa: F401
-            import torch
-            import torch.distributed as dist
-            import torch.nn as nn
-            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-            from torch.distributed.fsdp.wrap import always_wrap_policy
-            from torch_fl.comm.process_group import ProcessGroupFlagOS
 
             RTOL = {COMPILE_RTOL!r}
             ATOL = {COMPILE_ATOL!r}
+            ACCEL = {ACCELERATOR!r}
 
-            class HostGroup(ProcessGroupFlagOS):
-                def _get_backend_name(self):
-                    return "gloo"
 
-                def _build_inner(self, store, rank, world_size, timeout):
-                    if not self._try_build_staged_gloo(store, rank, world_size, timeout):
-                        raise RuntimeError(self._staged_skip_reason)
-                    return None
+            def _run_worker(local: int, master_port: int, cache_base: str, dev_offset: int) -> None:
+                faulthandler.enable(all_threads=True)
+                if hasattr(signal, "SIGTERM"):
+                    faulthandler.register(signal.SIGTERM, all_threads=True, chain=False)
 
-            class MLP(nn.Module):
-                def __init__(self):
-                    super().__init__()
-                    self.fc1 = nn.Linear(32, 16)
-                    self.act = nn.ReLU()
-                    self.fc2 = nn.Linear(16, 4)
+                os.environ["MASTER_ADDR"] = "127.0.0.1"
+                os.environ["MASTER_PORT"] = str(master_port)
+                os.environ["RANK"] = str(local)
+                os.environ["WORLD_SIZE"] = "2"
+                os.environ["LOCAL_RANK"] = str(local)
+                os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(
+                    cache_base, f"inductor_rank{{local}}"
+                )
+                os.environ["TRITON_CACHE_DIR"] = os.path.join(
+                    cache_base, f"triton_rank{{local}}"
+                )
+                os.environ["FLAGGEMS_CACHE_DIR"] = os.path.join(
+                    cache_base, f"flaggems_rank{{local}}"
+                )
+                os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+                os.environ["FLAGOS_DIST_STAGED_GLOO"] = "1"
+                os.environ["FLAGOS_DIST_REDIRECT_GLOO"] = "0"
 
-                def forward(self, x):
-                    return self.fc2(self.act(self.fc1(x)))
+                import torch_fl  # noqa: F401
+                import torch
+                import torch.distributed as dist
+                import torch.nn as nn
+                from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+                from torch.distributed.fsdp.wrap import always_wrap_policy
+                from torch_fl.comm.process_group import ProcessGroupFlagOS
 
-            torch.flagos.set_device(local)
-            dist.Backend.register_backend("test_fsdp_host", HostGroup, devices=["flagos"])
-            dist.init_process_group("test_fsdp_host", timeout=timedelta(seconds=120))
-            rank = dist.get_rank()
-            device = torch.device("flagos", local)
+                class HostGroup(ProcessGroupFlagOS):
+                    def _get_backend_name(self):
+                        return "gloo"
 
-            try:
-                torch.manual_seed(123)
-                cpu_ref = MLP()
-                ref_out = None
-                ref_inp_grad = None
-                for r in range(2):
-                    torch.manual_seed(500 + r)
-                    rx = torch.randn(4, 32, requires_grad=True)
-                    ro = cpu_ref(rx)
-                    ro.sum().backward()
-                    if r == rank:
-                        ref_out = ro.detach().clone()
-                        ref_inp_grad = rx.grad.detach().clone()
-                cpu_grads = {{
-                    n: (p.grad.detach().clone() / 2.0)
-                    for n, p in cpu_ref.named_parameters()
-                }}
+                    def _build_inner(self, store, rank, world_size, timeout):
+                        if not self._try_build_staged_gloo(store, rank, world_size, timeout):
+                            raise RuntimeError(self._staged_skip_reason)
+                        return None
 
-                results = {{}}
-                for mode_name, use_compile in (("eager", False), ("compile", True)):
+                class MLP(nn.Module):
+                    def __init__(self):
+                        super().__init__()
+                        self.fc1 = nn.Linear(32, 16)
+                        self.act = nn.ReLU()
+                        self.fc2 = nn.Linear(16, 4)
+
+                    def forward(self, x):
+                        return self.fc2(self.act(self.fc1(x)))
+
+                dev_idx = local + dev_offset
+                torch.flagos.set_device(dev_idx)
+                if ACCEL in ("metax", "nvidia", "thead") and torch.cuda.is_available():
+                    torch.cuda.set_device(dev_idx)
+
+                dist.Backend.register_backend("test_fsdp_host", HostGroup, devices=["flagos"])
+                dist.init_process_group(
+                    "test_fsdp_host",
+                    rank=local,
+                    world_size=2,
+                    timeout=timedelta(seconds=120),
+                )
+                rank = dist.get_rank()
+                device = torch.device("flagos", dev_idx)
+
+                try:
                     torch.manual_seed(123)
-                    fsdp_mod = FSDP(
-                        MLP().to(device),
-                        auto_wrap_policy=always_wrap_policy,
-                        use_orig_params=True,
-                        device_id=device,
-                    )
-                    runner = torch.compile(fsdp_mod) if use_compile else fsdp_mod
-                    torch.manual_seed(500 + rank)
-                    inp = torch.randn(4, 32).to(device).requires_grad_(True)
-                    out = runner(inp)
-                    out.sum().backward()
+                    cpu_ref = MLP()
+                    ref_out = None
+                    ref_inp_grad = None
+                    for r in range(2):
+                        torch.manual_seed(500 + r)
+                        rx = torch.randn(4, 32, requires_grad=True)
+                        ro = cpu_ref(rx)
+                        ro.sum().backward()
+                        if r == rank:
+                            ref_out = ro.detach().clone()
+                            ref_inp_grad = rx.grad.detach().clone()
+                    cpu_grads = {{
+                        n: (p.grad.detach().clone() / 2.0)
+                        for n, p in cpu_ref.named_parameters()
+                    }}
 
-                    assert torch.flagos.current_device() == local
-                    out_cpu = out.detach().cpu()
-                    in_grad_cpu = inp.grad.detach().cpu()
-                    torch.testing.assert_close(out_cpu, ref_out, rtol=RTOL, atol=ATOL)
+                    results = {{}}
+                    for mode_name, use_compile in (("eager", False), ("compile", True)):
+                        torch.manual_seed(123)
+                        fsdp_mod = FSDP(
+                            MLP().to(device),
+                            auto_wrap_policy=always_wrap_policy,
+                            use_orig_params=True,
+                            device_id=device,
+                        )
+                        runner = torch.compile(fsdp_mod) if use_compile else fsdp_mod
+                        torch.manual_seed(500 + rank)
+                        inp = torch.randn(4, 32).to(device).requires_grad_(True)
+                        out = runner(inp)
+                        out.sum().backward()
+
+                        assert torch.flagos.current_device() == dev_idx
+                        out_cpu = out.detach().cpu()
+                        in_grad_cpu = inp.grad.detach().cpu()
+                        torch.testing.assert_close(out_cpu, ref_out, rtol=RTOL, atol=ATOL)
+                        torch.testing.assert_close(
+                            in_grad_cpu, ref_inp_grad, rtol=RTOL, atol=ATOL
+                        )
+                        full_grads = {{}}
+                        with FSDP.summon_full_params(fsdp_mod, with_grads=True):
+                            for n, p in fsdp_mod.named_parameters():
+                                clean = n.replace("_fsdp_wrapped_module.", "")
+                                g = p.grad.detach().cpu().clone()
+                                torch.testing.assert_close(
+                                    g, cpu_grads[clean], rtol=RTOL, atol=ATOL
+                                )
+                                full_grads[clean] = g
+                        results[mode_name] = (out_cpu, in_grad_cpu, full_grads)
+                        del out, inp, runner, fsdp_mod
+                        gc.collect()
+                        torch.flagos.synchronize()
+                        dist.barrier()
+
                     torch.testing.assert_close(
-                        in_grad_cpu, ref_inp_grad, rtol=RTOL, atol=ATOL
+                        results["compile"][0], results["eager"][0], rtol=RTOL, atol=ATOL
                     )
-                    full_grads = {{}}
-                    with FSDP.summon_full_params(fsdp_mod, with_grads=True):
-                        for n, p in fsdp_mod.named_parameters():
-                            clean = n.replace("_fsdp_wrapped_module.", "")
-                            g = p.grad.detach().cpu().clone()
-                            torch.testing.assert_close(
-                                g, cpu_grads[clean], rtol=RTOL, atol=ATOL
-                            )
-                            full_grads[clean] = g
-                    results[mode_name] = (out_cpu, in_grad_cpu, full_grads)
-                    del out, inp, runner, fsdp_mod
+                    torch.testing.assert_close(
+                        results["compile"][1], results["eager"][1], rtol=RTOL, atol=ATOL
+                    )
+                    for k in results["eager"][2]:
+                        torch.testing.assert_close(
+                            results["compile"][2][k],
+                            results["eager"][2][k],
+                            rtol=RTOL,
+                            atol=ATOL,
+                        )
+                finally:
+                    dist.destroy_process_group()
                     gc.collect()
-                    torch.flagos.synchronize()
-                    dist.barrier()
+                    torch.flagos.empty_cache()
 
-                torch.testing.assert_close(
-                    results["compile"][0], results["eager"][0], rtol=RTOL, atol=ATOL
-                )
-                torch.testing.assert_close(
-                    results["compile"][1], results["eager"][1], rtol=RTOL, atol=ATOL
-                )
-                for k in results["eager"][2]:
-                    torch.testing.assert_close(
-                        results["compile"][2][k],
-                        results["eager"][2][k],
-                        rtol=RTOL,
-                        atol=ATOL,
+
+            def _main() -> int:
+                cache_base = os.environ["FLAGOS_FSDP_TEST_CACHE_ROOT"]
+                dev_offset = int(os.environ.get("FLAGOS_FSDP_DEVICE_OFFSET", "0"))
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    master_port = sock.getsockname()[1]
+
+                ctx = mp.get_context("spawn")
+                procs = [
+                    ctx.Process(
+                        target=_run_worker,
+                        args=(local, master_port, cache_base, dev_offset),
                     )
-            finally:
-                dist.destroy_process_group()
-                gc.collect()
-                torch.flagos.empty_cache()
+                    for local in range(2)
+                ]
+                for p in procs:
+                    p.start()
+                deadline_s = 240.0
+                import time
+
+                start = time.monotonic()
+                while any(p.is_alive() for p in procs):
+                    if any(p.exitcode not in (None, 0) for p in procs):
+                        break
+                    if time.monotonic() - start > deadline_s:
+                        break
+                    time.sleep(0.2)
+
+                rc = 0
+                for p in procs:
+                    if p.is_alive():
+                        rc = 1
+                        p.terminate()
+                for p in procs:
+                    p.join(timeout=15)
+                    if p.is_alive():
+                        p.kill()
+                        p.join(timeout=5)
+                    if p.exitcode != 0:
+                        rc = p.exitcode or 1
+                return rc
+
+
+            if __name__ == "__main__":
+                sys.exit(_main())
             """
         ),
         encoding="utf-8",
@@ -1878,17 +1960,12 @@ def test_compile_fsdp_two_rank_forward_backward_parity(tmp_path):
     env = {
         **os.environ,
         "FLAGOS_FSDP_TEST_CACHE_ROOT": str(cache_root),
+        "FLAGOS_FSDP_DEVICE_OFFSET": str(dev_offset),
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
+        "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
     }
     proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "torch.distributed.run",
-            "--standalone",
-            "--nproc_per_node=2",
-            str(worker),
-        ],
+        [sys.executable, str(worker)],
         capture_output=True,
         text=True,
         env=env,
