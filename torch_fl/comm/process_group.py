@@ -1273,6 +1273,13 @@ _REDIRECT_MARKER = "_flagos_redirects_gloo"
 _ORIGINAL_NEW_GROUP = None
 
 
+def _uses_flagos_accelerator() -> bool:
+    try:
+        return torch._C._get_accelerator().type in _HOST_STAGED_TYPES
+    except Exception:  # noqa: BLE001 - an unavailable query leaves backend selection alone
+        return False
+
+
 def _gloo_requests_are_redirected() -> bool:
     """True when a gloo request on this host has nothing left to fall back on.
 
@@ -1286,13 +1293,7 @@ def _gloo_requests_are_redirected() -> bool:
     Gated by ``FLAGOS_DIST_REDIRECT_GLOO`` so the requested backend can still be
     honoured verbatim while debugging a distributed problem.
     """
-    if not _env.flag("FLAGOS_DIST_REDIRECT_GLOO", True):
-        return False
-    try:
-        accelerator = torch._C._get_accelerator().type
-    except Exception:  # noqa: BLE001 - no accelerator query: leave gloo alone
-        return False
-    return accelerator in _HOST_STAGED_TYPES
+    return _env.flag("FLAGOS_DIST_REDIRECT_GLOO", True) and _uses_flagos_accelerator()
 
 
 def _needs_gloo_redirect(value) -> bool:
@@ -1306,26 +1307,35 @@ def _needs_gloo_redirect(value) -> bool:
     return isinstance(value, str) and value.lower() == dist.Backend.GLOO
 
 
-def _redirect_backend_argument(args, kwargs, position, keyword):
-    """Rewrite a gloo backend argument to "flagos", wherever it was passed.
+def _needs_nccl_redirect(value, device_id) -> bool:
+    if not isinstance(value, str) or value.lower() != dist.Backend.NCCL:
+        return False
+    if device_id is not None and not isinstance(device_id, int):
+        if getattr(device_id, "type", None) not in _HOST_STAGED_TYPES:
+            return False
+    return _env.flag("FLAGOS_DIST_REDIRECT_NCCL", False) and _uses_flagos_accelerator()
+
+
+def _redirect_backend_argument(args, kwargs, position, keyword, device_id=None):
+    """Rewrite a legacy backend argument to "flagos", wherever it was passed.
 
     Both spellings have to be handled: torchrun and the transformers FSDP2 tests
     pass ``backend=`` by keyword, while ``new_group`` is usually called
     positionally.
     """
-    if len(args) > position:
-        if _needs_gloo_redirect(args[position]):
-            args = list(args)
-            args[position] = _FLAGOS_BACKEND
-            args = tuple(args)
-    elif keyword in kwargs and _needs_gloo_redirect(kwargs[keyword]):
+    positional = len(args) > position
+    value = args[position] if positional else kwargs.get(keyword)
+    if _needs_gloo_redirect(value) or _needs_nccl_redirect(value, device_id):
+        if positional:
+            args = (*args[:position], _FLAGOS_BACKEND, *args[position + 1 :])
+            return args, kwargs
         kwargs = dict(kwargs)
         kwargs[keyword] = _FLAGOS_BACKEND
     return args, kwargs
 
 
 def redirect_gloo_requests() -> None:
-    """Interpose on ``init_process_group`` / ``new_group`` to serve gloo requests.
+    """Interpose on ``init_process_group`` / ``new_group`` for legacy requests.
 
     ``torch.distributed`` sends every device type it does not recognise to gloo,
     so on a flagos host ``init_process_group(backend="gloo")`` -- what torchrun
@@ -1350,6 +1360,10 @@ def redirect_gloo_requests() -> None:
     process-wide ``FLAGOS_DIST_REDIRECT_GLOO=0`` switch is the blunter form of
     the same thing.
 
+    ``FLAGOS_DIST_REDIRECT_NCCL=1`` also serves plain NCCL requests through the
+    FlagOS backend when FlagOS is active. An explicitly selected CUDA device
+    keeps NCCL, as does a process with the opt-in disabled.
+
     Called once at ``import torch_fl``; subsequent calls are no-ops.
     """
     if getattr(dist.init_process_group, _REDIRECT_MARKER, False):
@@ -1363,14 +1377,16 @@ def redirect_gloo_requests() -> None:
 
     @functools.wraps(original_init_process_group)
     def init_process_group(*args, **kwargs):
-        args, kwargs = _redirect_backend_argument(args, kwargs, 0, "backend")
+        device_id = args[8] if len(args) > 8 else kwargs.get("device_id")
+        args, kwargs = _redirect_backend_argument(args, kwargs, 0, "backend", device_id)
         return original_init_process_group(*args, **kwargs)
 
     @functools.wraps(original_new_group)
     def new_group(*args, **kwargs):
         # new_group(ranks=None, timeout=..., backend=None, ...): backend is the
         # third positional argument.
-        args, kwargs = _redirect_backend_argument(args, kwargs, 2, "backend")
+        device_id = args[6] if len(args) > 6 else kwargs.get("device_id")
+        args, kwargs = _redirect_backend_argument(args, kwargs, 2, "backend", device_id)
         return original_new_group(*args, **kwargs)
 
     init_process_group._flagos_redirects_gloo = True

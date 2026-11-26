@@ -528,6 +528,12 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "device. Set 0 to keep the requested backend, which then rejects flagos "
         "tensors. See torch_fl/comm/process_group.py",
     ),
+    "FLAGOS_DIST_REDIRECT_NCCL": (
+        SCOPE_RUNTIME,
+        "0 (off)",
+        "Route plain NCCL requests through the flagos process group when FlagOS "
+        "is the active accelerator and the caller has not selected a CUDA device",
+    ),
     "FLAGOS_DIST_STAGED_GLOO": (
         SCOPE_RUNTIME,
         "1 (on)",

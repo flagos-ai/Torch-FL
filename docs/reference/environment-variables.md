@@ -133,6 +133,7 @@ caller does *not* ask for it by name. See
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
 | `FLAGOS_DIST_REDIRECT_GLOO` | Runtime | `1` (on) | Answer a plain `init_process_group(backend="gloo")` or `new_group` request with the flagos backend when the process accelerator is the flagos device. `torch.distributed` routes any device type it does not recognise to gloo, and a `ProcessGroupGloo` rejects flagos tensors with `unsupported device type flagos` ([#263](https://github.com/flagos-ai/Torch-FL/issues/263)). Set `0` to keep the requested backend |
+| `FLAGOS_DIST_REDIRECT_NCCL` | Runtime | `0` (off) | Serve plain NCCL requests through the FlagOS process group on an active FlagOS device. Explicit CUDA device requests keep native NCCL |
 | `FLAGOS_DIST_STAGED_GLOO` | Runtime | `1` (on) | Allow the host-staged gloo inner backend: the last fallback tier of the `"flagos"` backend when no vendor communicator (FlagCX/NCCL/HCCL/MCCL) is available. It needs no vendor library at all but copies every flagos operand device->host->device per collective. Set `0` to fail loudly instead of staging. One warning is emitted the first time a group is built on this tier |
 
 ### Vendor compatibility
