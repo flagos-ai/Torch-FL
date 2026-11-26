@@ -727,6 +727,15 @@ def flagos_compile_backend(
 
     install_raw_stream_getter()
 
+    # FlagGems kernels use a module-level ``ext`` alias; Inductor re-emits their
+    # source without that import, so add it to the common Triton prelude before
+    # any kernel is generated.
+    from torch_fl.compile.triton_flaggems_kernel_imports import (
+        patch_flaggems_kernel_prelude,
+    )
+
+    patch_flaggems_kernel_prelude()
+
     # Hand the graph to inductor untouched -- it is on flagos and stays there.
     try:
         return compile_fx(gm, example_inputs, config_patches=config_patches)
