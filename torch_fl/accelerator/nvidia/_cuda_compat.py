@@ -399,14 +399,20 @@ def _load_cudart():
     global _cudart
     if _cudart is not None:
         return _cudart
-    try:
-        _cudart = ctypes.CDLL("libcudart.so")
-    except OSError:
-        cuda_home = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+    cuda_home = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+    sonames = (
+        "libcudart.so",
+        "libcudart.so.12",
+        "libcudart.so.13",
+        "libcudart.so.11.0",
+    )
+    candidates = list(sonames) + [f"{cuda_home}/lib64/{name}" for name in sonames]
+    for candidate in candidates:
         try:
-            _cudart = ctypes.CDLL(f"{cuda_home}/lib64/libcudart.so")
+            _cudart = ctypes.CDLL(candidate)
+            break
         except OSError:
-            _cudart = None
+            continue
     return _cudart
 
 
@@ -722,10 +728,11 @@ def patch_torch_cuda_for_flagos():
         torch.cuda.reset_max_memory_allocated = torch.cuda.reset_peak_memory_stats
 
     # triton reads torch._C._cuda_getCurrentRawStream(idx) -> raw handle.
-    native_stream = getattr(
-        getattr(_flagos, "_C", None),
-        "_get_native_current_raw_stream",
-        None,
+    core = getattr(_flagos, "_C", None) or getattr(
+        sys.modules.get("torch_fl"), "_C", None
+    )
+    native_stream = getattr(core, "_get_native_current_raw_stream", None) or getattr(
+        core, "_get_nvidia_current_raw_stream", None
     )
 
     def _current_raw_stream(idx=0):
@@ -739,6 +746,77 @@ def patch_torch_cuda_for_flagos():
         torch._C._cuda_synchronize = lambda: _synchronize()
     except Exception:
         pass
+
+    def _is_current_stream_capturing() -> bool:
+        if _flagos is not None:
+            is_init = getattr(_flagos, "is_initialized", None)
+            if callable(is_init) and not is_init():
+                return False
+        try:
+            raw = _current_raw_stream(_current_device())
+        except Exception:
+            return False
+        status = ctypes.c_int(0)
+        cudart = _load_cudart()
+        if cudart is not None:
+            try:
+                if (
+                    cudart.cudaStreamIsCapturing(
+                        ctypes.c_void_p(raw), ctypes.byref(status)
+                    )
+                    == 0
+                ):
+                    return status.value != 0
+            except (AttributeError, OSError):
+                pass
+        cuda = _load_libcuda()
+        if cuda is not None:
+            try:
+                if (
+                    cuda.cuStreamIsCapturing(ctypes.c_void_p(raw), ctypes.byref(status))
+                    == 0
+                ):
+                    return status.value != 0
+            except (AttributeError, OSError):
+                pass
+        return False
+
+    # Note: ``hasattr(torch._C, "_CudaStreamBase")`` is True on CPU torch wheels
+    # too because ``torch.cuda.streams`` injects a ``torch._utils._dummy_type``
+    # placeholder at import time. Import ``torch.cuda.graphs`` via importlib
+    # first so its module-level placeholder bindings exist without shadowing the
+    # module-scope ``torch`` binding inside this function.
+    import importlib
+
+    try:
+        importlib.import_module("torch.cuda.graphs")
+    except Exception:
+        pass
+    graphs_mod = getattr(torch.cuda, "graphs", None)
+    c_capture = getattr(torch._C, "_cuda_isCurrentStreamCapturing", None)
+    graphs_capture = (
+        getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None)
+        if graphs_mod is not None
+        else None
+    )
+    if (
+        not cuda_graph_supported()
+        or c_capture is None
+        or isinstance(c_capture, type)
+        or getattr(c_capture, "__module__", None) == "torch._utils"
+        or isinstance(graphs_capture, type)
+        or getattr(graphs_capture, "__module__", None) == "torch._utils"
+    ):
+        torch.cuda.is_current_stream_capturing = _is_current_stream_capturing
+        if graphs_mod is not None:
+            graphs_mod.is_current_stream_capturing = _is_current_stream_capturing
+            graphs_mod._cuda_isCurrentStreamCapturing = _is_current_stream_capturing
+        try:
+            torch._C._cuda_isCurrentStreamCapturing = _is_current_stream_capturing
+        except Exception:
+            pass
+        if _flagos is not None:
+            _flagos.is_current_stream_capturing = _is_current_stream_capturing
 
     # Seeding / RNG source: the CPU-torch wheel ships an EMPTY
     # torch.cuda.default_generators, and torch.manual_seed() -> [nothing on

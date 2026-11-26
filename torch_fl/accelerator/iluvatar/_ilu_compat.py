@@ -319,6 +319,15 @@ def install_ilu_cuda_shim():
     # flagos owns real event and stream objects over the same runtime.
     cuda.Event = flagos.Event
     cuda.Stream = flagos.Stream
+    capture_query = getattr(flagos, "is_current_stream_capturing", lambda: False)
+    cuda.is_current_stream_capturing = capture_query
+    graphs_mod = getattr(cuda, "graphs", None)
+    if graphs_mod is not None:
+        graphs_mod.is_current_stream_capturing = capture_query
+        if isinstance(
+            getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None), type
+        ):
+            graphs_mod._cuda_isCurrentStreamCapturing = capture_query
 
 
 def patch_iluvatar_flag_gems_device_name():

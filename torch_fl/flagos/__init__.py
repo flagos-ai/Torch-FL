@@ -584,6 +584,29 @@ def stream(s):
     return _streams.stream_scope(s)
 
 
+def is_current_stream_capturing() -> bool:
+    """Return True if graph capture is underway on the current FlagOS stream.
+
+    Returns False without initializing a device context when no capture is
+    active or when the underlying PyTorch build has only the CPU wheel's dummy
+    ``_cuda_isCurrentStreamCapturing`` placeholder.
+    """
+    if not is_initialized():
+        return False
+    c_fn = getattr(torch._C, "_cuda_isCurrentStreamCapturing", None)
+    if (
+        c_fn is not None
+        and not isinstance(c_fn, type)
+        and getattr(c_fn, "__module__", None) != "torch._utils"
+        and c_fn is not is_current_stream_capturing
+    ):
+        try:
+            return bool(c_fn())
+        except Exception:
+            return False
+    return False
+
+
 def get_amp_supported_dtype():
     """Return list of supported dtypes for AMP (Automatic Mixed Precision).
 
@@ -840,6 +863,7 @@ __all__ = [
     "Event",
     "current_stream",
     "stream",
+    "is_current_stream_capturing",
     "default_generators",
     "empty_cache",
     "memory_stats",

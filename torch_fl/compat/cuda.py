@@ -300,6 +300,40 @@ def install_alias(flagos) -> None:
     # stock one goes through torch.cuda._lazy_init -> "Torch not compiled with
     # CUDA enabled". Point it at the flagos properties instead.
     torch.cuda.get_device_properties = flagos.get_device_properties
+    capture_query = getattr(flagos, "is_current_stream_capturing", lambda: False)
+    torch.cuda.is_current_stream_capturing = capture_query
+    graphs_mod = getattr(torch.cuda, "graphs", None)
+    if graphs_mod is not None:
+        graphs_mod.is_current_stream_capturing = capture_query
+        if isinstance(
+            getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None), type
+        ):
+            graphs_mod._cuda_isCurrentStreamCapturing = capture_query
+    if isinstance(
+        getattr(torch._C, "_cuda_isCurrentStreamCapturing", None),
+        (type, type(None)),
+    ):
+        try:
+            torch._C._cuda_isCurrentStreamCapturing = capture_query
+        except Exception:
+            pass
+
+
+def install_ppu_stream_capture_query(flagos) -> None:
+    """Replace the CPU wheel's cached CUDA graph query on PPU only."""
+    graphs = getattr(torch.cuda, "graphs", None)
+    if graphs is None:
+        return
+    cached_query = getattr(graphs, "_cuda_isCurrentStreamCapturing", None)
+    if not (
+        isinstance(cached_query, type)
+        or getattr(cached_query, "__module__", None) == "torch._utils"
+    ):
+        return
+    query = flagos.is_current_stream_capturing
+    torch.cuda.is_current_stream_capturing = query
+    graphs.is_current_stream_capturing = query
+    graphs._cuda_isCurrentStreamCapturing = query
 
 
 def is_active() -> bool:
