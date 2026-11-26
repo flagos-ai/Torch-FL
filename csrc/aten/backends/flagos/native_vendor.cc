@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../../generated/ops.h"
+#include "../../nvidia_sdpa.h"
 
 #include <torch/library.h>
 

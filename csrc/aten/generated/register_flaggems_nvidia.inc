@@ -160,7 +160,7 @@
   m.impl("col2im", WrapperCol2im);
   m.impl("conj_physical_", WrapperConjPhysicalInplace);
   m.impl("constant_pad_nd", WrapperConstantPadNd);
-  m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
+  m.impl("convolution_overrideable", FlagosNvidiaConvolutionOverrideable);
   m.impl("convolution_overrideable.out", WrapperConvolutionOverrideableOut);
   m.impl("copysign.out", WrapperCopysignOut);
   m.impl("copysign_.Tensor", WrapperCopysignInplaceTensor);
@@ -182,14 +182,14 @@
   m.impl("diagonal_backward", WrapperDiagonalBackward);
   m.impl("digamma_", WrapperDigammaInplace);
   m.impl("dist", WrapperDist);
-  m.impl("div.Scalar", WrapperDivScalar);
+  m.impl("div.Scalar", FlagosNvidiaDivScalar);
   m.impl("div.Scalar_mode", WrapperDivScalarMode);
-  m.impl("div.Tensor", WrapperDivTensor);
+  m.impl("div.Tensor", FlagosNvidiaDivTensor);
   m.impl("div.Tensor_mode", WrapperDivTensorMode);
   m.impl("div.out", WrapperDivOut);
-  m.impl("div_.Scalar", WrapperDivInplaceScalar);
+  m.impl("div_.Scalar", FlagosNvidiaDivInplaceScalar);
   m.impl("div_.Scalar_mode", WrapperDivInplaceScalarMode);
-  m.impl("div_.Tensor", WrapperDivInplaceTensor);
+  m.impl("div_.Tensor", FlagosNvidiaDivInplaceTensor);
   m.impl("div_.Tensor_mode", WrapperDivInplaceTensorMode);
   m.impl("dot", WrapperDot);
   m.impl("embedding", WrapperEmbedding);

@@ -47,8 +47,14 @@ def validate_policy(policy):
             raise ValueError("precision exceptions require evidence and dtypes")
         if set(row["dtypes"]) - {"Float", "BFloat16"}:
             raise ValueError("unmeasured precision dtype")
-        if row["family"] not in {"structured", "reduction", "blas"}:
+        if row["family"] not in {"structured", "reduction", "blas", "cudnn_sdpa"}:
             raise ValueError("unsupported native vendor family")
+        if row["family"] == "cudnn_sdpa" and (
+            policy["vendor"] != "nvidia"
+            or row["op"] != "scaled_dot_product_attention"
+            or row["dtypes"] != ["BFloat16"]
+        ):
+            raise ValueError("unsupported cuDNN SDPA contract")
         if row["family"] == "blas" and row.get("rank") not in (2, 3):
             raise ValueError("BLAS entries require matrix or batched-matrix rank")
         if row["family"] == "reduction" and (
@@ -63,11 +69,16 @@ def load_policy(vendor="nvidia"):
     return validate_policy(precision_policy(vendor))
 
 
-def schema_groups():
+def load_schemas():
     root = Path(torchgen.__file__).parent / "packaged/ATen/native"
-    parsed = parse_native_yaml(
+    return parse_native_yaml(
         str(root / "native_functions.yaml"), str(root / "tags.yaml")
     )
+
+
+def schema_groups(parsed=None):
+    if parsed is None:
+        parsed = load_schemas()
     groups = {
         str(group.functional.func.name): group
         for group in get_grouped_native_functions(parsed.native_functions)
@@ -77,38 +88,55 @@ def schema_groups():
 
 
 def render(policy):
-    groups, backend = schema_groups()
+    parsed = load_schemas()
+    groups, backend = schema_groups(parsed)
+    natives = {str(func.func.name): func for func in parsed.native_functions}
     policy_hash = hashlib.sha256(
         json.dumps(policy, sort_keys=True).encode()
     ).hexdigest()
     entries, functions, bindings, headers, catalog = [], [], [], set(), []
     for index, row in enumerate(sorted(policy["operators"], key=lambda r: r["op"])):
         name = row["op"]
-        group = groups.get(name)
-        if group is None:
-            raise ValueError(f"no structured functional schema for {name}")
-        metadata = backend.get_kernel(group)
-        if metadata is None or not metadata.structured:
-            raise ValueError(f"no structured vendor implementation for {name}")
-        with native_function_manager(group):
-            pointer, result, args = unified_sig(group.functional)
-            meta_args = structured.meta_arguments(group)
-            impl_args = structured.impl_arguments(group)
-        names = [arg_name for _, arg_name in args]
-        if (
-            result != "at::Tensor"
-            or not args
-            or args[0][0] != "const at::Tensor &"
-            or [arg.name for arg in meta_args] != names
-            or [arg.name for arg in impl_args] != names + ["out"]
-        ):
-            raise ValueError(f"unsupported structured argument/result boundary: {name}")
-        parent = f"{metadata.cpp_namespace}::structured_{metadata.kernel}"
-        headers.add(f"ATen/ops/{group.functional.func.name.name.base}_native.h")
+        is_cudnn = row["family"] == "cudnn_sdpa"
+        if is_cudnn:
+            functional = natives[name]
+            with native_function_manager(functional):
+                pointer, result, args = unified_sig(functional)
+            if result != "at::Tensor":
+                raise ValueError(f"unsupported cuDNN result: {name}")
+            parent = "at::native::_cudnn_attention_forward"
+            headers.add("backends/nvidia/sdpa.h")
+            fn_type, dispatcher = "NvidiaSdpaFn", "nvidia_sdpa_dispatcher"
+        else:
+            group = groups.get(name)
+            if group is None:
+                raise ValueError(f"no structured functional schema for {name}")
+            metadata = backend.get_kernel(group)
+            if metadata is None or not metadata.structured:
+                raise ValueError(f"no structured vendor implementation for {name}")
+            functional = group.functional
+            with native_function_manager(group):
+                pointer, result, args = unified_sig(functional)
+                meta_args = structured.meta_arguments(group)
+                impl_args = structured.impl_arguments(group)
+            names = [arg_name for _, arg_name in args]
+            if (
+                result != "at::Tensor"
+                or not args
+                or args[0][0] != "const at::Tensor &"
+                or [arg.name for arg in meta_args] != names
+                or [arg.name for arg in impl_args] != names + ["out"]
+            ):
+                raise ValueError(
+                    f"unsupported structured argument/result boundary: {name}"
+                )
+            parent = f"{metadata.cpp_namespace}::structured_{metadata.kernel}"
+            headers.add(f"ATen/ops/{functional.func.name.name.base}_native.h")
+            fn_type, dispatcher = schema_to_cpp_name(name)
         record = {
             "vendor": policy["vendor"],
             "op": name,
-            "schema": str(group.functional.func),
+            "schema": str(functional.func),
             "pointer": pointer,
             "parent": parent,
             "family": row["family"],
@@ -119,38 +147,46 @@ def render(policy):
             json.dumps(record, sort_keys=True).encode()
         ).hexdigest()
         catalog.append(record)
-        fn_type, dispatcher = schema_to_cpp_name(name)
         encoded = json.dumps(json.dumps(record, sort_keys=True, separators=(",", ":")))
         entries.append(
             f'NATIVE_VENDOR_ENTRY("{policy["vendor"]}", {json.dumps(name)}, '
             f"{json.dumps(record['abi'])}, {encoded}, {fn_type}, {dispatcher})"
         )
+        names = [arg_name for _, arg_name in args]
         arguments = ", ".join(f"{kind} {arg_name}" for kind, arg_name in args)
         call_args = ", ".join(names)
-        if row["family"] == "blas":
-            if names != ["self", "mat2"]:
-                raise ValueError(f"unsupported BLAS argument boundary: {name}")
-            call = f"Matrix<{parent}, {row['rank']}>({call_args})"
-        elif row["family"] == "reduction":
-            if names != ["self", "dim", "keepdim", "dtype"]:
-                raise ValueError(f"unsupported reduction argument boundary: {name}")
-            call = f"Reduction<{parent}>(at::native::{row['stub']}, {call_args})"
+        event = f'  RECORD_FUNCTION("flagos::{policy["vendor"]}::{name}", std::vector<c10::IValue>());\n'
+        if is_cudnn:
+            body = (
+                event
+                + f"  auto result = CudnnSdpa({call_args});\n"
+                + f"  if (result.defined()) ++hits[{index}];\n"
+                + "  return result;\n"
+            )
         else:
-            call = f"StructuredCall<{parent}>({call_args})"
-        scope = "VendorDeviceScope" if row["family"] == "blas" else "VendorScope"
-        admitted = " || ".join(
-            f"self.scalar_type() == at::ScalarType::{dtype}"
-            for dtype in sorted(row["dtypes"])
-        )
-        functions.append(
-            f"at::Tensor Entry_{index}({arguments}) {{\n"
-            f'  TORCH_CHECK({admitted}, "unmeasured native vendor dtype: {name}");\n'
-            f"  ++hits[{index}];\n"
-            f'  RECORD_FUNCTION("flagos::{policy["vendor"]}::{name}", std::vector<c10::IValue>());\n'
-            f"  {scope} scope(self);\n"
-            f"  return {call};\n"
-            "}\n"
-        )
+            if row["family"] == "blas":
+                if names != ["self", "mat2"]:
+                    raise ValueError(f"unsupported BLAS argument boundary: {name}")
+                call = f"Matrix<{parent}, {row['rank']}>({call_args})"
+            elif row["family"] == "reduction":
+                if names != ["self", "dim", "keepdim", "dtype"]:
+                    raise ValueError(f"unsupported reduction argument boundary: {name}")
+                call = f"Reduction<{parent}>(at::native::{row['stub']}, {call_args})"
+            else:
+                call = f"StructuredCall<{parent}>({call_args})"
+            scope = "VendorDeviceScope" if row["family"] == "blas" else "VendorScope"
+            admitted = " || ".join(
+                f"self.scalar_type() == at::ScalarType::{dtype}"
+                for dtype in sorted(row["dtypes"])
+            )
+            body = (
+                f'  TORCH_CHECK({admitted}, "unmeasured native vendor dtype: {name}");\n'
+                f"  ++hits[{index}];\n"
+                + event
+                + f"  {scope} scope(self);\n"
+                + f"  return {call};\n"
+            )
+        functions.append(f"at::Tensor Entry_{index}({arguments}) {{\n{body}}}\n")
         bindings.append(
             f"  result.append(py::make_tuple({json.dumps(name)}, "
             f"{json.dumps(record['abi'])}, reinterpret_cast<uintptr_t>(&Entry_{index}), "

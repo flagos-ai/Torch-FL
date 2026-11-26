@@ -3,6 +3,7 @@
 #include "common.h"
 
 #include <ATen/Context.h>
+#include <flagos_env.h>
 
 #include <atomic>
 #include <cstring>
@@ -338,7 +339,8 @@ void SetStrictHostRoutes(bool enabled) {
 }
 
 bool CpuFallbackAllowed() {
-  return !strict_host_routes.load(std::memory_order_relaxed);
+  static const bool disabled = flagos_env::EnvFlag("FLAGOS_DISABLE_CPU_FALLBACK");
+  return !disabled && !strict_host_routes.load(std::memory_order_relaxed);
 }
 
 bool FlagGemsMatmulNeedsHost(at::ScalarType dtype) {

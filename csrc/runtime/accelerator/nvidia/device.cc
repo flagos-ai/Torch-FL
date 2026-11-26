@@ -31,20 +31,26 @@ Error_t GetDeviceCount(int* count) {
   return Success;
 }
 
-// Ask the driver rather than caching the index ourselves. flagos aliases the
-// same physical device as torch's CUDA backend, and cudaSetDevice's current
-// device is already thread-local, so a shadow copy here can only diverge from
-// it: torch.cuda.set_device() moves the driver's index without going through
-// our SetDevice, leaving the cached value stale. Any DeviceGuard that then
-// reads the stale value as "previous" restores the process to a device that was
-// never current -- observed as a flagos allocation resetting
-// torch.cuda.current_device() back to 0.
 Error_t GetDevice(int* device) {
   if (!device) {
     return ErrorUnknown;
   }
 
-  cudaError_t err = cudaGetDevice(device);
+  // CUDA fixes the visible device set when the process initializes the runtime.
+  // With exactly one visible device, even a CUDA caller outside FlagOS can
+  // only select ordinal zero. Keep reading the driver in multi-device jobs.
+  static const bool single_device = [] {
+    int count = 0;
+    return GetDeviceCount(&count) == Success && count == 1;
+  }();
+  if (single_device) {
+    *device = 0;
+    return Success;
+  }
+
+  // torch.cuda.set_device() can change the thread's current device without
+  // going through FlagOS. A multi-device guard must read the driver's value.
+  const auto err = cudaGetDevice(device);
   return (err == cudaSuccess) ? Success : ErrorUnknown;
 }
 

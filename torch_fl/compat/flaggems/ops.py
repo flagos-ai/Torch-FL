@@ -541,22 +541,11 @@ _PATCH_LIBS = []
 
 
 def _flagos_index_put_roundtrip(self, indices, values, accumulate):
-    """What ``WrapperIndexPut_`` does: scatter on the CPU and copy back.
-
-    The C++ wrapper cannot be code-generated, because its index argument is
-    ``Tensor?[]`` and the FlagGems bridge's ``IValueToPython`` has no conversion
-    for that type -- so ``index_put_`` copies its operands to the CPU, runs the
-    CPU kernel there and copies ``self`` back. This is that path, kept as the
-    fallback for anything the FlagGems kernel does not serve: the two produce
-    the same tensor, so a fallback costs time and nothing else.
-
-    ``torch.ops.aten.index_put_`` rather than ``Tensor.index_put_``: the method
-    form rejects a ``None`` entry in the index list, and ``None`` is what the
-    ``x[:, mask] = v`` spelling the model uses produces.
-    """
+    """Scatter on the CPU when the caller permits the legacy fallback."""
     self_cpu = self.cpu()
     values_cpu = values.cpu()
     indices_cpu = [i.cpu() if isinstance(i, torch.Tensor) else i for i in indices]
+    # The Tensor method rejects the None entry produced by x[:, mask] = v.
     torch.ops.aten.index_put_(self_cpu, indices_cpu, values_cpu, accumulate)
     self.copy_(self_cpu)
     return self
@@ -565,14 +554,9 @@ def _flagos_index_put_roundtrip(self, indices, values, accumulate):
 def patch_index_put(accelerator: str):
     """Run ``index_put_`` on FlagGems' Triton kernel, not on a CPU round-trip.
 
-    ``index_put_``/``_index_put_impl_`` are registered by hand in
-    ``csrc/aten/register.cc`` (``WrapperIndexPut_``) as ``self.cpu() -> CPU
-    index_put_ -> self.copy_(self_cpu)``, and they are in the codegen's
-    ``MANUAL_REGISTERED_OPS`` because the wrapper cannot be expressed otherwise:
-    a ``Tensor?[]`` index list has no ``IValueToPython`` conversion, so no
-    generated kernel can be handed to the bridge. FlagGems ships the op as a
-    Triton kernel, so the round-trip is a per-call cost with no coverage reason
-    behind it.
+    The handwritten C++ registration retains a legacy CPU route. This patch
+    prefers the published FlagGems kernel on supported platforms and checks
+    the fallback policy before attempting a host round trip.
 
     Measured on a DCU bw1000, in the Qwen-Image-2.1 denoise loop, where the op
     is the largest exclusive entry in the steady-state census (24 calls over
@@ -636,9 +620,8 @@ def patch_index_put(accelerator: str):
             try:
                 gems_index_put(self, list(indices), values, accumulate)
             except Exception:
-                # Narrowed to Exception, and only ever to a path that computes
-                # the same tensor: FlagGems' op is the fast path, the round-trip
-                # is the guaranteed one.
+                if not torch.ops.flagos.cpu_fallback_allowed():
+                    raise
                 return _flagos_index_put_roundtrip(self, indices, values, accumulate)
             return self
 

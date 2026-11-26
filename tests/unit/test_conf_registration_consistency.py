@@ -305,11 +305,10 @@ def test_full_coverage_confs_share_one_op_set():
 
 @pytest.mark.anyplatform
 def test_cuda_conf_is_the_generated_base_list():
-    """``backends_nvidia.conf`` is rewritten by ``codegen_ops.py`` and therefore
-    covers exactly the generated op list, without the widened vendor-only ops.
-    """
-    routes = _parse_conf(CONF_DIR / "backends_nvidia.conf")
-    widened = EXTRA_NATIVE["ascend"] | EXTRA_ROUTED
+    """The NVIDIA generator includes the SDPA composite's optional vendor route."""
+    routes = _parse_conf(CONF_DIR / "backends_nvidia.conf", conditions=True)
+    assert routes.pop("scaled_dot_product_attention") == "none; BFloat16:nvidia"
+    widened = EXTRA_NATIVE["ascend"]
     assert not (set(routes) & widened), (
         f"backends_nvidia.conf should not list the widened vendor-only ops "
         f"{sorted(widened)}; it is the generated base list"
@@ -693,7 +692,7 @@ def test_conf_route_counts_are_stable():
         # The wheel's behaviour is unchanged: register_flaggems_nvidia.inc, the
         # only registration a boxing-off build includes, claims the 549 FlagGems
         # routes and none of these, so they already reached cpu_fallback.
-        "nvidia": {"flaggems": 550, "none": 1484},
+        "nvidia": {"flaggems": 550, "none": 1485},
         # dcu/metax/ppu are CUDA-ABI platforms with no vendor kernel of their
         # own on this tree, and a default conf never routes boxing (AGENTS.md,
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each
@@ -1022,12 +1021,10 @@ def test_soft_lowp_claims_do_not_duplicate_the_generated_list(platform):
 # not compile, and cpu_fallback re-dispatches the *same* op onto ATen's raising
 # CompositeExplicitAutograd stub. The forward and the backward are claimed
 # separately because what the generated list already covers differs: the
-# CUDA-ABI confs route conv to ``cuda`` on cuda/dcu (so the FlagGems list names
-# neither op) and to ``flaggems`` on metax/ppu (so it already names the
-# forward, and claiming it again would duplicate an m.impl in the same
-# TORCH_LIBRARY_IMPL body -- a compile error).
+# DCU list lacks both operators. NVIDIA, MetaX and PPU have a generated
+# forward registration, so their fallback covers backward only.
 CONV_CPU_CROSSING = {
-    "nvidia": {"convolution_overrideable", "convolution_backward_overrideable"},
+    "nvidia": {"convolution_backward_overrideable"},
     "hygon": {"convolution_overrideable", "convolution_backward_overrideable"},
     "tsingmicro": {
         "convolution_overrideable",
@@ -1035,6 +1032,13 @@ CONV_CPU_CROSSING = {
     },
     "metax": {"convolution_backward_overrideable"},
     "thead": {"convolution_backward_overrideable"},
+}
+CONV_ACCEL_MACROS = {
+    "nvidia": "FLAGOS_ACCEL_CUDA",
+    "hygon": "FLAGOS_ACCEL_DCU",
+    "metax": "FLAGOS_ACCEL_METAX",
+    "thead": "FLAGOS_ACCEL_PPU",
+    "tsingmicro": "FLAGOS_ACCEL_TSINGMICRO",
 }
 
 
@@ -1074,22 +1078,16 @@ def test_conv_claim_is_reachable_from_the_platform_arm(platform):
     kernel.
     """
     register_cc = (ATEN_DIR / "register.cc").read_text()
-    expected = {
-        "nvidia": "FLAGOS_ACCEL_CUDA",
-        "hygon": "FLAGOS_ACCEL_DCU",
-        "metax": "FLAGOS_ACCEL_METAX",
-        "thead": "FLAGOS_ACCEL_PPU",
-        "tsingmicro": "FLAGOS_ACCEL_TSINGMICRO",
-    }[platform]
+    expected = CONV_ACCEL_MACROS[platform]
 
     # The claim sits immediately after the "already claim(ed)" explanatory
     # comment in the CUDA-ABI arm; take the guard lines just above it.
     # rfind, not find: BPU and Kunlunxin claim these ops earlier in the file
     # from their own arms, and only the last claim of each is the CUDA-ABI one.
-    # metax/ppu claim the backward only, so anchor on that for them.
+    # NVIDIA, MetaX and PPU claim the backward only, so anchor on that for them.
     op = (
         "convolution_backward_overrideable"
-        if platform in ("metax", "thead")
+        if platform in ("nvidia", "metax", "thead")
         else "convolution_overrideable"
     )
     # Match on the op name only: the backward claim is wrapped across two
@@ -1105,14 +1103,9 @@ def test_conv_claim_is_reachable_from_the_platform_arm(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", ["metax", "thead"])
-def test_flaggems_list_already_covers_the_forward_on_metax_and_ppu(platform):
-    """These two must NOT claim the forward twice.
-
-    Their conf routes conv to ``flaggems``, so the generated list claims
-    ``convolution_overrideable``. A second ``m.impl`` for the same op inside
-    the same ``TORCH_LIBRARY_IMPL`` body does not compile.
-    """
+@pytest.mark.parametrize("platform", ["nvidia", "metax", "thead"])
+def test_flaggems_forward_convolution_is_not_shadowed(platform):
+    """The forward must reach the generated GPU route."""
     inc = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
     assert "convolution_overrideable" in inc, (
         f"{platform}: the generated FlagGems list no longer names "
@@ -1123,6 +1116,10 @@ def test_flaggems_list_already_covers_the_forward_on_metax_and_ppu(platform):
         f"{platform}: the generated list now claims the backward, so "
         "register.cc's wrapper claim would duplicate it"
     )
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    guard = register_cc.rsplit('m.impl("convolution_overrideable",', 1)[0]
+    guard = guard.rsplit("#if ", 1)[-1]
+    assert CONV_ACCEL_MACROS[platform] not in guard
 
 
 def test_default_cuda_cast_keeps_native_and_unsigned_fallback_paths():

@@ -232,6 +232,7 @@ import time.
 | `FLAGOS_DISABLE_CUDA_ASSETS` | Runtime | `0` (off) | Skip preloading the bundled `libtorch_cuda.so` and CUDA libraries, for builds that use system libtorch |
 | `FLAGOS_VENDOR_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to the vendor torch's `lib` directory, used when no bundled `lib_metax`/`lib_hygon`/`lib_thead` is present. Only the active accelerator's build reads it |
 | `FLAGOS_USE_CACHING_ALLOCATOR` | Runtime | `1` (on) | Caching device allocator. Set `0` to hand every allocation straight to the vendor runtime |
+| `FLAGOS_DISABLE_CPU_FALLBACK` | Runtime | `0` (off) | Raise when a FlagOS operator would compute on the CPU. Explicit CPU tensor operations and device transfers are allowed. |
 
 ### Compiler and feature backends
 

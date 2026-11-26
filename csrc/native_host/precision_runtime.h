@@ -138,16 +138,31 @@ inline c10::cuda::CUDAStream VendorStream(const at::Tensor& input) {
       reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device)), device);
 }
 
+inline bool VendorDeviceIsCurrent(c10::DeviceIndex device) {
+  static const bool single_visible_device = c10::cuda::device_count() == 1;
+  return (device == 0 && single_visible_device) ||
+      c10::cuda::current_device() == device;
+}
+
 struct VendorScope {
-  c10::cuda::CUDAStreamGuard guard;
-  explicit VendorScope(const at::Tensor& input) : guard(VendorStream(input)) {}
+  std::optional<c10::cuda::CUDAStreamGuard> guard;
+  explicit VendorScope(const at::Tensor& input) {
+    const auto stream = VendorStream(input);
+    // Default and external stream IDs can refer to the same CUDA handle.
+    if (!VendorDeviceIsCurrent(stream.device_index()) ||
+        c10::cuda::getCurrentCUDAStream(stream.device_index()).stream() != stream.stream())
+      guard.emplace(stream);
+  }
 };
 
 struct VendorDeviceScope {
   // BLAS receives the FlagOS stream explicitly through its owned handle. It
   // needs the correct device, but does not consult ATen's CUDA stream registry.
-  c10::cuda::CUDAGuard guard;
-  explicit VendorDeviceScope(const at::Tensor& input) : guard(VendorDevice(input)) {}
+  std::optional<c10::cuda::CUDAGuard> guard;
+  explicit VendorDeviceScope(const at::Tensor& input) {
+    const auto device = VendorDevice(input);
+    if (!VendorDeviceIsCurrent(device)) guard.emplace(device);
+  }
 };
 
 #endif

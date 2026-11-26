@@ -31,6 +31,9 @@
 #include "index_bounds.h"
 #include "backends/soft_lowp/format.h"
 #include "backends/soft_lowp/ops.h"
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+#include "backends/flagos/python_op_caller.h"
+#endif
 // TsingMicro's RNG kernels are claimed directly below rather than through a
 // generated list, so their declarations have to be visible here.
 #if defined(USE_TSINGMICRO)
@@ -43,6 +46,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 
@@ -56,13 +60,9 @@
 // for every platform (csrc/CMakeLists.txt), so it needs no other build state.
 //
 // The per-platform reasoning, all measured on the CUDA-ABI lanes:
-//   * cuda, dcu  -- their backends_<platform>.conf routes conv to `cuda`, and a
-//     FlagGems-primary build compiles no boxed kernels, so the route resolves
-//     to nothing and `convolution_overrideable` falls to ATen's raising
-//     CompositeExplicitAutograd stub. FlagGems has no conv kernel to route to on
-//     either platform (register_flaggems_nvidia.inc / _dcu.inc name none).
-//   * metax, ppu -- the conf routes conv to FlagGems, so the conf-derived list
-//     does claim `convolution_overrideable` and only the forward is served.
+//   * dcu -- the generated FlagGems list claims neither convolution direction.
+//   * cuda -- the conf-derived list claims a guarded FlagGems forward.
+//   * metax, ppu -- the conf-derived list claims the FlagGems forward.
 //     Nothing claims `convolution_backward_overrideable` that way, so the
 //     backward still needs the crossing (the same shape as the Iluvatar
 //     exception).
@@ -263,6 +263,13 @@ at::Tensor& WrapperIndexPut_(
     const c10::List<::std::optional<at::Tensor>>& indices,
     const at::Tensor& values,
     bool accumulate) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+  if (!at::native::flagos::CpuFallbackAllowed()) {
+    at::native::flagos::CallPythonOp_Generic(
+        "flag_gems.index_put_", {self, indices, values, accumulate});
+    return self;
+  }
+#endif
   TORCH_CHECK(at::native::flagos::CpuFallbackAllowed(),
               "native FlagGems hosts do not permit CPU fallback: aten::index_put_");
   at::Tensor self_cpu = self.cpu();
@@ -308,6 +315,63 @@ void WrapperRecordStream(at::Tensor& self, at::Stream s) {
 #endif
   alloc->record_stream(self.storage().data_ptr(), stream);
 }
+
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+std::optional<float> NvidiaScalarReciprocal(const at::Tensor& self,
+                                             const at::Scalar& divisor,
+                                             const char* op) {
+  if (self.scalar_type() != at::kFloat || self.layout() != at::kStrided ||
+      divisor.isComplex() || at::native::flagos::GetBackendForOp(op) !=
+          at::native::flagos::Backend::kFlagGems) {
+    return std::nullopt;
+  }
+  const auto value = divisor.toDouble();
+  if (value == 0.0 || !std::isfinite(value)) return std::nullopt;
+  // Match NVIDIA true division by a host scalar. CUDA computes its reciprocal
+  // in double precision and rounds it to the FP32 multiplication type.
+  const auto reciprocal = static_cast<float>(1.0 / value);
+  return std::isnormal(reciprocal) ? std::optional(reciprocal) : std::nullopt;
+}
+
+std::optional<float> NvidiaScalarReciprocal(const at::Tensor& self,
+                                             const at::Tensor& divisor,
+                                             const char* op) {
+  if (self.scalar_type() != at::kFloat || !divisor.device().is_cpu() ||
+      divisor.dim() != 0 || divisor.is_complex() ||
+      at::result_type(self, divisor) != at::kFloat) {
+    return std::nullopt;
+  }
+  return NvidiaScalarReciprocal(self, divisor.item(), op);
+}
+
+at::Tensor FlagosNvidiaDivScalar(const at::Tensor& self, const at::Scalar& divisor) {
+  if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div.Scalar")) {
+    return at::mul(self, at::Scalar(*reciprocal));
+  }
+  return at::native::flagos::div_scalar_dispatcher(self, divisor);
+}
+
+at::Tensor FlagosNvidiaDivTensor(const at::Tensor& self, const at::Tensor& divisor) {
+  if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div.Tensor")) {
+    return at::mul(self, at::Scalar(*reciprocal));
+  }
+  return at::native::flagos::div_tensor_dispatcher(self, divisor);
+}
+
+at::Tensor& FlagosNvidiaDivInplaceScalar(at::Tensor& self, const at::Scalar& divisor) {
+  if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div_.Scalar")) {
+    return self.copy_(at::mul(self, at::Scalar(*reciprocal)));
+  }
+  return at::native::flagos::div_inplace_scalar_dispatcher(self, divisor);
+}
+
+at::Tensor& FlagosNvidiaDivInplaceTensor(at::Tensor& self, const at::Tensor& divisor) {
+  if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div_.Tensor")) {
+    return self.copy_(at::mul(self, at::Scalar(*reciprocal)));
+  }
+  return at::native::flagos::div_inplace_tensor_dispatcher(self, divisor);
+}
+#endif
 
 // _fused_sdp_choice: tells PyTorch's scaled_dot_product_attention which fused
 // backend to use for PrivateUse1 tensors. Returning efficient_attention (2)
@@ -355,9 +419,9 @@ int64_t WrapperFusedSdpChoice(
 // The CUDA-ABI platforms reach this through FLAGOS_ACCEL_*, not a USE_* macro:
 // their USE_* macro is empty (they re-tag a vendor CUDA build rather than own
 // one), and since CUDA boxing became opt-in (#520) their default wheel is
-// FlagGems-primary, which compiles the conf-derived FlagGems list. On cuda and
-// dcu that list names no conv, so the forward needs this wrapper too; metax and
-// ppu do route conv to FlagGems and only need it when that route is absent.
+// FlagGems-primary, which compiles the conf-derived FlagGems list. On dcu that
+// list names no conv, so the forward needs this wrapper too. NVIDIA uses it
+// for inputs outside the FlagGems forward contract.
 // FLAGOS_CONV_NEEDS_CPU_CROSSING below is the single place that decides.
 #if defined(USE_BPU) || defined(USE_KUNLUNXIN) || defined(USE_TSINGMICRO) || \
     defined(USE_ILUVATAR) || defined(FLAGOS_CONV_NEEDS_CPU_CROSSING)
@@ -387,6 +451,36 @@ at::Tensor FlagosWrapperConvolutionOverrideable(
       groups);
   return out.to(input.device());
 }
+
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+at::Tensor FlagosNvidiaConvolutionOverrideable(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef dilation,
+    bool transposed,
+    c10::SymIntArrayRef output_padding,
+    c10::SymInt groups) {
+  const auto dtype = input.scalar_type();
+  const bool supported_dtype =
+      dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+  const bool compatible_bias = !bias || !bias->defined() ||
+      (bias->device() == input.device() && bias->scalar_type() == dtype);
+  if (!transposed && supported_dtype && compatible_bias && input.dim() >= 3 &&
+      input.dim() <= 5 && input.dim() == weight.dim() && input.numel() && weight.numel() &&
+      input.layout() == at::kStrided && weight.layout() == at::kStrided &&
+      input.device() == weight.device() && dtype == weight.scalar_type()) {
+    return at::native::flagos::convolution_overrideable_dispatcher(
+        input, weight, bias, C10_AS_INTARRAYREF_SLOW(stride),
+        C10_AS_INTARRAYREF_SLOW(padding), C10_AS_INTARRAYREF_SLOW(dilation),
+        transposed, C10_AS_INTARRAYREF_SLOW(output_padding), groups.expect_int());
+  }
+  return FlagosWrapperConvolutionOverrideable(
+      input, weight, bias, stride, padding, dilation, transposed, output_padding, groups);
+}
+#endif
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor>
 FlagosWrapperConvolutionBackwardOverrideable(
@@ -763,15 +857,14 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("_scaled_grouped_mm_v2", WrapperPrivScaledGroupedMmV2);
 #endif
 
-  // These FlagGems-primary builds have no forward or backward kernel for
-  // convolution_overrideable. MetaX and PPU already claim the forward in
-  // their generated list, so they only need the backward CPU crossing.
-#if defined(FLAGOS_ACCEL_TSINGMICRO) || defined(FLAGOS_ACCEL_CUDA) || \
-    defined(FLAGOS_ACCEL_DCU)
+  // Keep the generated forward on NVIDIA, MetaX and PPU. Registering the CPU
+  // crossing again would shadow that GPU kernel.
+#if defined(FLAGOS_ACCEL_TSINGMICRO) || defined(FLAGOS_ACCEL_DCU)
   m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
   m.impl("convolution_backward_overrideable",
       FlagosWrapperConvolutionBackwardOverrideable);
-#elif defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_PPU)
+#elif defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_METAX) || \
+    defined(FLAGOS_ACCEL_PPU)
   m.impl("convolution_backward_overrideable",
       FlagosWrapperConvolutionBackwardOverrideable);
 #endif

@@ -5,10 +5,13 @@
 #include <ATen/ops/mean_native.h>
 #include <ATen/ops/mm_native.h>
 #include <ATen/ops/pow_native.h>
+#include <ATen/ops/reciprocal_native.h>
 #include <ATen/ops/rsqrt_native.h>
+#include <ATen/ops/silu_native.h>
+#include <backends/nvidia/sdpa.h>
 
 namespace at::native::flagos::vendor {
-std::atomic<int64_t> hits[6]{};
+std::atomic<int64_t> hits[9]{};
 at::Tensor Entry_0(const at::Tensor & self, int64_t dim, bool half_to_float) {
   TORCH_CHECK(self.scalar_type() == at::ScalarType::Float, "unmeasured native vendor dtype: _softmax");
   ++hits[0];
@@ -50,21 +53,47 @@ at::Tensor Entry_4(const at::Tensor & self, const at::Scalar & exponent) {
 }
 
 at::Tensor Entry_5(const at::Tensor & self) {
-  TORCH_CHECK(self.scalar_type() == at::ScalarType::Float, "unmeasured native vendor dtype: rsqrt");
+  TORCH_CHECK(self.scalar_type() == at::ScalarType::Float, "unmeasured native vendor dtype: reciprocal");
   ++hits[5];
+  RECORD_FUNCTION("flagos::nvidia::reciprocal", std::vector<c10::IValue>());
+  VendorScope scope(self);
+  return StructuredCall<at::native::structured_reciprocal_out>(self);
+}
+
+at::Tensor Entry_6(const at::Tensor & self) {
+  TORCH_CHECK(self.scalar_type() == at::ScalarType::Float, "unmeasured native vendor dtype: rsqrt");
+  ++hits[6];
   RECORD_FUNCTION("flagos::nvidia::rsqrt", std::vector<c10::IValue>());
   VendorScope scope(self);
   return StructuredCall<at::native::structured_rsqrt_out>(self);
 }
 
+at::Tensor Entry_7(const at::Tensor & query, const at::Tensor & key, const at::Tensor & value, const ::std::optional<at::Tensor> & attn_mask, double dropout_p, bool is_causal, ::std::optional<double> scale, bool enable_gqa) {
+  RECORD_FUNCTION("flagos::nvidia::scaled_dot_product_attention", std::vector<c10::IValue>());
+  auto result = CudnnSdpa(query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
+  if (result.defined()) ++hits[7];
+  return result;
+}
+
+at::Tensor Entry_8(const at::Tensor & self) {
+  TORCH_CHECK(self.scalar_type() == at::ScalarType::Float, "unmeasured native vendor dtype: silu");
+  ++hits[8];
+  RECORD_FUNCTION("flagos::nvidia::silu", std::vector<c10::IValue>());
+  VendorScope scope(self);
+  return StructuredCall<at::native::structured_silu_out>(self);
+}
+
 py::list Bindings() {
   py::list result;
-  result.append(py::make_tuple("_softmax", "f2469f98e42b9621bdf4604ba34c7c15e989e835af2dab18950e8acfbd28b55b", reinterpret_cast<uintptr_t>(&Entry_0), hits[0].load()));
-  result.append(py::make_tuple("bmm", "f3e803fbfc82e8c224dc7243a478796e7f02b3ed0249b32cf8e63ca32a891244", reinterpret_cast<uintptr_t>(&Entry_1), hits[1].load()));
-  result.append(py::make_tuple("mean.dim", "3ee2608c6f4068601a6227a220733d7dde2e032837a63070114a78cce7d55c8f", reinterpret_cast<uintptr_t>(&Entry_2), hits[2].load()));
-  result.append(py::make_tuple("mm", "e9e07eea36b5b7b5867bd4e304d72fb4d87d4e1d34b7e925d039058db022298c", reinterpret_cast<uintptr_t>(&Entry_3), hits[3].load()));
-  result.append(py::make_tuple("pow.Tensor_Scalar", "4603619a7121cb2006f187f2a89b7ac670a5d5ba797923497577888ef8ebafe4", reinterpret_cast<uintptr_t>(&Entry_4), hits[4].load()));
-  result.append(py::make_tuple("rsqrt", "e36a8b3c11b4122e980cafc8646d40773556ddea0e11ba0430ddee231a4658fe", reinterpret_cast<uintptr_t>(&Entry_5), hits[5].load()));
+  result.append(py::make_tuple("_softmax", "28b2ae7f0bfe001c68d9c3bd9b93e8661fe29d16038204d33cb18bcf64422045", reinterpret_cast<uintptr_t>(&Entry_0), hits[0].load()));
+  result.append(py::make_tuple("bmm", "3467dcd88124773866a429f27c4f0c69f39cc4bb6634af7e8d10b5f79c48e455", reinterpret_cast<uintptr_t>(&Entry_1), hits[1].load()));
+  result.append(py::make_tuple("mean.dim", "00c0af5c87baf3cf4fee29b5751f92f01aebb42c384561d863179e139b70935a", reinterpret_cast<uintptr_t>(&Entry_2), hits[2].load()));
+  result.append(py::make_tuple("mm", "eb2e3adaa5e1a1a37b9138b7d068cc48a73590df02d8c14ab0a15df2d439fd52", reinterpret_cast<uintptr_t>(&Entry_3), hits[3].load()));
+  result.append(py::make_tuple("pow.Tensor_Scalar", "0423e85b19c261a264ff3649c8fbe1a47a5f896e77c92afe966ed03e1e905e94", reinterpret_cast<uintptr_t>(&Entry_4), hits[4].load()));
+  result.append(py::make_tuple("reciprocal", "edc458a8aa445560ed00b8e37da6c18e46b7c274b9537e151e18a94f9c7886d7", reinterpret_cast<uintptr_t>(&Entry_5), hits[5].load()));
+  result.append(py::make_tuple("rsqrt", "1e15a823450359ac1328c92ddbdca271fc65f355bcd62e4e8286521cdb377b91", reinterpret_cast<uintptr_t>(&Entry_6), hits[6].load()));
+  result.append(py::make_tuple("scaled_dot_product_attention", "b4d93a96088009bc2cda203852209d117ccf0001b10d33c9caf3f62e6845dcea", reinterpret_cast<uintptr_t>(&Entry_7), hits[7].load()));
+  result.append(py::make_tuple("silu", "551fe3cf8b7960f15a533240f6ba47c57c6304153a6dea565f5ca96a5ad458e2", reinterpret_cast<uintptr_t>(&Entry_8), hits[8].load()));
   return result;
 }
 }  // namespace at::native::flagos::vendor

@@ -202,10 +202,28 @@ _COHORTS = {
                 "reason": "The general power intrinsic differs from the vendor scalar-square path in normalization.",
             },
             {
+                "op": "reciprocal",
+                "family": "structured",
+                "dtypes": ["Float"],
+                "reason": "FP32 reciprocal changes the precomputed rotary frequencies and first denoiser output. The pinned CUDA reciprocal restores the full RoboDojo and RoboCasa V4 action and normalized-action arrays bitwise.",
+            },
+            {
                 "op": "rsqrt",
                 "family": "structured",
                 "dtypes": ["Float"],
                 "reason": "Reciprocal of square root differs from the vendor reciprocal-square-root instruction.",
+            },
+            {
+                "op": "scaled_dot_product_attention",
+                "family": "cudnn_sdpa",
+                "dtypes": ["BFloat16"],
+                "reason": "On H100 with the published CUDA wheel, BLINK used cuDNN SDPA for all 99 calls. The existing native-host candidate spent 51.8 ms in the composite SDPA calls versus 6.4 ms on CUDA. Calling the same cuDNN forward retains exact tokens on both V4 requests.",
+            },
+            {
+                "op": "silu",
+                "family": "structured",
+                "dtypes": ["Float"],
+                "reason": "Identical FP32 timestep projection inputs differ after FlagGems SiLU on H100, changing the next projection. The pinned CUDA SiLU makes the paired timestep embeddings bitwise equal.",
             },
         ],
         "sources": [

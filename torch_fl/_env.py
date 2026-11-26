@@ -573,6 +573,11 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "Caching device allocator. Set 0 to hand every allocation straight to "
         "the vendor runtime",
     ),
+    "FLAGOS_DISABLE_CPU_FALLBACK": (
+        SCOPE_RUNTIME,
+        "0 (off)",
+        "Raise when a FlagOS operator would compute on the CPU",
+    ),
     # --- Compiler and feature backends -----------------------------------
     "FLAGOS_USE_FLAGTREE": (
         SCOPE_RUNTIME,

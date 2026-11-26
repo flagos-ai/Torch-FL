@@ -44,6 +44,7 @@
 
 #include "common.h"
 #include "device_boxing.h"
+#include "nvidia_sdpa.h"
 
 #if defined(USE_CAMBRICON) && defined(FLAGOS_CAMBRICON_CNNL_EXTRA)
 #include "backends/cambricon/attention.h"
@@ -56,6 +57,10 @@
 #if defined(USE_ILUVATAR) && defined(FLAGOS_ILUVATAR_KERNEL)
 #include "backends/iluvatar/fused_attention.h"
 #endif
+
+namespace at::native::flagos {
+ADD_IMPL_TO_DISPATCHER(NvidiaSdpaFn, nvidia_sdpa_dispatcher, "scaled_dot_product_attention")
+} // namespace at::native::flagos
 
 // Cambricon and Iluvatar are in the compiled set despite being FlagGems-primary:
 // each has a fused attention of its own (cnnlFlashAttentionForward_v2 on
@@ -71,6 +76,28 @@
 
 namespace at::flagos {
 namespace {
+
+#ifdef FLAGOS_ACCEL_CUDA
+at::Tensor TryNvidiaSdpa(
+    const at::Tensor& query, const at::Tensor& key, const at::Tensor& value,
+    const std::optional<at::Tensor>& attn_mask, double dropout_p,
+    bool is_causal, std::optional<double> scale, bool enable_gqa) {
+  using namespace at::native::flagos;
+  const auto kernel = nvidia_sdpa_dispatcher.KernelFor(Backend::kNvidia);
+  if (kernel == nullptr) return {};
+  static const auto& config = GetBackendConfigForOp("scaled_dot_product_attention");
+  bool selected = config.backend == Backend::kNvidia;
+  for (const auto& clause : config.dtypes) {
+    if (at::native::flagos::detail::ConfiguredDtypeMatchesArg(clause.dtype_mask, query)) {
+      selected = clause.backend == Backend::kNvidia;
+      break;
+    }
+  }
+  if (!selected) return {};
+  return kernel(query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
+}
+#endif
+
 
 #ifdef FLAGOS_FLAGGEMS_PYTHON
 // The route below exists only when the FlagGems Python path is compiled in, so
@@ -462,6 +489,12 @@ at::Tensor WrapperScaledDotProductAttention(
     return at::native::scaled_dot_product_attention(
         query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   }
+#ifdef FLAGOS_ACCEL_CUDA
+  if (auto result = TryNvidiaSdpa(query, key, value, attn_mask, dropout_p, is_causal,
+                                 scale, enable_gqa); result.defined()) {
+    return result;
+  }
+#endif
 #if defined(USE_ILUVATAR) && defined(FLAGOS_ILUVATAR_KERNEL)
   // The vendor's fused forward (libixattnbkd), when the conf asks for it and
   // the call is inside the class it was measured on. It is ahead of the

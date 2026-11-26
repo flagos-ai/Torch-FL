@@ -549,6 +549,18 @@ py::object IValueToPython(const c10::IValue& val, const char* func_name) {
       t.append(TensorToPython(list.get(j)));
     }
     return std::move(t);
+  } else if (val.isOptionalTensorList()) {
+    auto list = val.toOptionalTensorList();
+    py::list t;
+    for (size_t j = 0; j < list.size(); ++j) {
+      const auto tensor = list.get(j);
+      if (tensor && tensor->defined()) {
+        t.append(TensorToPython(*tensor));
+      } else {
+        t.append(py::none());
+      }
+    }
+    return std::move(t);
   }
   TORCH_CHECK(false, "Unsupported IValue type in generic FlagGems caller for op: ",
               func_name);

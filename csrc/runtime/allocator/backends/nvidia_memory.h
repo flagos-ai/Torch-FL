@@ -27,8 +27,7 @@ class CudaDeviceMemory final : public DeviceMemoryInterface {
   }
 
   Error_t get_device_index(int* device) override {
-    cudaError_t err = cudaGetDevice(device);
-    return (err == cudaSuccess) ? Success : ErrorUnknown;
+    return ::GetDevice(device);
   }
 
   Error_t set_device(int device) override {

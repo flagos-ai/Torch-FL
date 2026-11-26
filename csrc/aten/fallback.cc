@@ -16,6 +16,7 @@ TORCH_LIBRARY_FRAGMENT(flagos, m) {
   m.def("strict_host_routes(bool enabled) -> ()", [](bool enabled) {
     SetStrictHostRoutes(enabled);
   });
+  m.def("cpu_fallback_allowed() -> bool", &CpuFallbackAllowed);
 }
 
 void cpu_fallback(const c10::OperatorHandle& op, torch::jit::Stack* stack) {

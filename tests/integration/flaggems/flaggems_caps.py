@@ -252,8 +252,8 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "apple": "none",
     "musa": "none",
     "ppu": "none",
-    "nvidia": None,
-    # `backends_tsingmicro.conf` does not name the composite, like the CUDA conf.
+    "nvidia": "none",
+    # `backends_tsingmicro.conf` does not name the composite.
     "tsingmicro": None,
 }
 

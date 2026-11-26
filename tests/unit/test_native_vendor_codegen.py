@@ -39,7 +39,10 @@ def test_conf_dtype_routes_match_generated_vendor_capabilities(generator):
         if assignment and ";" in value:
             base, clause = value.split(";", 1)
             dtypes, backend = clause.strip().split(":")
-            assert base.strip() == "flaggems"
+            expected_base = (
+                "none" if name.strip() == "scaled_dot_product_attention" else "flaggems"
+            )
+            assert base.strip() == expected_base
             assert backend == "nvidia"
             clauses[name.strip()] = sorted(dtypes.split(","))
     catalog = generator.render(generator.load_policy())[1]

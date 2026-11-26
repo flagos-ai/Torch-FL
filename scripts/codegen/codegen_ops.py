@@ -3054,8 +3054,11 @@ def main():
         n_flaggems_routes = 0
         n_held_off_flaggems = 0
         n_metadata_override = 0
-        for op in sorted(op_info):
-            if op in metadata_route_overrides:
+        config_ops = op_info.keys() | {"scaled_dot_product_attention"}
+        for op in sorted(config_ops):
+            if op == "scaled_dot_product_attention":
+                backend = fallback_key
+            elif op in metadata_route_overrides:
                 backend = fallback_key
                 if op in flaggems_py:
                     n_metadata_override += 1
@@ -3079,7 +3082,7 @@ def main():
         tileops_annotated = sum(1 for op in op_info if op in TILEOPS_OPS)
         print(
             f"   regenerated {conf_path.name} with {n_flaggems_routes} flaggems "
-            f"and {len(op_info) - n_flaggems_routes} {fallback_key} routes "
+            f"and {len(config_ops) - n_flaggems_routes} {fallback_key} routes "
             f"({tileops_annotated} annotated # tileops, "
             f"{n_held_off_flaggems} flaggems ops held off the FlagGems route)"
         )
