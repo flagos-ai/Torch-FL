@@ -17,11 +17,9 @@ FlagGems routing consistency (full coverage)
 
 Every op in ``FLAGGEMS_PYTHON_OPS`` -- the FlagGems Python coverage ceiling the
 generator intersects each platform conf with -- must have a real
-``Backend::kFlagGems`` kernel generated in the C++ layer. Generated kernels
-intentionally retained for explicit per-op overrides are also allowed when the
-code generator lists them in ``flaggems_recursive_fallback``. This guards the
-whole FlagGems Python surface against drift between the coverage data and the
-codegen output.
+``Backend::kFlagGems`` kernel generated in the C++ layer. The generator also
+declares platform-specific adapters and kernels retained for explicit per-op
+overrides. The consistency checks account for all of these registrations.
 
 The coverage set lives in ``scripts/codegen/backend_coverage.py`` rather than in a
 ``backends_flaggems.conf``: the confs were unified on one full-coverage table
@@ -123,9 +121,9 @@ def _module_op_set(module_path: Path, name: str) -> set[str]:
 def _conf_flagos_python_ops() -> set[str]:
     """Provider coverage plus explicitly generated functional out adapters.
 
-    Out adapters compose configured functional routes and copies. They are a
-    separate generated registry, so admitting them here does not widen the
-    published provider ceiling used by every platform's default conf.
+    Out adapters compose configured functional routes and copies. The
+    generator records those adapters separately from published provider
+    coverage.
     """
     return _module_op_set(_COVERAGE, "FLAGGEMS_PYTHON_OPS") | _codegen_op_set(
         "FLAGGEMS_OUT_ADAPTERS"
@@ -220,8 +218,10 @@ def _ops_to_dispatchers(ops: set[str]) -> tuple[set[str], list[str]]:
 
 
 def _conf_dispatchers() -> tuple[set[str], list[str]]:
-    """Map configured flagos_python ops to dispatcher names."""
-    return _ops_to_dispatchers(_conf_flagos_python_ops())
+    """Map shared FlagGems routes and generated training adapters to dispatchers."""
+    return _ops_to_dispatchers(
+        _conf_flagos_python_ops() | _codegen_op_set("NVIDIA_NATIVE_TRAINING_ADAPTERS")
+    )
 
 
 def _override_only_dispatchers() -> tuple[set[str], list[str]]:
@@ -230,7 +230,7 @@ def _override_only_dispatchers() -> tuple[set[str], list[str]]:
 
 
 class TestFlagGemsConfConsistency:
-    """backends_flaggems.conf <-> generated kFlagGems kernels must agree."""
+    """Configured FlagGems routes and generated kernels must agree."""
 
     @pytest.mark.anyplatform
     def test_conf_has_flagos_python_ops(self):
@@ -263,10 +263,10 @@ class TestFlagGemsConfConsistency:
 
     @pytest.mark.anyplatform
     def test_override_only_ops_are_not_default_routes(self):
-        """Recursive fallbacks keep kernels but must not use them by default."""
+        """The shared provider registry excludes kernels held for overrides."""
         overlap = sorted(_override_only_ops() & _conf_flagos_python_ops())
         assert not overlap, (
-            f"override-only ops are still routed to flagos_python by default: {overlap}"
+            f"override-only ops are in the shared FlagGems registry: {overlap}"
         )
 
     @pytest.mark.anyplatform
@@ -280,8 +280,7 @@ class TestFlagGemsConfConsistency:
         cc_disp = _cc_flagos_python_dispatchers()
         orphans = sorted(cc_disp - conf_disp - override_disp)
         assert not orphans, (
-            f"these kFlagGems kernels in {_KERNELS_CC.name} are not routed "
-            f"by {_COVERAGE.name} and are not listed as override-only kernels: {orphans}"
+            f"kFlagGems kernels without a configured or override route: {orphans}"
         )
 
     @pytest.mark.anyplatform
