@@ -120,11 +120,17 @@ def prepared_cuda_env(monkeypatch):
     else:
         monkeypatch.setattr(torch, "flagos", fake_flagos, raising=False)
 
+    import importlib
+
+    graphs_mod = importlib.import_module("torch.cuda.graphs")
     saved_utils_gdi = cuda_utils._get_device_index
     saved_cuda_gdi = torch.cuda._get_device_index
     saved_init = torch.cuda.device.__init__
     saved_ex = torch.cuda._exchange_device
     saved_mex = torch.cuda._maybe_exchange_device
+    saved_cuda_cap = getattr(torch.cuda, "is_current_stream_capturing", None)
+    saved_graphs_cap = getattr(graphs_mod, "is_current_stream_capturing", None)
+    saved_graphs_ccap = getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None)
     saved_subs = {}
     for sub_name in ("memory", "random", "streams"):
         sub = getattr(torch.cuda, sub_name, None)
@@ -134,7 +140,10 @@ def prepared_cuda_env(monkeypatch):
     try:
         fg_device.prepare_cuda("hygon")
         yield types.SimpleNamespace(
-            fg_device=fg_device, state=state, cuda_utils=cuda_utils
+            fg_device=fg_device,
+            state=state,
+            cuda_utils=cuda_utils,
+            graphs_mod=graphs_mod,
         )
     finally:
         cuda_utils._get_device_index = saved_utils_gdi
@@ -142,6 +151,12 @@ def prepared_cuda_env(monkeypatch):
         torch.cuda.device.__init__ = saved_init
         torch.cuda._exchange_device = saved_ex
         torch.cuda._maybe_exchange_device = saved_mex
+        if saved_cuda_cap is not None:
+            torch.cuda.is_current_stream_capturing = saved_cuda_cap
+        if saved_graphs_cap is not None:
+            graphs_mod.is_current_stream_capturing = saved_graphs_cap
+        if saved_graphs_ccap is not None:
+            graphs_mod._cuda_isCurrentStreamCapturing = saved_graphs_ccap
         for sub_name, orig_fn in saved_subs.items():
             getattr(torch.cuda, sub_name)._get_device_index = orig_fn
 
@@ -232,6 +247,84 @@ class TestCudaGetDeviceIndexForFlagos:
         assert explanation.graph_break_count == 0
         compiled = torch.compile(scoped_fn, backend="eager", fullgraph=True)
         torch.testing.assert_close(compiled(x), x * 2.0 + 1.0)
+
+    def test_prepare_cuda_replaces_cpu_stream_capture_dummy_for_dynamo(
+        self, prepared_cuda_env, monkeypatch
+    ):
+        graphs_mod = prepared_cuda_env.graphs_mod
+        dummy = torch._utils._dummy_type("_cuda_isCurrentStreamCapturing")
+        monkeypatch.setattr(graphs_mod, "_cuda_isCurrentStreamCapturing", dummy)
+
+        prepared_cuda_env.fg_device.prepare_cuda("kunlunxin")
+        assert torch.cuda.is_current_stream_capturing() is False
+        assert graphs_mod.is_current_stream_capturing() is False
+
+        monkeypatch.setattr(
+            torch.flagos,
+            "is_current_stream_capturing",
+            lambda: True,
+            raising=False,
+        )
+        assert torch.cuda.is_current_stream_capturing() is True
+        monkeypatch.setattr(
+            torch.flagos,
+            "is_current_stream_capturing",
+            lambda: False,
+            raising=False,
+        )
+
+        torch._dynamo.reset()
+
+        def pointwise_like_fn(x):
+            if torch.cuda.is_current_stream_capturing():
+                return x - 1.0
+            return x * 3.0 + 2.0
+
+        inp = torch.ones(4)
+        explanation = torch._dynamo.explain(pointwise_like_fn)(inp)
+        assert explanation.graph_break_count == 0
+        compiled = torch.compile(pointwise_like_fn, backend="eager", fullgraph=True)
+        torch.testing.assert_close(compiled(inp), inp * 3.0 + 2.0)
+
+    def test_prepare_cuda_preserves_vendor_stream_capture_and_marks_constant(
+        self, prepared_cuda_env, monkeypatch
+    ):
+        graphs_mod = prepared_cuda_env.graphs_mod
+        capturing = {"active": False}
+
+        def vendor_capture_query() -> bool:
+            status = ctypes.c_int(1 if capturing["active"] else 0)
+            _ = ctypes.byref(status)
+            return status.value != 0
+
+        monkeypatch.setattr(
+            torch.cuda, "is_current_stream_capturing", vendor_capture_query
+        )
+        monkeypatch.setattr(
+            graphs_mod, "is_current_stream_capturing", vendor_capture_query
+        )
+        monkeypatch.setattr(
+            graphs_mod, "_cuda_isCurrentStreamCapturing", vendor_capture_query
+        )
+
+        prepared_cuda_env.fg_device.prepare_cuda("nvidia")
+        assert torch.cuda.is_current_stream_capturing() is False
+        capturing["active"] = True
+        assert torch.cuda.is_current_stream_capturing() is True
+        capturing["active"] = False
+
+        torch._dynamo.reset()
+
+        def vendor_compiled_fn(x):
+            if torch.cuda.is_current_stream_capturing():
+                return x - 1.0
+            return x * 2.0
+
+        inp = torch.ones(4)
+        explanation = torch._dynamo.explain(vendor_compiled_fn)(inp)
+        assert explanation.graph_break_count == 0
+        compiled = torch.compile(vendor_compiled_fn, backend="eager", fullgraph=True)
+        torch.testing.assert_close(compiled(inp), inp * 2.0)
 
 
 class _FakeHipDriver:

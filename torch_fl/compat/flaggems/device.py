@@ -507,6 +507,55 @@ def prepare_cuda(accelerator: str) -> None:
         torch.cuda._exchange_device = _flagos_exchange_device
         torch.cuda._maybe_exchange_device = _flagos_maybe_exchange_device
 
+    import importlib
+
+    try:
+        graphs_mod = importlib.import_module("torch.cuda.graphs")
+    except Exception:
+        graphs_mod = getattr(torch.cuda, "graphs", None)
+
+    graphs_capture = (
+        getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None)
+        if graphs_mod is not None
+        else None
+    )
+    if (
+        graphs_capture is None
+        or isinstance(graphs_capture, type)
+        or getattr(graphs_capture, "__module__", None) == "torch._utils"
+    ):
+
+        @torch.compiler.assume_constant_result
+        def _flagos_is_current_stream_capturing() -> bool:
+            flagos_mod = getattr(torch, "flagos", None)
+            query = getattr(flagos_mod, "is_current_stream_capturing", None)
+            if callable(query) and query is not _flagos_is_current_stream_capturing:
+                return bool(query())
+            return False
+
+        torch.cuda.is_current_stream_capturing = _flagos_is_current_stream_capturing
+        if graphs_mod is not None:
+            graphs_mod.is_current_stream_capturing = _flagos_is_current_stream_capturing
+            graphs_mod._cuda_isCurrentStreamCapturing = (
+                _flagos_is_current_stream_capturing
+            )
+    else:
+        cuda_capture = getattr(torch.cuda, "is_current_stream_capturing", None)
+        if callable(cuda_capture) and getattr(cuda_capture, "__module__", "") not in (
+            "torch.cuda",
+            "torch.cuda.graphs",
+            "torch._C",
+            "builtins",
+        ):
+            wrapped_capture = torch.compiler.assume_constant_result(cuda_capture)
+            torch.cuda.is_current_stream_capturing = wrapped_capture
+            if (
+                graphs_mod is not None
+                and getattr(graphs_mod, "is_current_stream_capturing", None)
+                is cuda_capture
+            ):
+                graphs_mod.is_current_stream_capturing = wrapped_capture
+
     # Initialize CUDA only for builds that use its FlagGems Python path.
     # A DCU self-contained wheel selects a hipified libtorch for a stock +cpu torch,
     # which makes is_available() return True even though the CUDA runtime libs are
