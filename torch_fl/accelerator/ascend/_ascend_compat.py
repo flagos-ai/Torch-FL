@@ -149,7 +149,7 @@ class _AscendDefaultGenerators:
         return _get_ascend_generator(index)
 
     def __len__(self):
-        return max(flagos.device_count(), 1)
+        return flagos.device_count()
 
 
 def install_ascend_rng_generators():
@@ -177,6 +177,8 @@ def install_ascend_rng_generators():
     def manual_seed(seed):
         seed = int(seed)
         native_manual_seed(seed)
+        if flagos.device_count() <= 0:
+            return
         _get_ascend_generator(flagos.current_device()).manual_seed(seed)
 
     def manual_seed_all(seed):

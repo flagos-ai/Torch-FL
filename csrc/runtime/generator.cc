@@ -18,20 +18,33 @@ namespace c10::flagos {
 const at::Generator& GetDefaultGenerator(c10::DeviceIndex device_index) {
   static bool flag [[maybe_unused]] = []() {
     auto device_nums = DeviceCount();
-    default_generators.resize(device_nums);
-    for (auto i = 0; i < device_nums; i++) {
-      default_generators[i] = at::make_generator<GeneratorImpl>(i);
-      default_generators[i].seed();
+    if (device_nums > 0) {
+      default_generators.resize(device_nums);
+      for (c10::DeviceIndex i = 0; i < device_nums; i++) {
+        default_generators[i] = at::make_generator<GeneratorImpl>(i);
+        default_generators[i].seed();
+      }
     }
     return true;
   }();
 
+  const auto device_nums =
+      static_cast<c10::DeviceIndex>(default_generators.size());
+  TORCH_CHECK(
+      device_nums > 0,
+      "Cannot get default flagos generator when no flagos devices are available.");
+
   c10::DeviceIndex idx = device_index;
   if (idx == -1) {
     idx = CurrentDevice();
-  } else {
-    TORCH_CHECK(idx >= 0 && idx < DeviceCount());
   }
+  TORCH_CHECK(
+      idx >= 0 && idx < device_nums,
+      "Invalid device index ",
+      static_cast<int>(idx),
+      " for ",
+      static_cast<int>(device_nums),
+      " flagos device(s).");
   return default_generators[idx];
 }
 

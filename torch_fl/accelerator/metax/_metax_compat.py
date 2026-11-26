@@ -258,6 +258,37 @@ def _device_index(device: Union[torch.device, int, str, None]) -> int:
     return int(device)
 
 
+def _resolve_rng_device_index(device, current_device_fn, device_count_fn) -> int:
+    """Resolve and bounds-check a flagos RNG device argument."""
+    if device is None:
+        idx = current_device_fn()
+    elif isinstance(device, int) and not isinstance(device, bool):
+        if device < 0:
+            raise RuntimeError(f"Device index must not be negative, got {device}")
+        idx = device
+    elif isinstance(device, torch.device):
+        if device.type not in ("flagos", "privateuseone", "cuda"):
+            raise ValueError(f"Expected a 'flagos' device, but got {device}")
+        idx = current_device_fn() if device.index is None else device.index
+    elif isinstance(device, str):
+        dev = torch.device(device)
+        if dev.type not in ("flagos", "privateuseone", "cuda"):
+            raise ValueError(f"Expected a 'flagos' device, but got {dev}")
+        idx = current_device_fn() if dev.index is None else dev.index
+    else:
+        dev = torch.device("flagos", device)
+        idx = current_device_fn() if dev.index is None else dev.index
+
+    count = int(device_count_fn())
+    if count <= 0:
+        raise RuntimeError(
+            "Cannot get default flagos generator when no flagos devices are available."
+        )
+    if idx < 0 or idx >= count:
+        raise RuntimeError(f"Invalid device index {idx} for {count} flagos device(s).")
+    return idx
+
+
 def _real_stream(device_index=0):
     """Resolve the true default stream as a real ``torch.cuda.Stream``.
 
@@ -597,22 +628,34 @@ def patch_torch_cuda_for_metax():
     # must be CUDA generators, NOT flagos.default_generators (CPUGeneratorImpl,
     # ~5KB mt19937 state) -- pointing default_generators at those would make
     # gems' `c0, c1 = state.view(int64)` fail with "too many values to unpack".
+    def _rng_device_count():
+        flagos_mod = getattr(torch, "flagos", _flagos)
+        if flagos_mod is not None and hasattr(flagos_mod, "device_count"):
+            return flagos_mod.device_count()
+        return 1
+
     def _manual_seed_all(seed):
         seed = int(seed)
+        count = _rng_device_count()
+        if count <= 0:
+            return
         try:
-            n = _flagos.device_count() if _flagos is not None else 1
-            for i in range(max(n, 1)):
+            for i in range(count):
                 _get_cuda_generator(i).manual_seed(seed)
         except Exception:
             pass
 
     def _manual_seed(seed):
         seed = int(seed)
+        count = _rng_device_count()
+        if count <= 0:
+            return
         idx = _current_device()
-        try:
-            _get_cuda_generator(idx).manual_seed(seed)
-        except Exception:
-            pass
+        if 0 <= idx < count:
+            try:
+                _get_cuda_generator(idx).manual_seed(seed)
+            except Exception:
+                pass
 
     torch.cuda.manual_seed_all = _manual_seed_all
     torch.cuda.manual_seed = _manual_seed
@@ -636,10 +679,12 @@ def patch_torch_cuda_for_metax():
             _manual_seed_all(seed)
 
         def _flagos_get_rng_state(device="flagos"):
-            return _get_cuda_generator(_device_index(device)).get_state()
+            idx = _resolve_rng_device_index(device, _current_device, _rng_device_count)
+            return _get_cuda_generator(idx).get_state()
 
         def _flagos_set_rng_state(state, device="flagos"):
-            _get_cuda_generator(_device_index(device)).set_state(state)
+            idx = _resolve_rng_device_index(device, _current_device, _rng_device_count)
+            _get_cuda_generator(idx).set_state(state)
 
         _flagos.manual_seed = _flagos_manual_seed
         _flagos.manual_seed_all = _flagos_manual_seed_all

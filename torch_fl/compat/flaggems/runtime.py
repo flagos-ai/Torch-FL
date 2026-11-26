@@ -378,6 +378,9 @@ def configure_vendor(accelerator: str, flagos) -> None:
             # generator on its own -- no philox monkeypatch needed.
             patch_torch_cuda_for_flagos()
             return
+        if accelerator in ("nvidia", "thead") and flagos.device_count() == 0:
+            _env.set_foreign("GEMS_VENDOR", "nvidia")
+            return
 
     # --- Ascend branch, or the detection-failure guard ---
     # An explicit GEMS_VENDOR that reached this far names a vendor none of the

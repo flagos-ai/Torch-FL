@@ -354,6 +354,33 @@ class TestRngSeedSource:
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
+    def test_flagos_manual_seed_reproducible_across_reseeds(self):
+        torch.flagos.manual_seed(SEED)
+        first = torch.randn(64, device=DEVICE).cpu()
+        torch.flagos.manual_seed(OTHER_SEED)
+        other = torch.randn(64, device=DEVICE).cpu()
+        torch.flagos.manual_seed(SEED)
+        second = torch.randn(64, device=DEVICE).cpu()
+        assert torch.equal(first, second)
+        assert not torch.equal(first, other)
+
+    @pytest.mark.anyplatform
+    @pytest.mark.main_ops
+    def test_default_generator_bounds_raise_clean_error(self):
+        count = torch.flagos.device_count()
+        for bad_idx in (count, count + 3, -2):
+            with pytest.raises(RuntimeError):
+                torch_fl._C._get_default_generator(bad_idx)
+        with pytest.raises((RuntimeError, IndexError)):
+            torch.flagos.get_rng_state(count)
+        with pytest.raises((RuntimeError, IndexError)):
+            torch.flagos.get_rng_state(-1)
+        state0 = torch.flagos.get_rng_state(0)
+        with pytest.raises((RuntimeError, IndexError)):
+            torch.flagos.set_rng_state(state0, count)
+
+    @pytest.mark.anyplatform
+    @pytest.mark.main_ops
     def test_manual_seed_emits_no_ineffective_warning(self):
         import warnings
 

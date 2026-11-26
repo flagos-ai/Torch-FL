@@ -153,7 +153,7 @@ class _GcuDefaultGenerators:
     def __len__(self):
         from torch_fl import flagos
 
-        return max(flagos.device_count(), 1)
+        return flagos.device_count()
 
 
 def install_gcu_rng_generators():
@@ -175,7 +175,10 @@ def install_gcu_rng_generators():
     native_manual_seed_all = flagos.manual_seed_all
 
     def manual_seed(seed):
+        seed = int(seed)
         native_manual_seed(seed)
+        if flagos.device_count() <= 0:
+            return
         _get_gcu_generator(flagos.current_device()).manual_seed(seed)
 
     def manual_seed_all(seed):
