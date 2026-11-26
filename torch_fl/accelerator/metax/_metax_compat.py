@@ -593,7 +593,10 @@ def patch_torch_cuda_for_metax():
             is_init = getattr(_flagos, "is_initialized", None)
             if callable(is_init) and not is_init():
                 return False
-        raw = _current_raw_stream(_current_device())
+        try:
+            raw = _current_raw_stream(_current_device())
+        except Exception:
+            return False
         status = ctypes.c_int(0)
         if _mcruntime is not None:
             try:
@@ -620,15 +623,33 @@ def patch_torch_cuda_for_metax():
                 pass
         return False
 
-    if not hasattr(torch._C, "_CudaStreamBase"):
+    import importlib
+
+    try:
+        importlib.import_module("torch.cuda.graphs")
+    except Exception:
+        pass
+    graphs_mod = getattr(torch.cuda, "graphs", None)
+    c_capture = getattr(torch._C, "_cuda_isCurrentStreamCapturing", None)
+    graphs_capture = (
+        getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None)
+        if graphs_mod is not None
+        else None
+    )
+    graph_cls = getattr(torch._C, "_CUDAGraph", None)
+    if (
+        graph_cls is None
+        or getattr(graph_cls, "__module__", None) != "torch._C"
+        or c_capture is None
+        or isinstance(c_capture, type)
+        or getattr(c_capture, "__module__", None) == "torch._utils"
+        or isinstance(graphs_capture, type)
+        or getattr(graphs_capture, "__module__", None) == "torch._utils"
+    ):
         torch.cuda.is_current_stream_capturing = _is_current_stream_capturing
-        graphs_mod = getattr(torch.cuda, "graphs", None)
         if graphs_mod is not None:
             graphs_mod.is_current_stream_capturing = _is_current_stream_capturing
-            if isinstance(
-                getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None), type
-            ):
-                graphs_mod._cuda_isCurrentStreamCapturing = _is_current_stream_capturing
+            graphs_mod._cuda_isCurrentStreamCapturing = _is_current_stream_capturing
         try:
             torch._C._cuda_isCurrentStreamCapturing = _is_current_stream_capturing
         except Exception:

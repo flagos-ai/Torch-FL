@@ -698,6 +698,19 @@ def test_is_current_stream_capturing_queries_hip_and_handles_uninitialized_state
     """Issue #661: CPU wheel's dummy _cuda_isCurrentStreamCapturing must never run."""
     import torch.cuda.graphs
 
+    dummy_capture = type(
+        "_cuda_isCurrentStreamCapturing", (), {"__module__": "torch._utils"}
+    )
+    monkeypatch.setattr(
+        torch._C, "_cuda_isCurrentStreamCapturing", dummy_capture, raising=False
+    )
+    monkeypatch.setattr(
+        torch.cuda.graphs,
+        "_cuda_isCurrentStreamCapturing",
+        dummy_capture,
+        raising=False,
+    )
+
     capture_status = [0]
     seen_streams = []
 

@@ -179,19 +179,34 @@ def _hip_is_stream_capturing(hip, raw_stream: int) -> bool:
     return status.value != 0
 
 
+def _is_native_c_capture_binding(obj) -> bool:
+    """True only for a genuine C++ ``torch._C._cuda_isCurrentStreamCapturing`` builtin."""
+    import types
+
+    return (
+        isinstance(obj, types.BuiltinFunctionType)
+        and getattr(obj, "__module__", None) == "torch._C"
+    )
+
+
 def _bind_cuda_stream_capture_query(torch_mod, query_fn) -> None:
     """Install ``query_fn`` across ``torch.cuda``, ``torch.cuda.graphs``, and ``torch._C``."""
+    import importlib
+
+    try:
+        importlib.import_module("torch.cuda.graphs")
+    except Exception:
+        pass
     torch_mod.cuda.is_current_stream_capturing = query_fn
     graphs_mod = getattr(torch_mod.cuda, "graphs", None)
     if graphs_mod is not None:
         graphs_mod.is_current_stream_capturing = query_fn
-        if isinstance(
-            getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None), type
+        if not _is_native_c_capture_binding(
+            getattr(graphs_mod, "_cuda_isCurrentStreamCapturing", None)
         ):
             graphs_mod._cuda_isCurrentStreamCapturing = query_fn
-    if isinstance(
-        getattr(torch_mod._C, "_cuda_isCurrentStreamCapturing", None),
-        (type, type(None)),
+    if not _is_native_c_capture_binding(
+        getattr(torch_mod._C, "_cuda_isCurrentStreamCapturing", None)
     ):
         try:
             torch_mod._C._cuda_isCurrentStreamCapturing = query_fn

@@ -66,6 +66,9 @@ def test_sync_batch_norm_aten_primitives_match_cpu_batch_norm(dtype, atol, rtol)
     # Execute the exact two-shard SyncBatchNorm operator sequence on flagos:0.
     dev = torch.device("flagos:0")
     x0 = x_global_cpu[:3].to(device=dev, dtype=dtype).detach().requires_grad_(True)
+    assert torch.flagos.is_current_stream_capturing() is False
+    assert torch.cuda.is_current_stream_capturing() is False
+    assert torch.cuda.graphs.is_current_stream_capturing() is False
     x1 = x_global_cpu[3:].to(device=dev, dtype=dtype).detach().requires_grad_(True)
     dy0 = dy_global_cpu[:3].to(device=dev, dtype=dtype)
     dy1 = dy_global_cpu[3:].to(device=dev, dtype=dtype)

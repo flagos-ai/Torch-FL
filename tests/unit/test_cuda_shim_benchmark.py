@@ -173,3 +173,159 @@ def test_cuda_runtime_is_read_from_the_shim_not_the_missing_symbol(monkeypatch):
 
     monkeypatch.setattr(_cuda_compat, "_patched", False)
     assert flagos_module._has_cuda_runtime() is False
+
+
+def test_cuda_shim_replaces_cpu_wheel_stream_capture_dummy_even_with_stream_base(
+    monkeypatch,
+):
+    """Issue #661: ``torch.cuda.streams`` defines a dummy ``_CudaStreamBase`` on
+    ``torch+cpu`` wheels, so ``hasattr(torch._C, '_CudaStreamBase')`` is True.
+    ``patch_torch_cuda_for_flagos`` must still replace the dummy stream-capture
+    placeholder across ``torch.cuda``, ``torch.cuda.graphs``, ``torch._C``, and
+    ``torch.flagos``, returning ``False`` before context initialization and
+    querying ``cudaStreamIsCapturing`` / ``cuStreamIsCapturing`` once initialized.
+    """
+    import ctypes
+    import types
+    import torch.cuda.graphs
+
+    dummy_stream_base = type("_CudaStreamBase", (), {"__module__": "torch._utils"})
+
+    def _dummy_err(cls, *args, **kwargs):
+        raise RuntimeError(f"Tried to instantiate dummy base class {cls.__name__}")
+
+    dummy_capture = type(
+        "_cuda_isCurrentStreamCapturing",
+        (),
+        {"__module__": "torch._utils", "__new__": _dummy_err},
+    )
+
+    for attr in (
+        "is_available",
+        "device_count",
+        "current_device",
+        "set_device",
+        "get_device_properties",
+        "get_device_name",
+        "get_device_capability",
+        "synchronize",
+        "_lazy_init",
+        "_initialized",
+        "_exchange_device",
+        "_maybe_exchange_device",
+        "current_stream",
+        "default_stream",
+        "set_stream",
+        "Event",
+        "Stream",
+        "memory_allocated",
+        "memory_reserved",
+        "memory_stats",
+        "max_memory_allocated",
+        "max_memory_reserved",
+        "empty_cache",
+        "reset_peak_memory_stats",
+        "reset_max_memory_allocated",
+        "is_current_stream_capturing",
+        "manual_seed",
+        "manual_seed_all",
+        "default_generators",
+    ):
+        if hasattr(torch.cuda, attr):
+            monkeypatch.setattr(torch.cuda, attr, getattr(torch.cuda, attr))
+    monkeypatch.setattr(
+        torch.cuda.device, "__init__", torch.cuda.device.__init__, raising=False
+    )
+    monkeypatch.setattr(
+        torch.cuda.graphs,
+        "is_current_stream_capturing",
+        lambda: torch.cuda.graphs._cuda_isCurrentStreamCapturing(),
+    )
+    monkeypatch.setattr(
+        torch.cuda.graphs, "_cuda_isCurrentStreamCapturing", dummy_capture
+    )
+    monkeypatch.setattr(torch._C, "_CudaStreamBase", dummy_stream_base, raising=False)
+    monkeypatch.setattr(torch._C, "_CUDAGraph", _Placeholder, raising=False)
+    monkeypatch.setattr(
+        torch._C, "_cuda_isCurrentStreamCapturing", dummy_capture, raising=False
+    )
+    if hasattr(torch._C, "_cuda_getCurrentRawStream"):
+        monkeypatch.setattr(
+            torch._C, "_cuda_getCurrentRawStream", torch._C._cuda_getCurrentRawStream
+        )
+    if hasattr(torch._C, "_cuda_synchronize"):
+        monkeypatch.setattr(torch._C, "_cuda_synchronize", torch._C._cuda_synchronize)
+
+    initialized = [False]
+    selected_dev = [0]
+    fake_flagos = types.SimpleNamespace(
+        is_initialized=lambda: initialized[0],
+        current_device=lambda: selected_dev[0],
+        set_device=lambda idx: selected_dev.__setitem__(0, idx),
+        Event=object,
+        Stream=object,
+        memory_allocated=lambda idx=0: 0,
+        memory_reserved=lambda idx=0: 0,
+        memory_stats=lambda idx=0: {},
+        empty_cache=lambda: None,
+        reset_peak_memory_stats=lambda idx=0: None,
+        manual_seed=lambda seed: None,
+        manual_seed_all=lambda seed: None,
+        _C=types.SimpleNamespace(
+            _get_native_current_raw_stream=lambda idx: 0xCAFE0 + idx
+        ),
+    )
+    monkeypatch.setattr(torch, "flagos", fake_flagos, raising=False)
+    monkeypatch.setattr(_cuda_compat, "_patched", False)
+    monkeypatch.setattr(_cuda_compat, "is_nvidia_cuda_available", lambda: True)
+    monkeypatch.setattr(_cuda_compat, "_patch_triton_do_bench", lambda: None)
+
+    cudart_calls = []
+    driver_calls = []
+    capture_status = [0]
+
+    class _FakeCudart:
+        def cudaStreamIsCapturing(self, stream_ptr, out_status):
+            cudart_calls.append(stream_ptr.value)
+            ctypes.cast(out_status, ctypes.POINTER(ctypes.c_int))[0] = capture_status[0]
+            return 0
+
+    class _FakeDriver:
+        def cuDeviceGetCount(self, out_count):
+            ctypes.cast(out_count, ctypes.POINTER(ctypes.c_int))[0] = 4
+            return 0
+
+        def cuStreamIsCapturing(self, stream_ptr, out_status):
+            driver_calls.append(stream_ptr.value)
+            ctypes.cast(out_status, ctypes.POINTER(ctypes.c_int))[0] = capture_status[0]
+            return 0
+
+    cudart_holder = [_FakeCudart()]
+    monkeypatch.setattr(_cuda_compat, "_load_cudart", lambda: cudart_holder[0])
+    monkeypatch.setattr(_cuda_compat, "_load_libcuda", lambda: _FakeDriver())
+
+    assert hasattr(torch._C, "_CudaStreamBase")
+    assert _cuda_compat.patch_torch_cuda_for_flagos() is True
+
+    # Before context initialization: returns False without querying CUDA APIs.
+    assert torch.cuda.is_current_stream_capturing() is False
+    assert torch.cuda.graphs.is_current_stream_capturing() is False
+    assert torch._C._cuda_isCurrentStreamCapturing() is False
+    assert fake_flagos.is_current_stream_capturing() is False
+    assert cudart_calls == []
+    assert driver_calls == []
+
+    # After context initialization: queries active FlagOS stream via cudart.
+    initialized[0] = True
+    torch.cuda.set_device(2)
+    assert torch.cuda.is_current_stream_capturing() is False
+    assert cudart_calls == [0xCAFE2]
+
+    capture_status[0] = 1
+    assert torch.cuda.is_current_stream_capturing() is True
+    assert torch.cuda.graphs.is_current_stream_capturing() is True
+
+    # Driver fallback when libcudart is absent.
+    cudart_holder[0] = None
+    assert fake_flagos.is_current_stream_capturing() is True
+    assert driver_calls == [0xCAFE2]
