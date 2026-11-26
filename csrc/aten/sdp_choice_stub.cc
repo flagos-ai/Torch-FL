@@ -426,6 +426,17 @@ at::Tensor WrapperScaledDotProductAttention(
     bool is_causal,
     std::optional<double> scale,
     bool enable_gqa) {
+  // Fake-tensor tracing: Dynamo runs the graph with FakeTensors, which are
+  // python-dispatched and have no storage. This override is registered for
+  // PrivateUse1 and AutogradPrivateUse1, both of which outrank Meta, so without
+  // the guard it boxes the fake operands into real device tensors; FakeTensor's
+  // from_meta_and_device assertion then fails on the next op with "tensor's
+  // device must be `meta`, got flagos instead". The composite body computes the
+  // result shape over the fake tensors instead.
+  if (query.unsafeGetTensorImpl()->is_python_dispatch()) {
+    return at::native::scaled_dot_product_attention(
+        query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
+  }
 #if defined(USE_CAMBRICON) && defined(FLAGOS_CAMBRICON_CNNL_EXTRA)
   // Cambricon's fused kernel, ahead of the training-path check below.
   //

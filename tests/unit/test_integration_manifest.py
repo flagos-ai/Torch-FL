@@ -107,6 +107,20 @@ _KNOWN_GAPS = {
         "nvidia",
         "thead",
     ),
+    # Graph capture needs a CUDA/HIP runtime under the flagos device: MetaX
+    # supplies it through its relinked libtorch and Hygon through the ctypes
+    # HIP implementation. The other platforms have neither, so the file skips
+    # there and the step is not scheduled for them.
+    "cuda_graph_capture": (
+        "apple",
+        "ascend",
+        "enflame",
+        "iluvatar",
+        "kunlunxin",
+        "mthreads",
+        "nvidia",
+        "thead",
+    ),
     "vendor_ops": ("apple",),
     "reference_ops": tuple(
         p for p in _PLATFORMS if p not in {"hygon", "metax", "nvidia", "thead"}

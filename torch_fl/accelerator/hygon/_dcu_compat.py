@@ -316,8 +316,14 @@ class _DcuStreamShim:
     """
 
     def __init__(self, index=0, handle=0):
+        import torch
+
         self.cuda_stream = handle
         self.device_index = index
+        # torch.cuda.StreamContext.__enter__ compares `.device` between the
+        # current stream and the stream being entered; give it the flagos device
+        # so `with torch.cuda.stream(...)` works against the flagos Stream class.
+        self.device = torch.device("flagos", index)
 
     def synchronize(self):
         import torch
@@ -505,6 +511,44 @@ def patch_torch_cuda_for_dcu() -> bool:
     flagos_event = getattr(flagos_event, "Event", None)
     if flagos_event is not None:
         torch.cuda.Event = flagos_event
+
+    # Same dummy-base-class problem as Event: the CPU wheel's torch.cuda.Stream
+    # raises "torch.cuda.Stream requires CUDA support" on construction. Inductor's
+    # cudagraph manager constructs torch.cuda.Stream() for its capture stream, so
+    # hand out flagos's own Stream (a real stream / handle-0 stand-in on DCU).
+    flagos_stream = getattr(torch, "flagos", None)
+    flagos_stream = getattr(flagos_stream, "Stream", None)
+    if flagos_stream is not None:
+        torch.cuda.Stream = flagos_stream
+
+    # Inductor's cudagraph manager creates a CUDA graph *memory pool* handle
+    # (torch.cuda.graph_pool_handle() -> torch._C._graph_pool_handle(), a dummy
+    # base class on the CPU wheel) and passes it to torch.cuda.graph(pool=...).
+    # flagos's ctypes graph owns its own private stream and does not use a CUDA
+    # caching-allocator pool, so hand out an opaque token the graph wrapper
+    # accepts and ignores. The only other consumer,
+    # check_memory_pool, runs solely under slow_path_cudagraph_asserts.
+    torch.cuda.graph_pool_handle = lambda: object()
+
+    # Inductor's cudagraph_trees drives the CUDA caching allocator's graph-private
+    # memory pool and cublas/conv cache bookkeeping through torch._C._cuda_* C++
+    # entry points, none of which the CPU wheel builds. flagos has no per-graph
+    # allocator pool (its ctypes graph captures on a private stream against the
+    # regular pool), so these are no-ops: the allocator keeps using its normal
+    # pool, which is correct as long as static buffers are the graph's own.
+    _cuda_pool_noops = {
+        "_cuda_beginAllocateCurrentThreadToPool": lambda device, pool: None,
+        "_cuda_endAllocateToPool": lambda device, pool: None,
+        "_cuda_releasePool": lambda device, pool: None,
+        "_cuda_clearCublasWorkspaces": lambda: None,
+        "_cuda_get_conv_benchmark_empty_cache": lambda: False,
+        "_cudnn_set_conv_benchmark_empty_cache": lambda enabled: None,
+        # check_memory_pool treats a True return as "pool is consistent, stop"
+        # and skips the expensive snapshot divergence check.
+        "_cuda_checkPoolLiveAllocations": lambda device, pool, storages: True,
+    }
+    for _name, _fn in _cuda_pool_noops.items():
+        setattr(torch._C, _name, _fn)
     torch.cuda._lazy_init = lambda: None
     torch.cuda.device_count = lambda: max(torch.flagos.device_count(), 1)
     if hasattr(torch.cuda, "_initialized"):
@@ -555,6 +599,12 @@ def patch_torch_cuda_for_dcu() -> bool:
 
     torch.cuda.current_stream = lambda device=None: _stream_view(device, current_stream)
     torch.cuda.default_stream = lambda device=None: _stream_view(device, default_stream)
+    # torch.cuda.set_stream -> torch._C._cuda_setStream, absent from the CPU
+    # wheel. The shim streams all denote the default queue, so "switch to this
+    # stream" is switching to the stream already selected; dropping the call is
+    # the switch. Inductor's cudagraph manager enters torch.cuda.stream(stream)
+    # during warmup.
+    torch.cuda.set_stream = lambda stream=None: None
     # Both Triton entry points resolve the same current queue.
     try:
         torch._C._cuda_getCurrentRawStream = lambda idx=0: current_stream(idx)

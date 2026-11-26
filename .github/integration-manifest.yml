@@ -141,6 +141,19 @@ steps:
       tests/integration/test_dtype_coverage.py tests/integration/test_ops.py
       -v -s --tb=short
 
+  # CUDA/HIP graph capture through the flagos device. It is a top-level file, so
+  # no sweep reaches it (issue #391), and it is named here rather than marked
+  # because the capability gate is inside the file: a platform whose wheel has
+  # no graph implementation skips instead of passing vacuously. MetaX supplies
+  # the genuine torch.cuda.CUDAGraph through its relinked libtorch, and Hygon
+  # the ctypes-driven HIP implementation; both builds of each run it.
+  - id: cuda_graph_capture
+    name: CUDA/HIP graph capture on the flagos device
+    platforms: [metax, hygon]
+    command: >-
+      python -m pytest tests/integration/test_cuda_graph.py
+      -v -s --tb=short
+
   # The vendor-backend group: eight selections for nine platforms today.
   #
   # The marker expression is the platform's because the marker a test carries is

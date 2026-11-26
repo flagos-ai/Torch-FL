@@ -579,6 +579,17 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "tileops",
         "Python package TileOPs loads as the provider",
     ),
+    "FLAGOS_COMPILE_CUDAGRAPHS": (
+        SCOPE_RUNTIME,
+        "0 (off) unless the torch build has a native CUDAGraph binding",
+        "Let torch.compile capture its generated kernels into a CUDAGraph "
+        "(mode='reduce-overhead'). Enabled automatically where torch.cuda.CUDAGraph "
+        "is the torch build's own class. On a platform whose graph support is "
+        "emulated (the flagos ctypes HIP graph on Hygon DCU) it stays off: "
+        "instantiating a graph of Inductor-generated kernels currently aborts in "
+        "the vendor runtime, so enabling it turns a working eager fallback into a "
+        "crash. Set 1 only to reproduce or test that path",
+    ),
     "FLAGOS_TILEOPS_DEBUG": (
         SCOPE_RUNTIME,
         "0 (off)",
