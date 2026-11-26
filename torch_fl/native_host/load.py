@@ -245,7 +245,6 @@ class Hosts:
                 self.manifest["modules"],
                 package=self.path,
                 bytecode=bytecode,
-                namespace=self.package,
             )
         self.original_ops = {
             name: getattr(flag_gems, name)
@@ -290,14 +289,6 @@ class Hosts:
             )
             for rank, name in ranks.items()
         }
-        for row in self.manifest.get("source_variants", {}).get("entries", ()):
-            if row.get("adaptation"):
-                function = self.source_variant_functions[row["id"]]
-                path = Path(inspect.getsourcefile(function)).resolve()
-                self.generated_kernel_sources[path] = (
-                    function.__module__,
-                    row["adaptation"],
-                )
         self.LibEntry = LibEntry
         self.Pointwise = PointwiseDynamicFunction
         self.runtime = runtime
@@ -338,15 +329,6 @@ class Hosts:
             _pointwise_helpers(self.modules),
             self.modules,
         )
-        if self.manifest.get("reduction_adaptation") is not None:
-            from triton.runtime.jit import JITFunction
-
-            kernel = self.originals["flag_gems.ops.mean"].mean_dim_kernel_inner
-            while not isinstance(kernel, JITFunction):
-                kernel = kernel.fn
-            runtime.configure_metax_mean(
-                self.resolve(kernel), self.manifest["reduction_adaptation"]
-            )
 
     def resolve(self, value):
         import triton
@@ -679,10 +661,6 @@ class Hosts:
             "source_variants": self.manifest.get("source_variants"),
             "matmul_adaptation": self.manifest.get("matmul_adaptation"),
             "copy_adaptation": self.manifest.get("copy_adaptation"),
-            "reduction_adaptation": self.manifest.get("reduction_adaptation"),
-            "normalized_mean_calls": getattr(
-                self.runtime, "metax_mean_calls", lambda: 0
-            )(),
             "source_variant_hits": hits,
             "subprocess_commands": _native_commands,
             "pointwise_sources": self.pointwise_build_outputs or {},

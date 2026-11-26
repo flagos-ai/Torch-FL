@@ -64,7 +64,6 @@ from backend_coverage import TILEOPS_OPS  # noqa: E402
 from native_source_entries import wrap_call as wrap_native_source_call  # noqa: E402
 from native_host_policy import (  # noqa: E402
     NATIVE_BMM_ADAPTATIONS,
-    NATIVE_REDUCTION_ADAPTATIONS,
     render_config_routes,
 )
 
@@ -197,26 +196,6 @@ def _dot_contract_prelude(op, args):
         f"  at::native::flagos::PadMatmulPairForDot({lhs}_dotpad, {rhs}_dotpad);\n"
     )
     return lines, {lhs: f"{lhs}_dotpad", rhs: f"{rhs}_dotpad"}
-
-
-def _native_reduction_prelude(op, fn_type, typed):
-    policy = NATIVE_REDUCTION_ADAPTATIONS["metax"]
-    if op != policy["operator"]:
-        return ""
-    extents = " || ".join(f"self.size(-1) == {extent}" for extent in policy["extents"])
-    needs_fallback = f"!{fn_type}Source.Available()" if typed else "true"
-    return (
-        "#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)\n"
-        "#if defined(FLAGOS_METAX_NATIVE_MEAN)\n"
-        "  constexpr bool use_measured_mean = true;\n"
-        "#else\n"
-        f"  const bool use_measured_mean = {needs_fallback};\n"
-        "#endif\n"
-        "  at::Tensor native_mean;\n"
-        f"  if (use_measured_mean && self.dim() > 0 && ({extents}) && "
-        "at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) "
-        "{ return native_mean; }\n#endif\n"
-    )
 
 
 # Matmul ops whose FlagGems Python kernel must leave the device entirely for the
@@ -1419,16 +1398,6 @@ def gen_flaggems_python_kernel(
                 "  if (MulTensorFnSource.Available() && c10::isFloatingType(self.scalar_type()) &&\n"
                 "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) && exponent.toDouble() == 2.0)\n"
                 "    return at::mul(self, self);\n"
-                "#elif defined(FLAGOS_ACCEL_PPU) || defined(FLAGOS_ACCEL_METAX) || defined(USE_TSINGMICRO)\n"
-                "  if (MulTensorFnSource.Available() && self.scalar_type() == at::kFloat &&\n"
-                "      (exponent.isIntegral(false) || exponent.isFloatingPoint())) {\n"
-                "    const auto power = exponent.toDouble();\n"
-                "#if defined(FLAGOS_ACCEL_PPU) || defined(USE_TSINGMICRO)\n"
-                "    if (power == 1.0) return self.clone();\n"
-                "    if (power == 2.0) return at::mul(self, self);\n"
-                "#endif\n"
-                "    if (power == 3.0) return at::mul(at::mul(self, self), self);\n"
-                "  }\n"
                 "#endif\n"
             )
         elif op == "cat":
@@ -1464,33 +1433,6 @@ def gen_flaggems_python_kernel(
             prelude += (
                 "#if defined(FLAGOS_ACCEL_CUDA)\n"
                 f"  return NllLossMeanBackwardNvidia({', '.join(n for _, n in args)});\n"
-                "#endif\n"
-            )
-            prelude += (
-                "#if defined(USE_TSINGMICRO)\n"
-                "  // Unboxed autograd can represent an absent class weight as an undefined Tensor.\n"
-                "  const std::optional<at::Tensor> no_weight;\n"
-                "  const auto& effective_weight = weight && !weight->defined() ? no_weight : weight;\n"
-                "#else\n"
-                "  const auto& effective_weight = weight;\n"
-                "#endif\n"
-            )
-            body = re.sub(r"\bweight\b", "effective_weight", body)
-        elif op == "_log_softmax_backward_data":
-            # The published MACA backward kernel corrupts FP32 rows at both
-            # 2048 and 151936 columns. Compose the original FlagGems tensor
-            # operations on the supported contiguous last-axis layout.
-            prelude += (
-                "#if defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)\n"
-                "  if (input_dtype == at::kFloat && output.scalar_type() == at::kFloat &&\n"
-                "      grad_output.scalar_type() == at::kFloat && output.dim() == 2 &&\n"
-                "      (dim == -1 || dim == 1) && output.numel() && output.is_contiguous() &&\n"
-                "      grad_output.is_contiguous() && grad_output.device() == output.device() &&\n"
-                "      grad_output.sizes().equals(output.sizes())) {\n"
-                "    const int64_t dims[] = {dim};\n"
-                "    auto sum = at::sum(grad_output, at::IntArrayRef(dims), true, at::kFloat);\n"
-                "    return at::sub(grad_output, at::mul(at::exp(output), sum));\n"
-                "  }\n"
                 "#endif\n"
             )
         return (
@@ -1861,7 +1803,7 @@ def gen_flaggems_python_kernel(
     host_lines = _host_matmul_prelude(op, args, ret_type)
     return finish(
         body,
-        host_lines + _native_reduction_prelude(op, fn_type, typed) + layout_prelude,
+        host_lines + layout_prelude,
     )
 
 
@@ -2163,7 +2105,7 @@ def gen_flaggems_out_adapters(funcs):
     lines += [
         "} // namespace at::native::flagos",
         "#endif",
-        "#if defined(FLAGOS_FLAGGEMS_PYTHON) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_DCU) || defined(USE_MUSA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_ILUVATAR) || defined(USE_KUNLUNXIN) || ((defined(USE_MACA) || defined(USE_TSINGMICRO)) && defined(FLAGOS_NATIVE_HOSTS)))",
+        "#if defined(FLAGOS_FLAGGEMS_PYTHON) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_DCU) || defined(USE_MUSA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_ILUVATAR) || defined(USE_KUNLUNXIN) || (defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)))",
         "#include <ATen/native/CPUFallback.h>",
         "#include <ATen/ops/embedding_dense_backward_ops.h>",
         '#include "../fallback.h"',
@@ -2275,44 +2217,6 @@ def gen_flaggems_out_adapters(funcs):
         "} // namespace at::native::flagos",
         "#endif",
     ]
-    lines += """\
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_TSINGMICRO) && defined(FLAGOS_NATIVE_HOSTS)
-namespace at::native::flagos {
-namespace {
-template <class... Args>
-bool TryTsingMicroInplaceHost(const TypedSourceSlot& source, at::Tensor& out,
-                              const Args&... args) {
-  const auto result = source.Call<at::Tensor>([] { return at::Tensor(); }, out, args...);
-  if (!result.defined()) return false;
-  TORCH_CHECK(result.is_same(out), "TsingMicro FlagGems in-place host changed the output alias");
-  return true;
-}
-} // namespace
-
-bool TryTsingMicroAddInplaceHost(at::Tensor& out, const at::Tensor& scalar,
-                                const at::Scalar& alpha) {
-  return TryTsingMicroInplaceHost(AddInplaceTensorFnSource, out, scalar, alpha);
-}
-
-bool TryTsingMicroMulInplaceHost(at::Tensor& out, const at::Tensor& scalar) {
-  return TryTsingMicroInplaceHost(MulInplaceTensorFnSource, out, scalar);
-}
-} // namespace at::native::flagos
-#endif
-
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_KUNLUNXIN) && defined(FLAGOS_NATIVE_HOSTS)
-namespace at::native::flagos {
-bool TryKunlunxinLerpInplaceHost(at::Tensor& self, const at::Tensor& end,
-                               const at::Scalar& weight) {
-  const auto result = LerpInplaceScalarFnSource.Call<at::Tensor>(
-      [] { return at::Tensor(); }, self, end, weight);
-  if (!result.defined()) return false;
-  TORCH_CHECK(result.is_same(self), "Kunlunxin FlagGems lerp changed the output alias");
-  return true;
-}
-} // namespace at::native::flagos
-#endif
-""".splitlines()
     lines.append("// END GENERATED FLAGGEMS OUT ADAPTERS")
     return "\n".join(lines) + "\n"
 

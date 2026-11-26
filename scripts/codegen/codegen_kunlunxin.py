@@ -85,7 +85,6 @@ OPS = {
     "cumsum": "cumsum",
     "full": "full_factory",
     "pow.Tensor_Scalar": "pow_tensor_scalar",
-    "lerp_.Scalar": "lerp_inplace_scalar",
     "slice_backward": "slice_backward",
     "where.self": "where_self",
     "eq.Tensor": "compare",
@@ -164,7 +163,6 @@ AT_OP = {
     "cumsum": "cumsum",
     "full": "full",
     "pow.Tensor_Scalar": "pow",
-    "lerp_.Scalar": "lerp_",
     "slice_backward": "slice_backward",
     "where.self": "where",
     "eq.Tensor": "eq",
@@ -1284,41 +1282,6 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kKunlunxin, {kernel})
 """
 
 
-# Keeping both lerp operands in FP32 until the final cast reproduces the
-# vendor's BF16 AdamW first-moment update without rounding their difference.
-T_LERP_INPLACE_SCALAR = """\
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(FLAGOS_NATIVE_HOSTS)
-bool TryKunlunxinLerpInplaceHost(at::Tensor& self, const at::Tensor& end,
-                               const at::Scalar& weight);
-#endif
-
-at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {{
-  if (self.scalar_type() != at::kBFloat16 || end.scalar_type() != at::kBFloat16 ||
-      self.device() != end.device() || !self.sizes().equals(end.sizes()) ||
-      !self.is_contiguous() || !end.is_contiguous() || self.is_alias_of(end) ||
-      self.is_neg() || end.is_neg() || weight.isComplex()) {{
-    return {disp}.DispatchBackend(Backend::kFlagGems, self, end, weight);
-  }}
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(FLAGOS_NATIVE_HOSTS)
-  const auto scalar = weight.isFloatingPoint() ? weight.toDouble() : 0.0;
-  if (scalar > 0.0 && scalar < 0.5 &&
-      static_cast<float>(scalar) > 0.0f && static_cast<float>(scalar) < 0.5f &&
-      self.numel() != 0 && !self.is_conj() && !end.is_conj() &&
-      !self.has_names() && !end.has_names() &&
-      TryKunlunxinLerpInplaceHost(self, end, weight)) {{
-    return self;
-  }}
-#endif
-  at::AutoDispatchBelowADInplaceOrView guard;
-  auto input = self.to(at::kFloat);
-  input.lerp_(end.to(at::kFloat), weight);
-  self.copy_(input.to(at::kBFloat16));
-  return self;
-}}
-
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kKunlunxin, {kernel})
-"""
-
 # ATen handles factory dtype inference and fills the allocation through the
 # existing FlagGems device route.
 T_FULL_FACTORY = """\
@@ -1360,7 +1323,6 @@ CATEGORIES = {
     "cumsum": T_CUMSUM,
     "full_factory": T_FULL_FACTORY,
     "pow_tensor_scalar": T_POW_TENSOR_SCALAR,
-    "lerp_inplace_scalar": T_LERP_INPLACE_SCALAR,
     "slice_backward": T_SLICE_BACKWARD,
     "where_self": T_WHERE_SELF,
     "compare": T_COMPARE,

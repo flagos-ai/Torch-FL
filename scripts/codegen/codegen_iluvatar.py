@@ -43,7 +43,6 @@ from pathlib import Path
 # REGISTER_IMPL_TO_DISPATCHER(FnType, dispatcher, ...) matches the
 # DECLARE_DISPATCHER in generated/ops.h exactly (otherwise the build won't link).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from codegen_iluvatar_fp32 import output_files as fp32_files
 from codegen_ops import schema_to_cpp_name
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -1397,7 +1396,7 @@ def main():
 
     cc_text, inc_text, covered = render()
     withheld = [op for op, _, claimed in covered if not claimed]
-    outputs = [(OUT_CC, cc_text), (OUT_INC, inc_text), *fp32_files(OUT_CC.parent)]
+    outputs = [(OUT_CC, cc_text), (OUT_INC, inc_text)]
 
     if args.check:
         stale = []

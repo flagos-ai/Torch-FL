@@ -150,8 +150,6 @@ jobs:
           python3 scripts/codegen/codegen_iluvatar.py --check
           echo "=== codegen_native_foreach.py --check ==="
           python3 scripts/codegen/codegen_native_foreach.py --check
-          python3 scripts/codegen/codegen_iluvatar_fp32.py --check
-          python3 scripts/codegen/codegen_metax_fp32.py --check
           python3 scripts/codegen/codegen_metax_cat.py --check
           python3 scripts/codegen/codegen_cambricon.py --check
           # The Apple Metal (MPSGraph) operator layer. Reads only committed

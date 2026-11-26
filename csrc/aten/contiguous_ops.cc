@@ -104,9 +104,6 @@ at::Tensor materialize_math_bits_impl(
 void copy_strided_via_host(
     const at::Tensor& self,
     const at::Tensor& result) {
-#if defined(USE_TSINGMICRO) && defined(FLAGOS_NATIVE_HOSTS)
-  if (TryTsingMicroStridedCopy(self, result)) return;
-#endif
   if (TryGemsDeviceCopy(self, result)) return;
   TORCH_CHECK(CpuFallbackAllowed(),
               "native FlagGems hosts do not permit CPU fallback: device contiguous/clone ",

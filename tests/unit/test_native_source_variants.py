@@ -78,7 +78,7 @@ def test_policy_requires_the_selected_native_build(policy, tmp_path):
 
 @pytest.mark.parametrize(
     "vendor",
-    ["ascend", "iluvatar", "kunlunxin", "metax", "mthreads", "thead", "tsingmicro"],
+    ["ascend", "iluvatar", "metax", "mthreads", "thead", "tsingmicro"],
 )
 def test_sources_require_native_hosts_without_bundling_vendor_torch(vendor):
     policy = cohort.load_build_policy(ROOT).source_policy(vendor)
@@ -231,7 +231,8 @@ def test_published_vendor_source_accepts_only_a_verified_registration_alias(tmp_
 
 
 @pytest.mark.parametrize(
-    "change", ["duplicate", "dtype", "module", "hash", "reason", "wrapped_numbers"]
+    "change",
+    ["duplicate", "dtype", "module", "hash", "reason", "wrapped_numbers", "adaptation"],
 )
 def test_unvalidated_selections_are_rejected(policy, change):
     row = policy["entries"][0]
@@ -245,71 +246,9 @@ def test_unvalidated_selections_are_rejected(policy, change):
         row["allow_wrapped_numbers"] = "yes"
     elif change == "hash":
         row["sha256"] = "unknown"
+    elif change == "adaptation":
+        row["adaptation"] = row["id"]
     else:
         row["reason"] = ""
     with pytest.raises(ValueError):
         variants.validate(policy)
-
-
-def test_adapted_embedding_loads_separate_prebuilt_source(tmp_path, monkeypatch):
-    policy = cohort.load_build_policy(ROOT).source_policy("tsingmicro")
-    row = next(
-        entry
-        for entry in policy["entries"]
-        if entry["id"] == "tsingmicro_embedding_bf16_input_order"
-    )
-    policy["entries"] = [row]
-    root = ModuleType("flag_gems")
-    root.__file__ = str(tmp_path / "flag_gems/__init__.py")
-    path = tmp_path.joinpath(*row["module"].split(".")).with_suffix(".py")
-    path.parent.mkdir(parents=True)
-    path.write_text("def embedding_dense_backward(): return 'published'\n")
-    row["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    original = ModuleType(row["module"])
-    original.__file__ = str(path)
-    original.embedding_dense_backward = object()
-    generator = ModuleType("torch_fl.native_host.tsingmicro_embedding")
-    generator.render = lambda payload, root: (
-        "def embedding_dense_backward(): return 'adapted'\n"
-    )
-    for module in (root, original, generator):
-        monkeypatch.setitem(sys.modules, module.__name__, module)
-    monkeypatch.setattr(variants.importlib.metadata, "version", lambda _: "5.4.0")
-    package = tmp_path / "_generated"
-    package.mkdir()
-    namespace = "test_embedding_native_host"
-    bytecode = variants.build_bytecode(policy, package)
-    assert variants.build_bytecode(policy, package) == bytecode
-    generated = package / variants.BYTECODE_DIRECTORY / f"_flaggems_{row['id']}.py"
-    name = f"{namespace}.{generated.stem}"
-    sources = {
-        original.__name__: {"sha256": row["sha256"]},
-        name: {"sha256": hashlib.sha256(generated.read_bytes()).hexdigest()},
-    }
-
-    def fail_runtime_compile(*args, **kwargs):
-        pytest.fail("The adapted embedding must use prebuilt bytecode")
-
-    monkeypatch.setattr(variants, "compile", fail_runtime_compile, raising=False)
-    monkeypatch.setattr(generator, "render", fail_runtime_compile)
-
-    def load():
-        return variants.load(
-            policy,
-            sources,
-            package=package,
-            namespace=namespace,
-            bytecode=bytecode,
-        )[row["id"]]
-
-    try:
-        selected = load()
-        assert selected() == "adapted"
-        assert selected.__code__.co_filename == str(generated)
-        assert selected is not original.embedding_dense_backward
-        assert sys.modules[original.__name__] is original
-        generated.write_text("# changed\n")
-        with pytest.raises(RuntimeError, match="Generated Native Host source changed"):
-            load()
-    finally:
-        sys.modules.pop(name, None)

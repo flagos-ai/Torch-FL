@@ -7,14 +7,6 @@
 #include <atomic>
 #include <cstring>
 
-#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
-#include "backends/flagos/python_op_caller.h"
-#endif
-#if defined(FLAGOS_METAX_NATIVE_MEAN)
-#include "backends/metax/generated/fp32_mean.h"
-#include <c10/core/DeviceGuard.h>
-#endif
-
 namespace at::native::flagos {
 
 namespace {
@@ -310,45 +302,6 @@ bool TryEmptyPpuMatmul(const at::Tensor& lhs, const at::Tensor& rhs,
   return true;
 }
 #endif
-
-bool TryNativeHostMean(const at::Tensor& input, at::OptionalIntArrayRef dims,
-                       bool keepdim, std::optional<at::ScalarType> dtype,
-                       at::Tensor& result) {
-#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
-  if (!input.device().is_privateuseone() || input.scalar_type() != at::kFloat ||
-      (dtype.has_value() && *dtype != at::kFloat) || !input.is_contiguous() ||
-      input.dim() == 0 || input.numel() == 0 || !dims.has_value() || dims->size() != 1)
-    return false;
-  const auto dim = (*dims)[0];
-  if (dim != -1 && dim != input.dim() - 1) return false;
-#if defined(FLAGOS_METAX_NATIVE_MEAN)
-  const int64_t columns = input.size(-1);
-  if ((columns == 128 || columns == 1024) && !input.is_neg()) {
-    const int64_t rows = input.numel() / columns;
-    if (rows <= INT32_MAX) {
-      auto shape = input.sizes().vec();
-      if (keepdim) shape.back() = 1;
-      else shape.pop_back();
-      c10::OptionalDeviceGuard guard(input.device());
-      result = at::empty(shape, input.options());
-      const auto stream =
-          reinterpret_cast<mcStream_t>(GetCurrentStreamForDevice(input.device().index()));
-      const auto status = metax_reduction::Mean(input.const_data_ptr<float>(),
-          result.mutable_data_ptr<float>(), rows, columns, stream);
-      TORCH_CHECK(status == mcSuccess, "native MetaX mean launch failed: ",
-          static_cast<int>(status));
-      return true;
-    }
-  }
-#endif
-  result = CallPythonOp_Generic("torch_fl.native_host._generated.runtime.metax_mean",
-                                {input, keepdim});
-  return true;
-#else
-  (void)input; (void)dims; (void)keepdim; (void)dtype; (void)result;
-  return false;
-#endif
-}
 
 bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
                                   at::Tensor& result) {

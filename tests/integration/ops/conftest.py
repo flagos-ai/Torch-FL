@@ -136,15 +136,6 @@ def _kunlunxin_xblaslt_enabled() -> bool:
     return torch._C._dispatch_has_kernel_for_dispatch_key("aten::linear", "PrivateUse1")
 
 
-def _tsingmicro_txdnn_enabled() -> bool:
-    from torch_fl import backend_config_path
-
-    conf = backend_config_path()
-    return bool(
-        conf and "embedding = flaggems; BFloat16:tsingmicro" in Path(conf).read_text()
-    )
-
-
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
@@ -271,17 +262,6 @@ def pytest_collection_modifyitems(
                 reason="Kunlunxin XBLAS linear contract",
             )
             continue
-        if (
-            item.get_closest_marker("tsingmicro_txdnn")
-            and not _tsingmicro_txdnn_enabled()
-        ):
-            add_platform_skip(
-                item,
-                gate="build_record",
-                detail="wheel has no TXDNN Native Host routes",
-                reason="TsingMicro TXDNN contract",
-            )
-            continue
         if item.get_closest_marker("host_compiler") and not _host_compiler_enabled():
             add_platform_skip(
                 item,
@@ -381,9 +361,6 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "mps: requires Apple Silicon (Metal) platform")
     config.addinivalue_line("markers", "kunlunxin: requires the Kunlunxin runtime")
     config.addinivalue_line("markers", "kunlunxin_xblaslt: requires XBLAS linear")
-    config.addinivalue_line(
-        "markers", "tsingmicro_txdnn: requires TXDNN Native Host routes"
-    )
     config.addinivalue_line(
         "markers", "soft_lowp: requires the DCU or MetaX software lowp path"
     )

@@ -1221,37 +1221,6 @@ at::Tensor PowTensorScalarKernelKunlunxin(const at::Tensor& self, const at::Scal
 
 REGISTER_IMPL_TO_DISPATCHER(PowTensorScalarFn, pow_tensor_scalar_dispatcher, Backend::kKunlunxin, PowTensorScalarKernelKunlunxin)
 
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(FLAGOS_NATIVE_HOSTS)
-bool TryKunlunxinLerpInplaceHost(at::Tensor& self, const at::Tensor& end,
-                               const at::Scalar& weight);
-#endif
-
-at::Tensor& LerpInplaceScalarKernelKunlunxin(at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {
-  if (self.scalar_type() != at::kBFloat16 || end.scalar_type() != at::kBFloat16 ||
-      self.device() != end.device() || !self.sizes().equals(end.sizes()) ||
-      !self.is_contiguous() || !end.is_contiguous() || self.is_alias_of(end) ||
-      self.is_neg() || end.is_neg() || weight.isComplex()) {
-    return lerp_inplace_scalar_dispatcher.DispatchBackend(Backend::kFlagGems, self, end, weight);
-  }
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(FLAGOS_NATIVE_HOSTS)
-  const auto scalar = weight.isFloatingPoint() ? weight.toDouble() : 0.0;
-  if (scalar > 0.0 && scalar < 0.5 &&
-      static_cast<float>(scalar) > 0.0f && static_cast<float>(scalar) < 0.5f &&
-      self.numel() != 0 && !self.is_conj() && !end.is_conj() &&
-      !self.has_names() && !end.has_names() &&
-      TryKunlunxinLerpInplaceHost(self, end, weight)) {
-    return self;
-  }
-#endif
-  at::AutoDispatchBelowADInplaceOrView guard;
-  auto input = self.to(at::kFloat);
-  input.lerp_(end.to(at::kFloat), weight);
-  self.copy_(input.to(at::kBFloat16));
-  return self;
-}
-
-REGISTER_IMPL_TO_DISPATCHER(LerpInplaceScalarFn, lerp_inplace_scalar_dispatcher, Backend::kKunlunxin, LerpInplaceScalarKernelKunlunxin)
-
 at::Tensor SliceBackwardKernelKunlunxin(const at::Tensor& grad_output, at::IntArrayRef input_sizes,
     int64_t dim, int64_t start, int64_t end, int64_t step) {
   const auto dtype = grad_output.scalar_type();

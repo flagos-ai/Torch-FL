@@ -909,9 +909,6 @@ def main():
     copy_adaptation = policy.NATIVE_COPY_ADAPTATIONS.get(vendor)
     if copy_adaptation is not None:
         manifest["copy_adaptation"] = copy_adaptation
-    reduction_adaptation = policy.NATIVE_REDUCTION_ADAPTATIONS.get(vendor)
-    if reduction_adaptation is not None:
-        manifest["reduction_adaptation"] = reduction_adaptation
     sdk_policy = policy.NATIVE_SDK_PRECISION.get(vendor)
     if sdk_policy is not None and "vendor" in _build_config.KERNELS:
         from torch_fl.native_host.vendor_cohort import digest
@@ -981,9 +978,7 @@ def main():
         ]
         policy = source_policy_for_build(_build_config, source_root)
         bytecode = source_variants.build_bytecode(policy, package)
-        alternatives = source_variants.load(
-            policy, package=package, bytecode=bytecode, namespace=namespace
-        )
+        alternatives = source_variants.load(policy, package=package, bytecode=bytecode)
         if policy is not None:
             manifest["source_variants"] = policy
         if bytecode:

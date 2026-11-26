@@ -63,70 +63,6 @@ namespace gcu = at::native::flagos::gcu;
 
 namespace {
 
-// FP32 exp range reduction and polynomial coefficients from SLEEF 3.6.1 xexpf.
-// Copyright Naoki Shibata and contributors 2010 - 2024.
-// Boost Software License 1.0 (see LICENSES/BSL-1.0.txt).
-// https://github.com/shibatch/sleef/blob/3.6.1/src/libm/sleefsimdsp.c
-at::Tensor EnflameExpFp32(const at::Tensor& x) {
-  constexpr float log2e = 1.4426950408889634f;
-  constexpr float log2_hi = 0.693145751953125f;
-  constexpr float log2_lo = 1.428606765330187e-6f;
-  constexpr int32_t exponent_bias = 127;
-  constexpr int32_t exponent_bit = 1 << 23;
-  const auto q = at::round(at::mul(at::clamp(x, -104, 100), log2e)).to(at::kInt);
-  const auto q_float = q.to(at::kFloat);
-  const auto r_hi = at::addcmul(x, q_float, at::full_like(x, -log2_hi));
-  const auto r = at::addcmul(r_hi, q_float, at::full_like(x, -log2_lo));
-  auto coefficient = at::full_like(x, 0.000198527617612853646278381f);
-  for (auto c : {0.00139304355252534151f, 0.00833336077630519867f,
-                 0.04166648536920547485f, 0.16666667163372039795f, 0.5f}) {
-    coefficient = at::addcmul(at::full_like(x, c), coefficient, r);
-  }
-  const auto significand = at::add(at::addcmul(r, at::mul(r, r), coefficient), 1);
-  const auto q_first = at::floor(at::mul(q_float, 0.5f)).to(at::kInt);
-  const auto scale = [&](const at::Tensor& part) {
-    return at::mul(at::add(part, exponent_bias), exponent_bit).view(at::kFloat);
-  };
-  // Split scaling so both powers of two have a normal FP32 representation.
-  const auto scaled = at::mul(at::mul(significand, scale(q_first)), scale(at::sub(q, q_first)));
-  const auto inf = std::numeric_limits<float>::infinity();
-  const auto bounded = at::where(at::lt(x, -104), at::zeros_like(x),
-      at::where(at::gt(x, 100), at::full_like(x, inf), scaled));
-  return at::where(at::isnan(x), x, bounded);
-}
-
-at::Tensor EnflameBf16SiluBackward(const at::Tensor& grad, const at::Tensor& self) {
-  const auto x = self.to(at::kFloat);
-  const auto one = at::ones_like(x);
-  const auto divisor = at::add(EnflameExpFp32(at::neg(x)), 1);
-  auto sigmoid = at::div(one, divisor);
-  // One compensated reciprocal step corrects TOPS division rounding.
-  const auto residual = at::addcmul(one, at::neg(divisor), sigmoid);
-  sigmoid = at::where(at::isfinite(divisor), at::addcmul(sigmoid, sigmoid, residual), sigmoid);
-  const auto slope = at::add(at::mul(x, at::sub(one, sigmoid)), 1);
-  return at::mul(at::mul(grad.to(at::kFloat), sigmoid), slope).to(at::kBFloat16);
-}
-
-constexpr int64_t kSoftmaxReductionLanes = 16;
-constexpr int64_t kMaxOrderedSoftmaxWidth = 256;
-
-at::Tensor EnflameOrderedSoftmaxBackward(const at::Tensor& grad, const at::Tensor& output) {
-  auto shape = output.sizes().vec();
-  shape.back() /= kSoftmaxReductionLanes;
-  shape.push_back(kSoftmaxReductionLanes);
-  const auto chunks = at::mul(grad, output).reshape(shape);
-  auto total = chunks.select(-2, 0);
-  // Vendor Torch reduces FP32 products in 16 lanes before the horizontal sum.
-  // The order matters when the result is rounded back to BF16.
-  for (int64_t i = 1; i < chunks.size(-2); ++i) {
-    total = at::add(total, chunks.select(-2, i));
-  }
-  for (auto half = kSoftmaxReductionLanes / 2; half; half /= 2) {
-    total = at::add(total.slice(-1, 0, half), total.slice(-1, half));
-  }
-  return at::mul(at::sub(grad, total), output);
-}
-
 bool EnflameMeanNllInput(
     const at::Tensor& self, const at::Tensor& target,
     const std::optional<at::Tensor>& weight, int64_t reduction, int64_t ignore_index) {
@@ -2968,12 +2904,6 @@ at::Tensor PrivSoftmaxBackwardDataKernelGcu(
   const auto d = c10::maybe_wrap_dim(dim, output.dim());
   TORCH_CHECK(grad_output.sizes().equals(output.sizes()),
       "softmax backward requires matching gradient and output shapes");
-  if (input_dtype == at::kFloat && grad_output.scalar_type() == at::kFloat &&
-      output.scalar_type() == at::kFloat && output.dim() && d == output.dim() - 1 &&
-      grad_output.numel() && output.size(d) <= kMaxOrderedSoftmaxWidth &&
-      output.size(d) % kSoftmaxReductionLanes == 0) {
-    return EnflameOrderedSoftmaxBackward(grad_output, output);
-  }
   auto result = at::empty(output.sizes(), output.options().dtype(input_dtype));
   if (!result.numel()) return result;
   auto grad_c = grad_output.dim() ? grad_output.contiguous() : grad_output.view({1});
@@ -3004,12 +2934,6 @@ at::Tensor PrivLogSoftmaxBackwardDataKernelGcu(
   const auto d = c10::maybe_wrap_dim(dim, output.dim());
   TORCH_CHECK(grad_output.sizes().equals(output.sizes()),
       "softmax backward requires matching gradient and output shapes");
-  if (input_dtype == at::kFloat && grad_output.scalar_type() == at::kFloat &&
-      output.scalar_type() == at::kFloat && output.dim() && d == output.dim() - 1 &&
-      grad_output.numel()) {
-    const auto total = at::sum(grad_output, {d}, true);
-    return at::sub(grad_output, at::mul(EnflameExpFp32(output), total));
-  }
   auto result = at::empty(output.sizes(), output.options().dtype(input_dtype));
   if (!result.numel()) return result;
   auto grad_c = grad_output.dim() ? grad_output.contiguous() : grad_output.view({1});
@@ -3050,11 +2974,6 @@ at::Tensor SiluBackwardKernelGcu(
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(grad_output.scalar_type())) {
     return at::silu_backward(grad_output.cpu(), self.cpu()).to(self.device());
-  }
-  if (self.scalar_type() == at::kBFloat16 &&
-      grad_output.scalar_type() == at::kBFloat16 &&
-      self.sizes().equals(grad_output.sizes()) && self.numel()) {
-    return EnflameBf16SiluBackward(grad_output, self);
   }
   auto grad_c = grad_output.contiguous();
   auto self_c = self.contiguous();

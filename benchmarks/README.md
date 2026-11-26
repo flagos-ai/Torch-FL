@@ -9,9 +9,8 @@ in both environments.
 Set `QWEN3_BENCH_HOST` to the same machine and physical device identifier when
 the two processes run in containers with different hostnames.
 Use an installed FlagGems Native Host wheel (`FLAGOS_BUILD_NATIVE_HOST=1`)
-for the Linux candidate. Strict routing rejects unsupported fallbacks.
-Explicit C++ routes may use the same ATen implementation as vendor Torch
-when vendor Torch runs an operator on the CPU. Every warmup and timed round
+for the Linux candidate. Strict routing rejects unsupported numerical CPU
+fallbacks. Every warmup and timed round
 must record FlagGems launches from C++ Native Host and zero launches using
 Python argument submission. The process-wide Python count also covers
 setup and untimed accuracy collection. The report includes enqueue counts

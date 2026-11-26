@@ -15,10 +15,6 @@ namespace at::native::flagos {
 // before invoking the original FlagGems implementation.
 bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst);
 
-#if defined(USE_TSINGMICRO) && defined(FLAGOS_NATIVE_HOSTS)
-bool TryTsingMicroStridedCopy(const at::Tensor& src, const at::Tensor& dst);
-#endif
-
 at::Tensor _copy_from(
     const at::Tensor& self,
     const at::Tensor& dst,

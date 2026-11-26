@@ -244,70 +244,6 @@ if dtype is None and dim is not None and len(dim) == 1 and inp.ndim > 0:
     return original, definition
 
 
-def metax_mean_source(function, policy):
-    if (
-        not policy
-        or function.__module__ != "flag_gems.ops.mean"
-        or function.__name__ != "mean_dim"
-        or hashlib.sha256(
-            Path(inspect.getsourcefile(function)).read_bytes()
-        ).hexdigest()
-        != "c968ad14d3ba76ed87c29e5e9346a0e392cdaeaeb01c0774cfd7c5c489394d1c"
-    ):
-        return None
-
-    # Reorder the contiguous reduction lanes to match the SDK reduction tree.
-    # Call the original JIT kernel with the explicit metadata from this policy.
-    definition = ast.parse(inspect.getsource(function)).body[0]
-    extents = " or ".join(f"columns == {extent}" for extent in policy["extents"])
-    definition.body[:0] = ast.parse(f"""
-if (
-    inp.ndim > 0 and inp.numel() != 0 and inp.is_contiguous()
-    and inp.dtype == torch.float32 and (dtype is None or dtype == torch.float32)
-    and dim is not None and len(dim) == 1 and (dim[0] == -1 or dim[0] == inp.ndim - 1)
-):
-    columns = inp.size(-1)
-    if {extents}:
-        rows = inp.numel() // columns
-        vector = {policy["vector_width"]} if columns > {policy["vectorize_above"]} else 1
-        lanes = columns // vector
-        warp_size = {policy["warp_size"]}
-        max_threads = {policy["max_threads"]}
-        width = min(lanes, {policy["split_warp_width"]} if columns <= {policy["split_warp_extent"]} else warp_size)
-        height = min(1 << (min(rows, max_threads).bit_length() - 1), max_threads // width)
-        width = min(lanes, max_threads // height)
-        bits = width.bit_length() - 1
-        warp_bits = min(bits, warp_size.bit_length() - 1)
-        cross_warp_bits = bits - warp_bits
-        reshape_dims: List[int] = [rows, columns // (width * vector)]
-        axes: List[int] = [0, 1, bits + 2]
-        for offset in range(bits):
-            reshape_dims.append(2)
-            lane_bit = bits - 1 - offset
-            if lane_bit < warp_bits:
-                index = warp_bits - 1 - lane_bit
-            else:
-                index = warp_bits + bits - 1 - lane_bit
-            if index < cross_warp_bits:
-                target = bits - 1 - index
-            else:
-                target = index - cross_warp_bits
-            axes.append(bits + 1 - target)
-        reshape_dims.append(vector)
-        data = inp.reshape(reshape_dims).permute(axes).contiguous().reshape(rows, columns)
-        output = torch.empty([rows], dtype=inp.dtype, device=inp.device)
-        mean_dim_kernel_inner.fn.fn[(rows,)](
-            output, data, rows, columns, TILE_N=width, ONE_TILE_PER_CTA=False,
-            num_warps=max(1, width // warp_size),
-        )
-        result_shape = inp.size()[:-1]
-        if keepdim:
-            result_shape.append(1)
-        return output.reshape(result_shape)
-""").body
-    return definition
-
-
 def ascend_embedding_source(function):
     if (
         function.__name__ != "embedding"
@@ -787,11 +723,6 @@ class Frontend:
 
     def source(self, function, signature, *, input_dtypes=()):
         function, definition = tiled_mean_source(function)
-        if definition is None:
-            definition = metax_mean_source(
-                function,
-                getattr(self.hosts, "manifest", {}).get("reduction_adaptation"),
-            )
         if definition is None:
             definition = ascend_embedding_source(function)
         # Only schema entries with the corresponding runtime dtype guard may

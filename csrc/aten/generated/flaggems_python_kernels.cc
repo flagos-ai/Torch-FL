@@ -260,17 +260,6 @@ at::Tensor & PrivLogSoftmaxOutKernelPython(const at::Tensor & self, int64_t dim,
 
 static TypedSourceSlot PrivLogSoftmaxBackwardDataFnSource("aten::_log_softmax_backward_data", "flag_gems.log_softmax_backward", "aca263c2da6fc21abcd7232097f4616d6c967fd2a504e724032a4835ddd446c1", "{\"abi\": \"aca263c2da6fc21abcd7232097f4616d6c967fd2a504e724032a4835ddd446c1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"input_dtype\", \"type\": \"at::ScalarType\"}], \"host\": \"flag_gems.log_softmax_backward\", \"op\": \"aten::_log_softmax_backward_data\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivLogSoftmaxBackwardDataKernelPython(const at::Tensor & grad_output, const at::Tensor & output, int64_t dim, at::ScalarType input_dtype) {
-#if defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)
-  if (input_dtype == at::kFloat && output.scalar_type() == at::kFloat &&
-      grad_output.scalar_type() == at::kFloat && output.dim() == 2 &&
-      (dim == -1 || dim == 1) && output.numel() && output.is_contiguous() &&
-      grad_output.is_contiguous() && grad_output.device() == output.device() &&
-      grad_output.sizes().equals(output.sizes())) {
-    const int64_t dims[] = {dim};
-    auto sum = at::sum(grad_output, at::IntArrayRef(dims), true, at::kFloat);
-    return at::sub(grad_output, at::mul(at::exp(output), sum));
-  }
-#endif
   auto result = PrivLogSoftmaxBackwardDataFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.log_softmax_backward", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(output), static_cast<const int64_t&>(dim), static_cast<const at::ScalarType&>(input_dtype));
   UnboxToFlagos(result);
   return result;
@@ -3212,15 +3201,6 @@ at::Tensor MeanKernelPython(const at::Tensor & self, ::std::optional<at::ScalarT
 
 static TypedSourceSlot MeanDimFnSource("aten::mean.dim", "flag_gems.mean_dim", "0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c", "{\"abi\": \"0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.mean_dim\", \"op\": \"aten::mean.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
-#if defined(FLAGOS_METAX_NATIVE_MEAN)
-  constexpr bool use_measured_mean = true;
-#else
-  const bool use_measured_mean = !MeanDimFnSource.Available();
-#endif
-  at::Tensor native_mean;
-  if (use_measured_mean && self.dim() > 0 && (self.size(-1) == 128 || self.size(-1) == 1024) && at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) { return native_mean; }
-#endif
 #if defined(USE_DCU)
   const auto output_dtype = dtype.value_or(self.scalar_type());
   TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");
@@ -3598,14 +3578,7 @@ at::Tensor NllLossBackwardKernelPython(const at::Tensor & grad_output, const at:
 #if defined(FLAGOS_ACCEL_CUDA)
   return NllLossMeanBackwardNvidia(grad_output, self, target, weight, reduction, ignore_index, total_weight);
 #endif
-#if defined(USE_TSINGMICRO)
-  // Unboxed autograd can represent an absent class weight as an undefined Tensor.
-  const std::optional<at::Tensor> no_weight;
-  const auto& effective_weight = weight && !weight->defined() ? no_weight : weight;
-#else
-  const auto& effective_weight = weight;
-#endif
-  auto result = NllLossBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nll_loss_backward", {grad_output, self, target, effective_weight, reduction, ignore_index, total_weight}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(effective_weight), static_cast<const int64_t&>(reduction), static_cast<const int64_t&>(ignore_index), static_cast<const at::Tensor&>(total_weight));
+  auto result = NllLossBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nll_loss_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction), static_cast<const int64_t&>(ignore_index), static_cast<const at::Tensor&>(total_weight));
   UnboxToFlagos(result);
   return result;
 }
@@ -3713,16 +3686,6 @@ at::Tensor PowTensorScalarKernelPython(const at::Tensor & self, const at::Scalar
   if (MulTensorFnSource.Available() && c10::isFloatingType(self.scalar_type()) &&
       (exponent.isIntegral(false) || exponent.isFloatingPoint()) && exponent.toDouble() == 2.0)
     return at::mul(self, self);
-#elif defined(FLAGOS_ACCEL_PPU) || defined(FLAGOS_ACCEL_METAX) || defined(USE_TSINGMICRO)
-  if (MulTensorFnSource.Available() && self.scalar_type() == at::kFloat &&
-      (exponent.isIntegral(false) || exponent.isFloatingPoint())) {
-    const auto power = exponent.toDouble();
-#if defined(FLAGOS_ACCEL_PPU) || defined(USE_TSINGMICRO)
-    if (power == 1.0) return self.clone();
-    if (power == 2.0) return at::mul(self, self);
-#endif
-    if (power == 3.0) return at::mul(at::mul(self, self), self);
-  }
 #endif
   auto result = PowTensorScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.pow_tensor_scalar", {self, exponent}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(exponent));
   UnboxToFlagos(result);
@@ -5852,7 +5815,7 @@ REGISTER_IMPL_TO_DISPATCHER(CatOutFn, cat_out_dispatcher, Backend::kFlagGems, Ca
 #endif
 } // namespace at::native::flagos
 #endif
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_DCU) || defined(USE_MUSA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_ILUVATAR) || defined(USE_KUNLUNXIN) || ((defined(USE_MACA) || defined(USE_TSINGMICRO)) && defined(FLAGOS_NATIVE_HOSTS)))
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_DCU) || defined(USE_MUSA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_ILUVATAR) || defined(USE_KUNLUNXIN) || (defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)))
 #include <ATen/native/CPUFallback.h>
 #include <ATen/ops/embedding_dense_backward_ops.h>
 #include "../fallback.h"
@@ -6102,42 +6065,6 @@ at::Tensor & MulOutFlagGems(const at::Tensor & self, const at::Tensor & other, a
   return out;
 }
 REGISTER_IMPL_TO_DISPATCHER(MulOutFn, mul_out_dispatcher, Backend::kFlagGems, MulOutFlagGems)
-} // namespace at::native::flagos
-#endif
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_TSINGMICRO) && defined(FLAGOS_NATIVE_HOSTS)
-namespace at::native::flagos {
-namespace {
-template <class... Args>
-bool TryTsingMicroInplaceHost(const TypedSourceSlot& source, at::Tensor& out,
-                              const Args&... args) {
-  const auto result = source.Call<at::Tensor>([] { return at::Tensor(); }, out, args...);
-  if (!result.defined()) return false;
-  TORCH_CHECK(result.is_same(out), "TsingMicro FlagGems in-place host changed the output alias");
-  return true;
-}
-} // namespace
-
-bool TryTsingMicroAddInplaceHost(at::Tensor& out, const at::Tensor& scalar,
-                                const at::Scalar& alpha) {
-  return TryTsingMicroInplaceHost(AddInplaceTensorFnSource, out, scalar, alpha);
-}
-
-bool TryTsingMicroMulInplaceHost(at::Tensor& out, const at::Tensor& scalar) {
-  return TryTsingMicroInplaceHost(MulInplaceTensorFnSource, out, scalar);
-}
-} // namespace at::native::flagos
-#endif
-
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_KUNLUNXIN) && defined(FLAGOS_NATIVE_HOSTS)
-namespace at::native::flagos {
-bool TryKunlunxinLerpInplaceHost(at::Tensor& self, const at::Tensor& end,
-                               const at::Scalar& weight) {
-  const auto result = LerpInplaceScalarFnSource.Call<at::Tensor>(
-      [] { return at::Tensor(); }, self, end, weight);
-  if (!result.defined()) return false;
-  TORCH_CHECK(result.is_same(self), "Kunlunxin FlagGems lerp changed the output alias");
-  return true;
-}
 } // namespace at::native::flagos
 #endif
 // END GENERATED FLAGGEMS OUT ADAPTERS

@@ -247,13 +247,6 @@ elseif(_flagos_is_tsingmicro)
 
   # Embed Kuiper library path in RPATH so LD_LIBRARY_PATH is not needed at runtime.
   list(APPEND CMAKE_INSTALL_RPATH "${KUIPER_ROOT}/lib")
-  if(FLAGOS_NATIVE_HOSTS AND TXOPS_ROOT)
-    find_path(TXOPS_INCLUDE_DIR txdnn.h PATHS "${TXOPS_ROOT}/include"
-      NO_DEFAULT_PATH REQUIRED)
-    find_library(TXDNN_LIB txdnn PATHS "${TXOPS_ROOT}/lib"
-      NO_DEFAULT_PATH REQUIRED)
-    list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN/../../txops/lib")
-  endif()
 
   add_library(torch::cudart INTERFACE IMPORTED)
   if(NOT TARGET CUDA::nvToolsExt)

@@ -187,9 +187,6 @@ bool TryEmptyPpuMatmul(const at::Tensor& lhs, const at::Tensor& rhs,
 // published pointwise kernels. Other builds/contracts retain their bmm path.
 bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
                                   at::Tensor& result);
-bool TryNativeHostMean(const at::Tensor& input, at::OptionalIntArrayRef dims,
-                       bool keepdim, std::optional<at::ScalarType> dtype,
-                       at::Tensor& result);
 
 // Shared by ATen fallback and explicit numerical host escapes.
 void SetStrictHostRoutes(bool enabled);

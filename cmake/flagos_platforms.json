@@ -314,9 +314,7 @@
       "vendor": "tsingmicro",
       "registration": {
         "flaggems": "generated/register_flaggems_tsingmicro.inc",
-        "base": "generated/register_tsingmicro.inc",
-        "vendor": "backends/tsingmicro/generated/txdnn_register.inc",
-        "native_host": "generated/register_flaggems_tsingmicro_native_host.inc"
+        "base": "generated/register_tsingmicro.inc"
       },
       "_comment": [
         "TsingMicro Kuiper uses FlagGems Python for its operator routes.",

@@ -14,7 +14,6 @@
 
 import glob
 import importlib.machinery
-import importlib.metadata
 import importlib.util
 import json
 import multiprocessing
@@ -747,9 +746,6 @@ def build_deps(*, inplace=False):
     elif FLAGOS_ACCELERATOR == "iluvatar":
         corex_root = _setup_iluvatar_build_env(build_env)
         cmake_args.append(f"-DCOREX_PATH={corex_root}")
-    elif FLAGOS_ACCELERATOR == "tsingmicro":
-        txops = _tsingmicro_txops()
-        cmake_args.append(f"-DTXOPS_ROOT={txops.locate_file('txops') if txops else ''}")
 
     configure = [cmake, BASE_DIR] + cmake_args
     subprocess.check_call(configure, cwd=build_dir, env=build_env)
@@ -799,7 +795,6 @@ _NATIVE_HOST_CONFIG_VENDORS = (
     "iluvatar",
     "metax",
     "thead",
-    "tsingmicro",
 )
 
 
@@ -1055,7 +1050,6 @@ class BuildExtWithCmake(_build_ext):
             vendor,
             generator.parse_conf(source),
             vendor_kernels=_kernel_switches(FLAGOS_ACCELERATOR)["FLAGOS_BUILD_VENDOR"],
-            tsingmicro_txdnn=_tsingmicro_txops() is not None,
         )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
@@ -1360,7 +1354,6 @@ def _get_setup_kwargs():
             "native_host/_generated/licenses/*",
             "native_host/_generated/device_kernels/index.json",
             "native_host/_generated/device_kernels/*/*",
-            "native_host/_generated/published_sources/*.py",
             "native_host/_generated/published_sources/*.pyc",
             "native_host/_generated/metax_vendor/*.so*",
             "native_host/_generated/thead_vendor/*.so*",
@@ -1604,26 +1597,9 @@ def _flagos_sibling_requires() -> list:
 TORCH_PIN = "torch>=2.10,<2.11"
 
 
-def _tsingmicro_txops():
-    if FLAGOS_ACCELERATOR != "tsingmicro" or not _env_module().flag(
-        "FLAGOS_BUILD_NATIVE_HOST"
-    ):
-        return None
-    try:
-        dist = importlib.metadata.distribution("txops")
-    except importlib.metadata.PackageNotFoundError:
-        return None
-    if dist.version != _version_pins().get("TXOPS_VERSION_tsingmicro"):
-        return None
-    return dist
-
-
 def _install_requires():
     reqs = [TORCH_PIN, "packaging>=23"]
     reqs += _flagos_sibling_requires()
-    txops = _tsingmicro_txops()
-    if txops is not None:
-        reqs.append(f"txops=={txops.version}")
     native_vendor = _native_vendor_cohort()
     if native_vendor is not None:
         cohort = native_vendor[1]

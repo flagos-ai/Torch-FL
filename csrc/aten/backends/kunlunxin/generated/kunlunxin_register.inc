@@ -49,7 +49,6 @@
   m.impl("exponential_", WrapperExponentialInplace);
   m.impl("full", WrapperFull);
   m.impl("le.Tensor", WrapperLeTensor);
-  m.impl("lerp_.Scalar", WrapperLerpInplaceScalar);
   m.impl("mean.dim", WrapperMeanDim);
   m.impl("mean.out", WrapperMeanOut);
   m.impl("mm", WrapperMm);

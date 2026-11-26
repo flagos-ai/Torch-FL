@@ -2470,7 +2470,6 @@ KUNLUNXIN_DTYPE_ROUTES = {
     "add_.Tensor": "BFloat16:kunlunxin",
     "embedding_dense_backward": "BFloat16:kunlunxin",
     "cumsum": "Bool,Long:kunlunxin",
-    "lerp_.Scalar": "BFloat16:kunlunxin",
     "pow.Tensor_Scalar": "Float:kunlunxin",
     "silu_backward": "BFloat16:kunlunxin",
 }
@@ -2650,15 +2649,6 @@ METAX_FLAGGEMS_MEASURED = {
 # This is launch/layout evidence, not full-model precision or general vendor
 # coverage. Keep the ordinary conf's historical holds separate.
 NATIVE_HOST_FLAGGEMS_OPS = {
-    # These published hosts have typed entries in the TsingMicro cohort.
-    "tsingmicro": frozenset(
-        {
-            "_log_softmax",
-            "_log_softmax_backward_data",
-            "_softmax_backward_data",
-            "embedding_dense_backward",
-        }
-    ),
     "metax": frozenset(
         {
             "add.Tensor",
@@ -4157,7 +4147,6 @@ def render_native_host_config(
     base: dict,
     *,
     vendor_kernels: bool = True,
-    tsingmicro_txdnn: bool = False,
 ) -> str:
     """Render the configuration staged as backends_<platform>.conf in a wheel."""
     routes = native_host_routes(platform, base)
@@ -4168,53 +4157,10 @@ def render_native_host_config(
         # FlagGems handles broadcast additions in eager decode on Native Host.
         routes["add.Tensor"] = "flaggems"
         routes["le.Tensor"] = "flaggems; Long:cambricon"
-    if vendor_kernels and platform == "tsingmicro" and tsingmicro_txdnn:
-        from codegen_tsingmicro import OPTIMIZER_OUT_ROUTES
-
-        routes["arange"] = "tsingmicro"
-        routes["add.Tensor"] = "flaggems; Long:tsingmicro"
-        routes["sub.Tensor"] = "flaggems; Long:tsingmicro"
-        routes["cat"] = "flaggems; Long,BFloat16:tsingmicro"
-        routes["_log_softmax"] = "flaggems; Float:tsingmicro"
-        routes["_log_softmax_backward_data"] = "flaggems; Float:tsingmicro"
-        routes["_softmax"] = "flaggems; Float:tsingmicro"
-        routes["_softmax_backward_data"] = "flaggems; Float:tsingmicro"
-        routes["mean.dim"] = "flaggems; Float:tsingmicro"
-        routes["rsqrt"] = "flaggems; Float:tsingmicro"
-        routes["mm"] = "flaggems; BFloat16:tsingmicro"
-        routes["bmm"] = "flaggems; BFloat16:tsingmicro"
-        routes["constant_pad_nd"] = "flaggems; Long:tsingmicro"
-        routes["eq.Scalar"] = "flaggems; Long:tsingmicro"
-        routes["ne.Scalar"] = "none; Long:tsingmicro"
-        routes["masked_fill_.Scalar"] = "flaggems; Long:tsingmicro"
-        routes["all"] = "flaggems; Bool:tsingmicro"
-        routes["neg"] = "flaggems; BFloat16:tsingmicro"
-        routes["le.Tensor"] = "flaggems; Long:tsingmicro"
-        routes["fill_.Scalar"] = "flaggems; Long:tsingmicro"
-        routes["scalar_tensor"] = "tsingmicro"
-        routes["cumsum"] = "flaggems; Bool,Long:tsingmicro"
-        routes["cumsum.out"] = "none; Bool,Long:tsingmicro"
-        routes["embedding"] = "flaggems; BFloat16:tsingmicro"
-        for op, _ in OPTIMIZER_OUT_ROUTES:
-            routes[op] = "tsingmicro"
     if vendor_kernels and platform in ("iluvatar", "metax"):
         generated = CSRC_DIR / f"backends/{platform}/generated"
         for op in registered_impls(generated / "foreach_host.cc"):
             routes[op] = platform
-        if platform == "iluvatar":
-            for op in registered_impls(generated / "fp32_host.cc"):
-                routes[op] = platform
-            for op in (
-                "_log_softmax",
-                "_softmax",
-                "_softmax_backward_data",
-                "_log_softmax_backward_data",
-                "pow.Tensor_Scalar",
-                "rsqrt",
-                "sum.dim_IntList",
-            ):
-                routes[op] = f"flaggems; Float:{platform}"
-            routes["silu_backward"] = f"flaggems; BFloat16:{platform}"
     _reject_boxing_routes(f"backends_{platform}.conf", routes)
     text = render(platform, "", routes, include_gap_notes=False)
     if platform == "metax":
@@ -4230,39 +4176,13 @@ def render_native_host_config(
                 *precision_policy(platform)["operators"],
             ]
         }
-        if vendor_kernels:
-            policy["operators"].extend(
-                {"op": op, "dtypes": ["Float"]}
-                for op in (
-                    "_softmax",
-                    "_log_softmax",
-                    "_softmax_backward_data",
-                    "sum.dim_IntList",
-                )
-            )
-            policy["operators"].append({"op": "silu_backward", "dtypes": ["BFloat16"]})
         text = render_config_routes(text, platform, policy=policy)
     elif platform == "thead" and vendor_kernels:
         from native_host_policy import NATIVE_SDK_PRECISION, render_config_routes
 
-        operators = [*NATIVE_SDK_PRECISION[platform]["operators"]]
-        operators.extend(
-            {"op": op, "dtypes": ["Float"]}
-            for op in (
-                "_log_softmax",
-                "_log_softmax_backward_data",
-                "_softmax",
-                "_softmax_backward_data",
-                "mean.dim",
-                "rsqrt",
-            )
+        text = render_config_routes(
+            text, platform, policy=NATIVE_SDK_PRECISION[platform]
         )
-        operators.extend(
-            {"op": op, "dtypes": ["BFloat16"]}
-            for op in ("silu", "silu_backward", "addcmul_", "addcdiv_")
-        )
-        operators.append({"op": "sum.dim_IntList", "dtypes": ["Float", "BFloat16"]})
-        text = render_config_routes(text, platform, policy={"operators": operators})
     elif platform == "ascend":
         from native_host_policy import precision_policy, render_config_routes
 

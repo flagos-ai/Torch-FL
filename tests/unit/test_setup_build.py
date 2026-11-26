@@ -622,12 +622,11 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
         ("cambricon", "add.Tensor = flaggems\n"),
         ("cambricon", "add.Scalar = flaggems; Float,Half,BFloat16,Int:cambricon\n"),
         ("metax", "bmm = flaggems; BFloat16:metax\n"),
-        ("metax", "_log_softmax = flaggems; Float:metax\n"),
+        ("metax", "_log_softmax = flaggems\n"),
         ("thead", "bmm = flaggems; BFloat16:thead\n"),
-        ("thead", "mean.dim = flaggems; Float:thead\n"),
-        ("thead", "sum.dim_IntList = flaggems; Float,BFloat16:thead\n"),
-        ("thead", "silu_backward = flaggems; BFloat16:thead\n"),
-        ("tsingmicro", "_log_softmax = flaggems\n"),
+        ("thead", "mean.dim = flaggems\n"),
+        ("thead", "sum.dim_IntList = flaggems\n"),
+        ("thead", "silu_backward = flaggems\n"),
     ],
 )
 def test_native_host_stages_one_config_and_restores_the_default(
@@ -791,35 +790,6 @@ def test_native_vendor_records_the_verified_cohort(
     record["flag_gems"] = "5.4.1"
     with pytest.raises(RuntimeError, match="revalidate the native vendor policy"):
         namespace["_install_requires"]()
-
-
-@pytest.mark.parametrize(
-    "native,installed,expected",
-    [
-        ("1", "0.1.0+20260716.e94d9509", True),
-        ("1", "0.1.0", False),
-        ("0", "0.1.0+20260716.e94d9509", False),
-    ],
-)
-def test_tsingmicro_txdnn_requirement_is_scoped_to_verified_native_builds(
-    monkeypatch, clean_kernel_env, native, installed, expected
-):
-    monkeypatch.setenv("FLAGOS_ACCELERATOR", "tsingmicro")
-    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", native)
-    distribution = importlib.metadata.distribution
-
-    def find_distribution(name):
-        return (
-            SimpleNamespace(version=installed)
-            if name == "txops"
-            else distribution(name)
-        )
-
-    monkeypatch.setattr(importlib.metadata, "distribution", find_distribution)
-    namespace, _ = _load_setup(monkeypatch)
-    requirements = namespace["_install_requires"]()
-
-    assert (f"txops=={installed}" in requirements) is expected
 
 
 @pytest.mark.parametrize(

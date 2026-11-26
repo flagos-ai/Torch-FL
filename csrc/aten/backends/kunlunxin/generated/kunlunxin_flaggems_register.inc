@@ -20,7 +20,7 @@
 //
 // Do not hand-edit. Regenerate after changing that set:
 //   python3 scripts/codegen/codegen_kunlunxin_flaggems.py
-// Total: 250 ops registered here, 40 further FlagGems ops already claimed by kunlunxin_register.inc.
+// Total: 251 ops registered here, 39 further FlagGems ops already claimed by kunlunxin_register.inc.
 
   m.impl("_linalg_eigvals", WrapperPrivLinalgEigvals);
   m.impl("_prelu_kernel", WrapperPrivPreluKernel);
@@ -145,6 +145,7 @@
   m.impl("leaky_relu.out", WrapperLeakyReluOut);
   m.impl("lerp.Scalar", WrapperLerpScalar);
   m.impl("lerp.Tensor", WrapperLerpTensor);
+  m.impl("lerp_.Scalar", WrapperLerpInplaceScalar);
   m.impl("lerp_.Tensor", WrapperLerpInplaceTensor);
   m.impl("lift", WrapperLift);
   m.impl("lift.out", WrapperLiftOut);

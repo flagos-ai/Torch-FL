@@ -1104,17 +1104,16 @@ all-signature compiler coverage or results on other accelerators.
 ### MetaX native-host precision cohort
 
 The opt-in MetaX native config includes measured BF16 `mm`/`bmm` clauses for
-installed MACA BLAS. The official CPU Torch core remains loaded, and the wheel
-records the actual SDK library hashes. Contiguous FP32 last-axis means use the
-original published FlagGems reduction with normalized layout and launch metadata.
-The ordinary MetaX default configuration is unchanged.
+installed MACA BLAS. The wheel uses the official CPU Torch core and records the
+actual SDK library hashes. The default Native Host route for FP32 mean uses the
+published FlagGems reduction.
 
 An optional `FLAGOS_VENDOR_TORCH_LIB` selects the verified
 `2.10.0+metax3.8.1.0` vendor Torch numerical cohort. Its additional BF16 SiLU
 exception addresses a full-model midpoint divergence at input 5.9375. The FP32
 softmax exception addresses attention-weight differences that first cross a
-BF16 rounding boundary at decode-5. The FP32 mean exception retains the vendor
-reduction order while avoiding the original-kernel layout normalization cost.
+BF16 rounding boundary at decode-5. The FP32 mean exception uses the published
+vendor reduction stub.
 The unchanged published multiply source already used by the NVIDIA cohort is
 separately admitted and validated for MetaX. Only
 `libc10_cuda.so` and `libtorch_cuda.so` are bundled, under

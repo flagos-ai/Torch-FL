@@ -48,9 +48,6 @@
 #if defined(FLAGOS_CAMBRICON_KERNEL)
 #include "backends/cambricon/cambricon_common.h"
 #endif
-#if defined(FLAGOS_TSINGMICRO_TXDNN)
-#include "backends/tsingmicro/generated/txdnn_copy.h"
-#endif
 
 #if defined(FLAGOS_MUSA_KERNEL)
 #include "backends/mthreads/mudnn_common.h"
@@ -98,64 +95,6 @@
 
 namespace at::native::flagos {
 
-#if defined(USE_TSINGMICRO) && defined(FLAGOS_NATIVE_HOSTS)
-bool TryTsingMicroStridedCopy(const at::Tensor& src, const at::Tensor& dst) {
-  if (!src.is_privateuseone() || src.device() != dst.device() ||
-      src.layout() != at::kStrided || dst.layout() != at::kStrided ||
-      src.scalar_type() != dst.scalar_type() || src.is_quantized() ||
-      src.dim() != 1 || !src.sizes().equals(dst.sizes()) ||
-      src.numel() < 2 || src.stride(0) <= 1 || !dst.is_contiguous() ||
-      src.is_conj() || src.is_neg() || dst.is_conj() || dst.is_neg() ||
-      src.is_alias_of(dst)) {
-    return false;
-  }
-
-  const size_t elements = src.numel();
-  const size_t width = src.element_size();
-  const auto fits = [elements, width](const at::Tensor& tensor) {
-    const size_t capacity = tensor.storage().nbytes() / width;
-    const size_t offset = tensor.storage_offset();
-    return offset < capacity &&
-        static_cast<size_t>(tensor.stride(0)) <=
-            (capacity - 1 - offset) / (elements - 1);
-  };
-  if (!fits(src) || !fits(dst)) return false;
-
-  const auto* input = static_cast<const char*>(src.const_data_ptr());
-  auto* output = static_cast<char*>(dst.data_ptr());
-  const auto input_address = reinterpret_cast<std::uintptr_t>(input);
-  const auto output_address = reinterpret_cast<std::uintptr_t>(output);
-  const size_t input_stride = src.stride(0) * width;
-  const size_t input_span = (elements - 1) * input_stride + width;
-  const size_t output_span = elements * width;
-  if (!input || !output ||
-      (input_address <= output_address
-           ? output_address - input_address < input_span
-           : input_address - output_address < output_span)) {
-    return false;
-  }
-
-  const c10::OptionalDeviceGuard guard(src.device());
-  auto stream = ::GetCurrentStreamForDevice(src.device().index());
-  TORCH_CHECK(stream, "tsingmicro: no current stream for device copy");
-
-  // Kuiper has no pitched memcpy and the published FlagGems host declines
-  // strided tensors. Submit the disjoint elements on the producer stream.
-  size_t copied = 0;
-  for (; copied < elements; ++copied) {
-    if (::MemcpyAsync(output + copied * width, input + copied * input_stride,
-                      width, MemcpyDeviceToDevice, stream) != Success) {
-      break;
-    }
-  }
-  // Both buffers must stay live even if a later submission fails.
-  const auto completed = ::StreamSynchronize(stream);
-  TORCH_CHECK(copied == elements, "tsingmicro: strided device copy failed at element ", copied);
-  TORCH_CHECK(completed == Success, "tsingmicro: failed to synchronize strided device copy");
-  return true;
-}
-#endif
-
 #if defined(FLAGOS_GEMS_DEVICE_COPY)
 static bool GemsCopyType(at::ScalarType type) {
   return type == at::kFloat || type == at::kHalf || type == at::kBFloat16 ||
@@ -179,9 +118,6 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
   const auto src_type = src.scalar_type();
   const auto dst_type = dst.scalar_type();
 #if defined(USE_TSINGMICRO)
-#if defined(FLAGOS_TSINGMICRO_TXDNN)
-  if (tsingmicro::TryStridedCopy(src, dst)) return true;
-#endif
   if (!TsingMicroGemsCast(src_type, dst_type) || !src.is_contiguous() ||
       !dst.is_contiguous() || !src.sizes().equals(dst.sizes())) {
     return false;
@@ -535,9 +471,6 @@ bool cast_needs_cpu_roundtrip(c10::ScalarType src, c10::ScalarType dst) {
 // buffer it touches and drains that device's queue first -- src and dst need not
 // live on the same device, so the guard is per-copy rather than per-function.
 void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
-#if defined(USE_TSINGMICRO) && defined(FLAGOS_NATIVE_HOSTS)
-  if (TryTsingMicroStridedCopy(src, dst)) return;
-#endif
   if (TryGemsDeviceCopy(src, dst)) return;
   TORCH_CHECK(CpuFallbackAllowed(),
               "native FlagGems hosts do not permit CPU fallback: device copy/cast ",
@@ -779,13 +712,6 @@ at::Tensor _copy_from(
       const bool copied_on_device = kunlunxin::StridedCopy(dst, self);
 #elif defined(USE_ILUVATAR)
       const bool copied_on_device = TryGemsDeviceCopy(self, dst);
-#elif defined(USE_TSINGMICRO) && defined(FLAGOS_NATIVE_HOSTS)
-      const bool copied_on_device =
-          TryTsingMicroStridedCopy(self, dst) ||
-#if defined(FLAGOS_TSINGMICRO_TXDNN)
-          tsingmicro::TryBFloat16Cast(self, dst) ||
-#endif
-          TryGemsDeviceCopy(self, dst);
 #elif defined(FLAGOS_CAMBRICON_KERNEL)
       const bool copied_on_device = cambricon::StridedCopy(dst, self) ||
           cambricon::DtypeCast(self, dst.scalar_type(), dst).defined();
@@ -1008,14 +934,7 @@ at::Tensor _to_copy(
     (defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)))
 #if defined(USE_TSINGMICRO)
   const bool direct_gems_cast = self.is_contiguous() && TsingMicroGemsCast(self.scalar_type(), dtype);
-#if defined(FLAGOS_TSINGMICRO_TXDNN)
-  const bool direct_txdnn_cast = tsingmicro::IsBFloat16Cast(self.scalar_type(), dtype) &&
-      (self.is_contiguous() || (memory_format == c10::MemoryFormat::Preserve &&
-                                self.is_non_overlapping_and_dense()));
-#else
-  constexpr bool direct_txdnn_cast = false;
-#endif
-  const bool supported_copy_format = (direct_gems_cast || direct_txdnn_cast) &&
+  const bool supported_copy_format = direct_gems_cast &&
       (memory_format == c10::MemoryFormat::Preserve ||
        memory_format == c10::MemoryFormat::Contiguous);
 #else
@@ -1033,9 +952,6 @@ at::Tensor _to_copy(
         ? at::native::flagos::empty_strided(
               self.sizes(), self.strides(), dtype, self.layout(), device, false)
         : at::empty_like(self, self.options().dtype(dtype), memory_format);
-#if defined(FLAGOS_TSINGMICRO_TXDNN)
-    if (tsingmicro::TryBFloat16Cast(self, converted)) return converted;
-#endif
     if (TryGemsDeviceCopy(self, converted)) return converted;
   }
 #endif

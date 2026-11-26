@@ -342,35 +342,13 @@ def test_native_bf16_sdk_rejects_an_unenforceable_split_k_setting():
         settings.allow_bf16_reduced_precision_reduction = original
 
 
-def _vendor_mean_reference(source):
-    # Independent transcription of the published MACA ReduceConfigMaca and
-    # continuous-reduce host/kernel contract, evaluated only for test evidence.
-    rows, columns = source.shape
-    vector = 4 if columns > 128 else 1
-    extent = columns // vector
-    width = min(extent, 16 if columns <= 256 else 64)
-    height = min(1 << (min(rows, 512).bit_length() - 1), 512 // width)
-    width = min(extent, 512 // height)
-    accumulators = torch.zeros(rows, width, dtype=torch.float32)
-    for start in range(0, columns, width * vector):
-        values = source[:, start : start + width * vector].reshape(rows, width, vector)
-        for component in range(vector):
-            accumulators = accumulators + values[:, :, component]
-    while accumulators.size(1) > 64:
-        half = accumulators.size(1) // 2
-        accumulators = accumulators[:, :half] + accumulators[:, half:]
-    while accumulators.size(1) > 1:
-        accumulators = accumulators[:, ::2] + accumulators[:, 1::2]
-    return accumulators / columns
-
-
-@pytest.mark.parametrize("columns", [128, 1024])
-@pytest.mark.parametrize("rows", [1, 8, 16, 60, 480, 960])
+@pytest.mark.parametrize("columns", [64, 256, 2048])
+@pytest.mark.parametrize("rows", [1, 7, 23, 193])
 @torch.no_grad()
-def test_native_fp32_mean_preserves_the_vendor_reduction_tree(rows, columns):
-    reference = torch.randn(
-        rows, columns, generator=torch.Generator().manual_seed(17002)
-    )
+def test_native_fp32_mean_handles_different_reduction_extents(rows, columns):
+    # Small integers and a power-of-two divisor yield an exact FP32 reference.
+    reference = torch.arange(rows * columns, dtype=torch.float32).reshape(rows, columns)
+    reference.remainder_(257)
     before = torch_fl.native_host.enqueue_origins()
     typed = torch.ops.flagos.native_source_typed_hits("aten::mean.dim")
     actual = reference.to("flagos:0").mean(-1, keepdim=True)
@@ -379,22 +357,18 @@ def test_native_fp32_mean_preserves_the_vendor_reduction_tree(rows, columns):
     assert after["python"] == before["python"]
     if not torch_fl._build_config.NATIVE_VENDOR:
         assert torch.ops.flagos.native_source_typed_hits("aten::mean.dim") == typed + 1
-        kernel = "mean_dim_kernel_inner"
-        assert after["native"][kernel] == before["native"].get(kernel, 0) + 1
+        assert sum(after["native"].values()) > sum(before["native"].values())
     torch.testing.assert_close(
-        actual.cpu(), _vendor_mean_reference(reference), atol=0, rtol=0
+        actual.cpu(), reference.mean(-1, keepdim=True), atol=0, rtol=0
     )
 
 
 @torch.no_grad()
-def test_native_fp32_mean_unmeasured_layout_keeps_the_original_route():
+def test_native_fp32_mean_accepts_strided_input():
     source = torch.randn(4, 256, generator=torch.Generator().manual_seed(17003))
     value = source.to("flagos:0")[:, ::2]
-    runtime = torch_fl.native_host._hosts.runtime
-    before = runtime.metax_mean_calls()
     actual = value.mean(-1)
     torch_fl.flagos.synchronize()
-    assert runtime.metax_mean_calls() == before
     torch.testing.assert_close(
         actual.cpu(), source[:, ::2].mean(-1), atol=1e-3, rtol=1e-3
     )
@@ -402,13 +376,11 @@ def test_native_fp32_mean_unmeasured_layout_keeps_the_original_route():
 
 @torch.no_grad()
 def test_native_fp32_mean_rank_one_preserves_scalar_shape():
-    source = torch.randn(1, 128, generator=torch.Generator().manual_seed(17004))
-    actual = source.flatten().to("flagos:0").mean(-1)
+    source = torch.arange(256, dtype=torch.float32)
+    actual = source.to("flagos:0").mean(-1)
     torch_fl.flagos.synchronize()
     assert actual.shape == torch.Size([])
-    torch.testing.assert_close(
-        actual.cpu(), _vendor_mean_reference(source).reshape(()), atol=0, rtol=0
-    )
+    torch.testing.assert_close(actual.cpu(), source.mean(-1), atol=0, rtol=0)
 
 
 @torch.no_grad()

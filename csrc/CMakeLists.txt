@@ -282,7 +282,7 @@ if(_flagos_is_metax AND FLAGOS_NATIVE_HOSTS AND FLAGOS_BUILD_VENDOR)
   find_library(FLAGOS_MACA_RUNTIME NAMES mcruntime
     HINTS "${MACA_PATH}/lib" "${MACA_PATH}/lib64" REQUIRED)
   set(_metax_generated "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/metax/generated")
-  foreach(_kind IN ITEMS foreach fp32_mean cat)
+  foreach(_kind IN ITEMS foreach cat)
     set(_metax_device_object "${CMAKE_CURRENT_BINARY_DIR}/metax_${_kind}_device.o")
     add_custom_command(
       OUTPUT "${_metax_device_object}"
@@ -294,35 +294,23 @@ if(_flagos_is_metax AND FLAGOS_NATIVE_HOSTS AND FLAGOS_BUILD_VENDOR)
     set_source_files_properties("${_metax_device_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
     target_sources(${LIBRARY_NAME} PRIVATE "${_metax_device_object}")
   endforeach()
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE
-    FLAGOS_METAX_NATIVE_MEAN=1 FLAGOS_METAX_NATIVE_CAT=1)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_METAX_NATIVE_CAT=1)
   target_link_libraries(${LIBRARY_NAME} PRIVATE "${FLAGOS_MACA_RUNTIME}")
-  find_path(FLAGOS_MACA_DNN_INCLUDE mcdnn/mcdnn.h
-    HINTS "${MACA_PATH}/include" NO_DEFAULT_PATH)
-  find_library(FLAGOS_MACA_DNN NAMES mcdnn
-    HINTS "${MACA_PATH}/lib" "${MACA_PATH}/lib64" NO_DEFAULT_PATH)
-  if(FLAGOS_MACA_DNN_INCLUDE AND FLAGOS_MACA_DNN)
-    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_METAX_NATIVE_SOFTMAX=1)
-    target_include_directories(${LIBRARY_NAME} PRIVATE "${FLAGOS_MACA_DNN_INCLUDE}")
-    target_link_libraries(${LIBRARY_NAME} PRIVATE "${FLAGOS_MACA_DNN}")
-  endif()
 endif()
 if(_flagos_is_iluvatar AND FLAGOS_NATIVE_HOSTS AND FLAGOS_BUILD_VENDOR)
   find_program(FLAGOS_COREX_COMPILER NAMES clang++
     PATHS "${COREX_PATH}/bin" NO_DEFAULT_PATH REQUIRED)
   set(_iluvatar_generated "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/iluvatar/generated")
-  foreach(_kind IN ITEMS foreach fp32)
-    set(_iluvatar_device_object "${CMAKE_CURRENT_BINARY_DIR}/iluvatar_${_kind}_device.o")
-    add_custom_command(
-      OUTPUT "${_iluvatar_device_object}"
-      COMMAND "${FLAGOS_COREX_COMPILER}" -x ivcore "--cuda-path=${COREX_PATH}"
-        --cuda-gpu-arch=ivcore11 -std=c++17 -O3 -fPIC -ffp-contract=off
-        -c "${_iluvatar_generated}/${_kind}.ivcore" -o "${_iluvatar_device_object}"
-      DEPENDS "${_iluvatar_generated}/${_kind}.ivcore" "${_iluvatar_generated}/${_kind}.h"
-      VERBATIM)
-    set_source_files_properties("${_iluvatar_device_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
-    target_sources(${LIBRARY_NAME} PRIVATE "${_iluvatar_device_object}")
-  endforeach()
+  set(_iluvatar_device_object "${CMAKE_CURRENT_BINARY_DIR}/iluvatar_foreach_device.o")
+  add_custom_command(
+    OUTPUT "${_iluvatar_device_object}"
+    COMMAND "${FLAGOS_COREX_COMPILER}" -x ivcore "--cuda-path=${COREX_PATH}"
+      --cuda-gpu-arch=ivcore11 -std=c++17 -O3 -fPIC -ffp-contract=off
+      -c "${_iluvatar_generated}/foreach.ivcore" -o "${_iluvatar_device_object}"
+    DEPENDS "${_iluvatar_generated}/foreach.ivcore" "${_iluvatar_generated}/foreach.h"
+    VERBATIM)
+  set_source_files_properties("${_iluvatar_device_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+  target_sources(${LIBRARY_NAME} PRIVATE "${_iluvatar_device_object}")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_ILUVATAR_KERNELS=1)
 endif()
 set_target_properties(${LIBRARY_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -501,19 +489,6 @@ if(FLAGOS_NATIVE_HOSTS)
     target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_THEAD_VENDOR=1)
     target_include_directories(${LIBRARY_NAME} PRIVATE "${FLAGOS_THEAD_BLAS_INCLUDE}")
     target_link_libraries(${LIBRARY_NAME} PRIVATE "${FLAGOS_THEAD_BLAS_LIBRARY}")
-    # Device compilation must see the CUDA SDK headers without the native
-    # include directory used by the acblas host adapter.
-    add_library(torch_fl_thead_precision OBJECT
-        native_host/backends/thead/eager_precision.cu
-        native_host/backends/thead/adamw_precision.cu)
-    set_target_properties(torch_fl_thead_precision PROPERTIES
-        POSITION_INDEPENDENT_CODE ON CUDA_ARCHITECTURES 80)
-    # Match stock exp, log, and SiLU rounding with device contraction.
-    set_source_files_properties(native_host/backends/thead/eager_precision.cu
-        PROPERTIES COMPILE_OPTIONS "--fmad=true")
-    set_source_files_properties(native_host/backends/thead/adamw_precision.cu
-        PROPERTIES COMPILE_OPTIONS "--fmad=false")
-    target_link_libraries(${LIBRARY_NAME} PRIVATE torch_fl_thead_precision)
   endif()
 endif()
 
@@ -636,14 +611,6 @@ if(_flagos_is_ascend)
   endif()
 elseif(_flagos_is_tsingmicro)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
-  if(FLAGOS_NATIVE_HOSTS AND TXOPS_ROOT)
-    set(_txdnn_kernels aten/backends/tsingmicro/generated/txdnn_kernels.cc)
-    set_property(SOURCE aten/register.cc aten/copy_ops.cc ${_txdnn_kernels} APPEND
-      PROPERTY COMPILE_DEFINITIONS FLAGOS_TSINGMICRO_TXDNN=1)
-    set_property(SOURCE ${_txdnn_kernels} APPEND
-      PROPERTY INCLUDE_DIRECTORIES "${TXOPS_INCLUDE_DIR}")
-    target_link_libraries(${LIBRARY_NAME} PRIVATE "${TXDNN_LIB}")
-  endif()
 elseif(_flagos_is_dcu)
   # Selects backends/hygon_memory.h (CUDA-compat runtime, no c10::cuda caching
   # delegation -- the DCU wheel exports c10::hip, not c10::cuda).
