@@ -3289,6 +3289,19 @@ at::Tensor MseLossBackwardKernelPython(const at::Tensor & grad_output, const at:
 
 static TypedSourceSlot MulTensorFnSource("aten::mul.Tensor", "flag_gems.mul", "8101128c7200897c8e10a3deebc523678c14898916831d2b4c3af03763d0f1a2", "{\"abi\": \"8101128c7200897c8e10a3deebc523678c14898916831d2b4c3af03763d0f1a2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mul\", \"op\": \"aten::mul.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
+  const auto& tensor = self.device().is_cpu() ? other : self;
+  const auto& scalar = self.device().is_cpu() ? self : other;
+  if (tensor.device().is_privateuseone() &&
+      (tensor.scalar_type() == at::kHalf || tensor.scalar_type() == at::kBFloat16) &&
+      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point() &&
+      (!scalar.unsafeGetTensorImpl()->is_wrapped_number() || !tensor.is_contiguous())) {
+    auto result = at::native::call_fallback_fn<&cpu_fallback, at::_ops::mul_Tensor>::call(tensor, scalar);
+    const auto strides = at::infer_dense_strides(tensor.sizes(), tensor.strides());
+    if (result.strides().equals(strides)) return result;
+    auto strided = at::empty_strided(result.sizes(), strides, result.options());
+    strided.copy_(result);
+    return strided;
+  }
   auto result = MulTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mul", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;

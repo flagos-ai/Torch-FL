@@ -1389,6 +1389,26 @@ def gen_flaggems_python_kernel(
                 f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{op}>::call(self, dim, index, src);\n"
                 "  }\n"
             )
+        elif op == "mul.Tensor":
+            # FlagGems materializes CPU scalars in the output dtype for the
+            # general broadcast path. ATen uses the full-precision scalar.
+            # Put the device tensor first so CPU TensorIterator retains the
+            # scalar precision for either operand order.
+            prelude += (
+                "  const auto& tensor = self.device().is_cpu() ? other : self;\n"
+                "  const auto& scalar = self.device().is_cpu() ? self : other;\n"
+                "  if (tensor.device().is_privateuseone() &&\n"
+                "      (tensor.scalar_type() == at::kHalf || tensor.scalar_type() == at::kBFloat16) &&\n"
+                "      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point() &&\n"
+                "      (!scalar.unsafeGetTensorImpl()->is_wrapped_number() || !tensor.is_contiguous())) {\n"
+                "    auto result = at::native::call_fallback_fn<&cpu_fallback, at::_ops::mul_Tensor>::call(tensor, scalar);\n"
+                "    const auto strides = at::infer_dense_strides(tensor.sizes(), tensor.strides());\n"
+                "    if (result.strides().equals(strides)) return result;\n"
+                "    auto strided = at::empty_strided(result.sizes(), strides, result.options());\n"
+                "    strided.copy_(result);\n"
+                "    return strided;\n"
+                "  }\n"
+            )
         elif op == "sort.stable":
             # FlagGems makes the result contiguous even for a transposed
             # input. ATen's sort metadata preserves the dense stride order.
@@ -1829,6 +1849,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         ("mean.dim", "functional_pure", {"dtype"}),
         ("scatter_add", "functional_pure", set()),
         ("scatter_add_", "inplace", set()),
+        ("mul.Tensor", "functional_pure", set()),
         ("sort.stable", "tuple_return", {"stable", "dim", "descending"}),
         ("cat", "tensorlist_dim", set()),
         ("pow.Tensor_Scalar", "functional_pure", set()),
@@ -1856,6 +1877,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "mean.dim": "mean_dim",
                 "scatter_add": "scatter_add",
                 "scatter_add_": "scatter_add_",
+                "mul.Tensor": "mul",
                 "sort.stable": "sort_stable",
                 "cat": "cat",
                 "pow.Tensor_Scalar": "pow_tensor_scalar",

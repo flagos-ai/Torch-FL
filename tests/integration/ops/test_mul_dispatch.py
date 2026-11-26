@@ -129,6 +129,25 @@ class TestMulPythonNumberOperand:
         two = torch.tensor(2.0, device=DEVICE)
         torch.testing.assert_close((a * two).cpu(), (a * 2.0).cpu(), rtol=0, atol=0)
 
+    @pytest.mark.nvidia
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    @pytest.mark.parametrize("layout", ["dense", "transpose"])
+    @pytest.mark.parametrize("explicit_tensor", [False, True])
+    def test_host_scalar_preserves_precision(self, dtype, layout, explicit_tensor):
+        values = torch.linspace(-5, 5, 63, dtype=dtype).reshape(7, 9)
+        device_values = values.to(DEVICE)
+        if layout == "transpose":
+            values = values.t()
+            device_values = device_values.t()
+        scale = 1.01
+        if explicit_tensor:
+            scale = torch.tensor(scale, dtype=torch.float64)
+        expected = values * scale
+        for actual in (device_values * scale, scale * device_values):
+            assert actual.device == device_values.device
+            assert actual.stride() == expected.stride()
+            torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
     @pytest.mark.ascend
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
     @pytest.mark.parametrize("layout", ["dense", "transpose", "empty"])
