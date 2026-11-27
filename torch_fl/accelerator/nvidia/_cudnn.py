@@ -91,9 +91,14 @@ def _attention_plan(
         )
     except (TypeError, cudnn.cudnnGraphNotSupportedError):
         return None
-    result.set_output(True).set_data_type(dtype).set_stride(output_strides)
-    if _compile_graph(cudnn, graph, deterministic):
-        return graph, q, k, v, result, graph.get_workspace_size()
+    result.set_output(True).set_data_type(dtype).set_dim(
+        (*query[0][:-1], value[0][-1])
+    ).set_stride(output_strides)
+    try:
+        if _compile_graph(cudnn, graph, deterministic):
+            return graph, q, k, v, result, graph.get_workspace_size()
+    except ValueError:
+        return None
     return None
 
 
