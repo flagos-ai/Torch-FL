@@ -24,6 +24,7 @@
 // m.impl is rejected at load. Whatever routes here without a kernel falls
 // through to cpu_fallback.
 
+#include "../../../common.h"
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ops/_convolution.h>
@@ -852,6 +853,8 @@ at::Tensor MmKernelIluvatar(const at::Tensor& self, const at::Tensor& mat2) {
       mat2.device() != self.device()) {
     return at::mm(self.cpu(), mat2.cpu()).to(self.device());
   }
+  at::Tensor empty_product;
+  if (TryEmptyMatmul(self, mat2, 2, empty_product)) return empty_product;
   iluvatar::IluvatarDeviceGuard guard(self);
   // Weight-gradient inputs and forward weights often reach GEMM as transposed
   // dense views. Describe their storage directly to ixBLAS.
@@ -898,9 +901,11 @@ at::Tensor BmmKernelIluvatar(const at::Tensor& self, const at::Tensor& mat2) {
       mat2.size(1) != self.size(2) || mat2.device() != self.device()) {
     return at::bmm(self.cpu(), mat2.cpu()).to(self.device());
   }
+  at::Tensor empty_product;
+  if (TryEmptyMatmul(self, mat2, 3, empty_product)) return empty_product;
   iluvatar::IluvatarDeviceGuard guard(self);
   const auto gemm = iluvatar::GetStridedBatchedGemm();
-  if (gemm && self.numel() && mat2.numel() &&
+  if (gemm &&
       !self.is_conj() && !self.is_neg() && !mat2.is_conj() && !mat2.is_neg() &&
       self.stride(0) > 0 && mat2.stride(0) > 0) {
     const auto batch = self.size(0);

@@ -7,6 +7,8 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
+from tests.integration.ops.backend_conf import routed_backend
+
 pytestmark = [pytest.mark.dcu, pytest.mark.native_source_host, pytest.mark.flaggems]
 
 
@@ -203,18 +205,26 @@ def test_hcu_published_source_admits_wrapped_scalar_values(dtype, scalar):
     assert native_host.audit()["source_variant_hits"]["published_mul"] == before + 1
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dtype,aten_dtype", [(torch.float32, "Float"), (torch.bfloat16, "BFloat16")]
+)
 @pytest.mark.parametrize("exponent", [2, 2.0])
-def test_hcu_floating_square_uses_the_compiled_mul_route(dtype, exponent):
-    from torch_fl import native_host
+def test_hcu_floating_square_uses_configured_native_route(dtype, aten_dtype, exponent):
+    from torch_fl.native_host import audit, vendor
 
     cpu = torch.randn(3, 7, dtype=dtype)
     value = cpu.to("flagos")
-    before = native_host.audit()["source_variant_hits"]["published_mul"]
+    uses_vendor = routed_backend("pow.Tensor_Scalar", dtype=aten_dtype) == "hygon"
+    vendor_hits = vendor.audit()["hits"]["pow.Tensor_Scalar"] if uses_vendor else None
+    before = audit()["source_variant_hits"]["published_mul"]
     with torch.no_grad():
         actual = value.pow(exponent)
     torch.testing.assert_close(actual.cpu(), cpu.pow(exponent), rtol=0, atol=0)
-    assert native_host.audit()["source_variant_hits"]["published_mul"] == before + 1
+    assert audit()["source_variant_hits"]["published_mul"] == before + int(
+        not uses_vendor
+    )
+    if uses_vendor:
+        assert vendor.audit()["hits"]["pow.Tensor_Scalar"] == vendor_hits + 1
 
 
 @pytest.mark.min_devices(2)

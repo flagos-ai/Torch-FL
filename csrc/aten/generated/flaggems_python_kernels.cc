@@ -4,6 +4,7 @@
 #ifdef FLAGOS_FLAGGEMS_PYTHON
 
 #include "ops.h"
+#include <ATen/ScalarOps.h>
 #include <ATen/ops/full_native.h>
 #include <ATen/ops/result_type.h>
 #include <ATen/ops/constant_pad_nd_native.h>
@@ -3217,6 +3218,25 @@ at::Tensor MeanKernelPython(const at::Tensor & self, ::std::optional<at::ScalarT
 static TypedSourceSlot MeanDimFnSource("aten::mean.dim", "flag_gems.mean_dim", "0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c", "{\"abi\": \"0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.mean_dim\", \"op\": \"aten::mean.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
   at::native::make_dim_mask(dim, self.dim());
+#if defined(FLAGOS_NATIVE_HOSTS)
+  at::DimVector full_dims;
+  if ((!dim.has_value() || dim->empty()) && MeanDimFnSource.Available()) {
+    // A backend with no mean kernel enters ATen's mean.dim composite again.
+    const auto mean = c10::Dispatcher::singleton().findSchemaOrThrow("aten::mean", "");
+    if (!mean.hasKernelForDispatchKey(c10::DispatchKey::PrivateUse1)) {
+      const auto reduction_dtype = dtype.value_or(self.scalar_type());
+      TORCH_CHECK(c10::isFloatingType(reduction_dtype) || c10::isComplexType(reduction_dtype), "mean(): input or output dtype must be floating point or complex");
+      if (self.dim() == 0) return self.to(reduction_dtype, false, true);
+      // Redispatch explicitly promoted inputs in their reduction dtype.
+      // This admits the same-dtype Native Host or vendor kernel.
+      if (reduction_dtype != self.scalar_type()) {
+        return mean_dim_dispatcher(self.to(reduction_dtype), dim, keepdim, dtype);
+      }
+      for (int64_t axis = 0; axis < self.dim(); ++axis) full_dims.push_back(axis);
+      dim = at::IntArrayRef(full_dims);
+    }
+  }
+#endif
 #if defined(USE_DCU)
   const auto output_dtype = dtype.value_or(self.scalar_type());
   TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");
@@ -3349,6 +3369,25 @@ at::Tensor MseLossBackwardKernelPython(const at::Tensor & grad_output, const at:
 
 static TypedSourceSlot MulTensorFnSource("aten::mul.Tensor", "flag_gems.mul", "8101128c7200897c8e10a3deebc523678c14898916831d2b4c3af03763d0f1a2", "{\"abi\": \"8101128c7200897c8e10a3deebc523678c14898916831d2b4c3af03763d0f1a2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mul\", \"op\": \"aten::mul.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
+#if defined(FLAGOS_NATIVE_HOSTS)
+  if ((self.is_cpu() || other.is_cpu()) && MulTensorFnSource.Available()) {
+    const auto& tensor = self.is_cpu() ? other : self;
+    const auto& scalar = self.is_cpu() ? self : other;
+    // The compiled scalar path takes a device tensor followed by a wrapped number.
+    if (tensor.is_privateuseone() && scalar.dim() == 0 &&
+        !scalar.unsafeGetTensorImpl()->is_wrapped_number() &&
+        tensor.is_floating_point() && scalar.is_floating_point() &&
+        at::result_type(tensor, scalar) == tensor.scalar_type()) {
+      auto value = scalar.item();
+#if defined(USE_DCU)
+      // HCU Torch rounds a leading host scalar before a BF16 product.
+      if (self.is_cpu() && tensor.scalar_type() == at::kBFloat16)
+        value = at::Scalar(value.toBFloat16());
+#endif
+      return MulTensorKernelPython(tensor, at::native::wrapped_scalar_tensor(value));
+    }
+  }
+#endif
   auto result = MulTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mul", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;

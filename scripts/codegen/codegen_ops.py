@@ -1381,9 +1381,50 @@ def gen_flaggems_python_kernel(
                 "  at::native::alpha_check(at::result_type(self, other), alpha);\n"
                 "#endif\n"
             )
+        elif op == "mul.Tensor":
+            prelude += (
+                "#if defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if ((self.is_cpu() || other.is_cpu()) && MulTensorFnSource.Available()) {\n"
+                "    const auto& tensor = self.is_cpu() ? other : self;\n"
+                "    const auto& scalar = self.is_cpu() ? self : other;\n"
+                "    // The compiled scalar path takes a device tensor followed by a wrapped number.\n"
+                "    if (tensor.is_privateuseone() && scalar.dim() == 0 &&\n"
+                "        !scalar.unsafeGetTensorImpl()->is_wrapped_number() &&\n"
+                "        tensor.is_floating_point() && scalar.is_floating_point() &&\n"
+                "        at::result_type(tensor, scalar) == tensor.scalar_type()) {\n"
+                "      auto value = scalar.item();\n"
+                "#if defined(USE_DCU)\n"
+                "      // HCU Torch rounds a leading host scalar before a BF16 product.\n"
+                "      if (self.is_cpu() && tensor.scalar_type() == at::kBFloat16)\n"
+                "        value = at::Scalar(value.toBFloat16());\n"
+                "#endif\n"
+                "      return MulTensorKernelPython(tensor, at::native::wrapped_scalar_tensor(value));\n"
+                "    }\n"
+                "  }\n"
+                "#endif\n"
+            )
         elif op == "mean.dim":
             prelude += (
                 "  at::native::make_dim_mask(dim, self.dim());\n"
+                "#if defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  at::DimVector full_dims;\n"
+                "  if ((!dim.has_value() || dim->empty()) && MeanDimFnSource.Available()) {\n"
+                "    // A backend with no mean kernel enters ATen's mean.dim composite again.\n"
+                '    const auto mean = c10::Dispatcher::singleton().findSchemaOrThrow("aten::mean", "");\n'
+                "    if (!mean.hasKernelForDispatchKey(c10::DispatchKey::PrivateUse1)) {\n"
+                "      const auto reduction_dtype = dtype.value_or(self.scalar_type());\n"
+                '      TORCH_CHECK(c10::isFloatingType(reduction_dtype) || c10::isComplexType(reduction_dtype), "mean(): input or output dtype must be floating point or complex");\n'
+                "      if (self.dim() == 0) return self.to(reduction_dtype, false, true);\n"
+                "      // Redispatch explicitly promoted inputs in their reduction dtype.\n"
+                "      // This admits the same-dtype Native Host or vendor kernel.\n"
+                "      if (reduction_dtype != self.scalar_type()) {\n"
+                "        return mean_dim_dispatcher(self.to(reduction_dtype), dim, keepdim, dtype);\n"
+                "      }\n"
+                "      for (int64_t axis = 0; axis < self.dim(); ++axis) full_dims.push_back(axis);\n"
+                "      dim = at::IntArrayRef(full_dims);\n"
+                "    }\n"
+                "  }\n"
+                "#endif\n"
                 "#if defined(USE_DCU)\n"
                 "  const auto output_dtype = dtype.value_or(self.scalar_type());\n"
                 '  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
@@ -2308,6 +2349,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         if header not in refreshed:
             refreshed = refreshed.replace(include, include + "\n" + header, 1)
     for native_include in (
+        "#include <ATen/ScalarOps.h>",
         "#include <ATen/ops/constant_pad_nd_native.h>",
         "#include <ATen/ops/full_native.h>",
         "#include <ATen/ops/result_type.h>",
@@ -2320,6 +2362,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         ("add.Tensor", "functional_pure", {"alpha"}),
         ("add_.Tensor", "inplace", {"alpha"}),
         ("sub.Tensor", "functional_pure", {"alpha"}),
+        ("mul.Tensor", "functional_pure", set()),
         ("mean.dim", "functional_pure", {"dtype"}),
         ("sum.dim_IntList", "functional_pure", {"dtype"}),
         ("cat", "tensorlist_dim", set()),
@@ -2356,6 +2399,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "add.Tensor": "add",
                 "add_.Tensor": "add_",
                 "sub.Tensor": "sub",
+                "mul.Tensor": "mul",
                 "mean.dim": "mean_dim",
                 "sum.dim_IntList": "sum_dim",
                 "cat": "cat",

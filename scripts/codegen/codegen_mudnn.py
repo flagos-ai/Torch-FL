@@ -977,6 +977,8 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   if (!musa_ops::{dtype_pred}(mat2.scalar_type())) {{
     musa_ops::MusaRaiseUnsupportedMatmulDtype("{route_key}", mat2.scalar_type());
   }}
+  at::Tensor empty_product;
+  if (TryEmptyMatmul(self, mat2, {matmul_rank}, empty_product)) return empty_product;
   std::vector<int64_t> out_shape = self.sizes().vec();
   out_shape.back() = mat2.size(-1);
   auto out = at::empty(out_shape, self.options());
@@ -1009,6 +1011,13 @@ at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& mat2, at::Tensor&
   if (!musa_ops::{dtype_pred}(mat2.scalar_type())) {{
     musa_ops::MusaRaiseUnsupportedMatmulDtype("{route_key}", mat2.scalar_type());
   }}
+  at::Tensor empty_product;
+  if (TryEmptyMatmul(self, mat2, {matmul_rank}, empty_product)) {{
+    TORCH_CHECK(out.device() == self.device() && out.scalar_type() == self.scalar_type(),
+                "matmul output must have the same device and dtype as its operands");
+    if (!out.sizes().equals(empty_product.sizes())) out.resize_(empty_product.sizes());
+    return out.copy_(empty_product);
+  }}
   std::vector<int64_t> out_shape = self.sizes().vec();
   out_shape.back() = mat2.size(-1);
   if (!out.sizes().equals(out_shape)) {{
@@ -1036,8 +1045,8 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # sum/mean over an optional dim list. An absent or empty list reduces every
-# dim; negative dims are wrapped. Dims are erased high-to-low so an earlier
-# erase does not shift a later index. sum promotes integral inputs to int64,
+# dim; ATen validates the dims and computes the reduction shape.
+# sum promotes integral inputs to int64,
 # matching PyTorch -- and unlike topsaten, mudnn *can* reduce in int64
 # (verified: ADD over int64 {1..6} by dim gives 6, 15), so integral sums stay
 # on device instead of taking a CPU fallback.
@@ -1051,28 +1060,22 @@ at::Tensor {kernel}(
       (dtype.has_value() && !musa_ops::{dtype_pred}(dtype.value()))) {{
     return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
   }}
-  int64_t ndim = self.dim();
-  std::vector<int64_t> norm_dims;
-  if (dim.has_value() && !dim.value().empty()) {{
-    for (int64_t d : dim.value()) norm_dims.push_back(d < 0 ? d + ndim : d);
+  const int64_t ndim = self.dim();
+  const auto dim_mask = at::native::make_dim_mask(dim, ndim);
+  std::vector<int> mudnn_dims;
+  if (dim.has_value() && !dim->empty()) {{
+    mudnn_dims = musa_ops::ToMudnnDims(*dim, ndim);
   }} else {{
-    for (int64_t d = 0; d < ndim; ++d) norm_dims.push_back(d);
+    // The mudnn descriptor represents a scalar as a one-element vector.
+    const int64_t rank = std::max(ndim, int64_t{{1}});
+    mudnn_dims.reserve(rank);
+    for (int64_t d = 0; d < rank; ++d) mudnn_dims.push_back(static_cast<int>(d));
   }}
-  // aten's answer shape, and the *squeezed* shape mudnn must be handed. mudnn
-  // silently drops all but the first output element when the output still
-  // carries the reduced axes as extent-1 dims and the input is non-contiguous
-  // (measured on v3300: (4,5) stride (0,1) reduced over dim 0 into a [1,5]
-  // output writes only out[0]). Reducing into the squeezed shape is correct in
-  // every configuration probed, so keepdim is restored with a view afterwards.
-  auto out_shape = self.sizes().vec();
-  std::vector<int64_t> sorted_dims(norm_dims);
-  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
-  auto squeezed_shape = self.sizes().vec();
-  for (int64_t d : sorted_dims) {{
-    if (keepdim) out_shape[d] = 1;
-    else out_shape.erase(out_shape.begin() + d);
-    squeezed_shape.erase(squeezed_shape.begin() + d);
-  }}
+  // On a strided input, mudnn can write only the first output element when
+  // the output keeps the reduced axes. Restore those axes after reducing.
+  const auto squeezed_shape = at::native::shape_from_dim_mask(self, dim_mask, false);
+  const auto out_shape = keepdim ? at::native::shape_from_dim_mask(self, dim_mask, true)
+                                 : squeezed_shape;
 
   auto out_dtype = dtype.value_or(
       {promote_integral} && at::isIntegralType(self.scalar_type(), true)
@@ -1088,13 +1091,12 @@ at::Tensor {kernel}(
       musa_ops::mudnn::Reduce::Mode::{mode} == musa_ops::mudnn::Reduce::Mode::ADD &&
       out_dtype == at::kBFloat16;
   if (!self_c.is_contiguous() &&
-      (norm_dims.size() > 1 || contiguous_bf16_sum ||
+      (mudnn_dims.size() > 1 || contiguous_bf16_sum ||
        musa_ops::MudnnReduceNeedsContiguous(self_c))) {{
     self_c = self_c.contiguous();
   }}
   auto out = at::empty(squeezed_shape, self.options().dtype(out_dtype));
-{empty_guard}  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Reduce op;
@@ -3078,9 +3080,11 @@ FILE_HEADER = """\
 // mudnn links against musart only -- no torch symbols -- so unlike the previous
 // at::musa::* passthroughs these kernels are independent of the torch version.
 
+#include "../../../common.h"
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ExpandUtils.h>
+#include <ATen/native/ReduceOpsUtils.h>
 #include <ATen/ops/cross_entropy_loss_compositeimplicitautograd_dispatch.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/mul_compositeexplicitautograd_dispatch.h>
@@ -3306,6 +3310,7 @@ def main():
             route_key=op,
             empty_guard=empty_guard(EMPTY_GUARD_RETURN.get(cat, "out")),
             promote_integral="true" if base == "sum" else "false",
+            matmul_rank=3 if mode_name == "BatchMatMul" else 2,
             dtype_pred=(
                 "MudnnSupportsMatmulDtype"
                 if cat in MATMUL_CATEGORIES

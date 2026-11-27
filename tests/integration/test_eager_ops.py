@@ -12,11 +12,18 @@ import torch.nn.functional as F
 
 import torch_fl
 from tests.integration.flaggems.flaggems_caps import load_routes
+from tests.integration.ops.backend_conf import routed_backend_or_none
 
 pytestmark = pytest.mark.anyplatform
 DEVICE = torch.device("flagos:0")
 BF16 = torch.bfloat16
 FP32 = torch.float32
+
+# Stock MUSA Torch 2.7.1.post1 rounds the scalar and the SiLU sigmoid to
+# BF16 before the product. Both references were verified on the S5000.
+_BF16_ROUNDED_INTERMEDIATES = {"mthreads"}
+# The pinned HCU Torch batched lerp leaves the versions of dense inputs unchanged.
+_FOREACH_VERSION_DELTAS = {("_foreach_lerp_.Scalar", "hygon"): 0}
 
 
 @pytest.fixture(scope="module")
@@ -33,6 +40,11 @@ def require_ops(routes):
             pytest.skip(f"No {dtype} device route for {', '.join(missing)}")
 
     return require
+
+
+@pytest.fixture(scope="module")
+def round_bf16_intermediates():
+    return torch_fl._platform.build_info().vendor in _BF16_ROUNDED_INTERMEDIATES
 
 
 @pytest.fixture(autouse=True)
@@ -59,10 +71,13 @@ def assert_exact(actual, expected):
 
 
 @pytest.mark.parametrize("scale", [128**-0.5, -0.18731])
-def test_bf16_multiply_with_python_scalar(require_ops, scale):
+def test_bf16_multiply_with_python_scalar(require_ops, scale, round_bf16_intermediates):
     require_ops("BFloat16", "mul.Tensor")
     source = torch.arange(-512, 512, dtype=FP32).div(8).to(BF16)
-    assert_exact(source.to(DEVICE) * scale, source * scale)
+    reference_scale = (
+        torch.tensor(scale, dtype=BF16) if round_bf16_intermediates else scale
+    )
+    assert_exact(source.to(DEVICE) * scale, source * reference_scale)
 
 
 @pytest.mark.parametrize("scalar_first", [False, True])
@@ -133,10 +148,11 @@ def test_pow_preserves_values_and_allocates_output(require_ops, exponent):
     assert_exact(output, cpu.pow(exponent))
 
 
-def test_bf16_silu_rounding(require_ops):
+def test_bf16_silu_rounding(require_ops, round_bf16_intermediates):
     require_ops("BFloat16", "silu")
     cpu = torch.tensor([-5.9375, -0.25, 0.0, 0.25, 5.9375], dtype=BF16)
-    assert_exact(F.silu(cpu.to(DEVICE)), F.silu(cpu))
+    expected = cpu * cpu.sigmoid() if round_bf16_intermediates else F.silu(cpu)
+    assert_exact(F.silu(cpu.to(DEVICE)), expected)
 
 
 @pytest.mark.parametrize("repeated", [False, True])
@@ -347,7 +363,10 @@ def test_cross_entropy_with_optional_weight_and_ignored_labels(
     ],
 )
 def test_bf16_foreach_preserves_outputs_and_versions(require_ops, name, overload, args):
-    require_ops("BFloat16", name if overload == "default" else f"{name}.{overload}")
+    overload_name = name if overload == "default" else f"{name}.{overload}"
+    require_ops("BFloat16", overload_name)
+    route = routed_backend_or_none(overload_name, dtype="BFloat16")
+    device_version_delta = _FOREACH_VERSION_DELTAS.get((overload_name, route), 1)
     op = getattr(getattr(torch.ops.aten, name), overload)
     source = [values((3, 8), BF16) + 1, values((129,), BF16) + 2]
     other = [torch.full_like(item, 2) for item in source]
@@ -359,7 +378,8 @@ def test_bf16_foreach_preserves_outputs_and_versions(require_ops, name, overload
         before = [item._version for item in tensors]
         result = op(tensors, *arguments)
         if name.endswith("_"):
-            assert [item._version for item in tensors] == [v + 1 for v in before]
+            delta = device_version_delta if device == DEVICE else 1
+            assert [item._version for item in tensors] == [v + delta for v in before]
             return tensors
         assert [item._version for item in tensors] == before
         return result

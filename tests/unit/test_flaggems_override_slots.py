@@ -33,11 +33,15 @@ directory pointed at the checkout, because importing it would need the built
 """
 
 import ast
+import json
 import re
+import sys
 import types
 from pathlib import Path
 
 import pytest
+
+from tests.integration.flaggems.flaggems_caps import route_for_dtype
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tests" / "integration" / "ops" / "backend_conf.py"
@@ -60,13 +64,25 @@ def _load_module():
         return _MODULE
     tree = ast.parse(MODULE_PATH.read_text())
     body = [
-        node for node in tree.body if not isinstance(node, (ast.Import, ast.ImportFrom))
+        node
+        for node in tree.body
+        if not isinstance(node, (ast.Import, ast.ImportFrom))
+        or (isinstance(node, ast.Import) and node.names[0].name == "json")
     ]
     module = types.ModuleType("backend_conf")
     module.__file__ = str(MODULE_PATH)
-    module.torch_fl = types.SimpleNamespace(_env=None, _platform=None)
+    module.torch_fl = types.SimpleNamespace(
+        _env=None,
+        _platform=None,
+        _build_config=types.SimpleNamespace(NATIVE_VENDOR=False),
+    )
     module.re = re
+    module.json = json
     module.Path = Path
+    module.torch = types.SimpleNamespace(
+        ops=types.SimpleNamespace(flagos=types.SimpleNamespace())
+    )
+    module.route_for_dtype = route_for_dtype
     module._claim_list_dir = lambda: CLAIM_DIR
     exec(
         compile(ast.Module(body=body, type_ignores=[]), str(MODULE_PATH), "exec"),
@@ -82,6 +98,7 @@ _MODULE = None
 @pytest.fixture()
 def conf(monkeypatch):
     module = _load_module()
+    monkeypatch.setitem(sys.modules, "torch", module.torch)
 
     def as_vendor(name: str):
         build = types.SimpleNamespace(vendor=name)
@@ -164,3 +181,37 @@ def test_retired_overrides_are_unserved(conf, backend):
     conf.routing("abs", "flaggems")
     conf.kernels("flaggems", "boxing")
     assert conf.override_is_logged("abs", backend) is False
+
+
+@pytest.mark.parametrize(
+    "vendor,log_name", [("ascend", "ascend"), ("enflame", "gcu"), ("mthreads", "musa")]
+)
+def test_configured_dtype_route_matches_dispatch_name_and_build(
+    conf, monkeypatch, tmp_path, vendor, log_name
+):
+    config = tmp_path / "backends.conf"
+    config.write_text(f"mean.dim = flaggems; Float,BFloat16:{vendor} # dtype clause\n")
+    monkeypatch.setattr(conf, "_conf_path", lambda: str(config))
+    conf.as_vendor(vendor)
+    conf.kernels("flaggems", "vendor")
+
+    assert conf.routed_backend("mean.dim") == "flagos_python"
+    assert conf.routed_backend("mean.dim", dtype="Float") == log_name
+    assert conf.routed_backend_or_none("mean.dim", dtype="BFloat16") == log_name
+    assert conf.routed_backend("mean.dim", dtype="Half") == "flagos_python"
+    assert conf.route_is_served("mean.dim", dtype="Float")
+
+    conf.kernels("flaggems")
+    assert conf.routed_backend("mean.dim", dtype="Float") == "flagos_python"
+    assert conf.route_is_served("mean.dim", dtype="Float")
+
+    conf.kernels("flaggems", "vendor")
+    monkeypatch.setattr(
+        conf.torch.ops.flagos,
+        "native_vendor_catalog",
+        lambda _: '[{"op": "mean.dim"}]',
+        raising=False,
+    )
+    assert conf.routed_backend("mean.dim", dtype="Float") == "flagos_python"
+    monkeypatch.setattr(conf.torch_fl._build_config, "NATIVE_VENDOR", True)
+    assert conf.routed_backend("mean.dim", dtype="Float") == log_name

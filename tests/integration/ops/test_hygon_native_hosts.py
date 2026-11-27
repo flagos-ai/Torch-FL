@@ -15,6 +15,8 @@ import pytest
 import torch
 import torch_fl
 
+from tests.integration.ops.backend_conf import routed_backend
+
 pytestmark = [pytest.mark.dcu, pytest.mark.native_source_host, pytest.mark.flaggems]
 
 
@@ -82,7 +84,11 @@ def test_hcu_native_compact_arguments_match_original_keys(kind, value):
     def miss(*args, **kwargs):
         raise RuntimeError("unexpected native key miss")
 
-    slot = module.register_script_kernel(SimpleNamespace(native_cache=cache, run=miss))
+    slot = module.register_script_kernel(
+        SimpleNamespace(
+            native_cache=cache, prepare_native=lambda *args, **kwargs: False, run=miss
+        )
+    )
     # A zero grid exercises C++ argument storage and scratch-pointer binding.
     torch.ops.flagos_source_native.launch(slot, list(args), {}, [0])
 
@@ -98,7 +104,11 @@ def cache_probe():
     def miss(*args, **kwargs):
         raise RuntimeError("specialization metadata changed")
 
-    slot = module.register_script_kernel(SimpleNamespace(native_cache=cache, run=miss))
+    slot = module.register_script_kernel(
+        SimpleNamespace(
+            native_cache=cache, prepare_native=lambda *args, **kwargs: False, run=miss
+        )
+    )
 
     def seed(tensor, value, options=None):
         kwargs = dict(options or {})
@@ -314,10 +324,17 @@ def test_hcu_eager_cos_uses_current_values_and_retains_outputs(dtype, shape):
     assert torch_fl.native_host.audit()["host_artifacts"] == artifacts
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_hcu_transposed_mm_on_nondefault_stream(dtype):
+@pytest.mark.parametrize(
+    "dtype,aten_dtype",
+    [(torch.float32, "Float"), (torch.float16, "Half"), (torch.bfloat16, "BFloat16")],
+)
+def test_hcu_transposed_mm_on_nondefault_stream(dtype, aten_dtype):
+    from torch_fl.native_host import vendor
+
     stream = torch.Stream(device="flagos:0")
     retained = []
+    uses_vendor = routed_backend("mm", dtype=aten_dtype) == "hygon"
+    vendor_hits = vendor.audit()["hits"]["mm"] if uses_vendor else None
     hits = torch.ops.flagos.native_source_typed_hits("aten::mm")
     with torch.no_grad(), stream:
         for m, k, n in ((17, 128, 64), (3, 64, 32), (17, 128, 64)):
@@ -335,14 +352,15 @@ def test_hcu_transposed_mm_on_nondefault_stream(dtype):
         )
     assert len({actual.data_ptr() for actual, _ in retained}) == len(retained)
     hosts = torch_fl.native_host._hosts
-    typed = any(entry["op"] == "aten::mm" for entry in hosts.typed["typed_entries"])
-    assert torch.ops.flagos.native_source_typed_hits("aten::mm") == hits + (
-        3 if typed else 0
-    )
-    # A source signature outside typed lowering still uses its prebuilt Cython
-    # host and the same HCU launcher; report it separately from a typed hit.
     assert hosts.op("mm").__module__.startswith(hosts.package)
-    if dtype != torch.bfloat16 or not torch_fl._build_config.NATIVE_VENDOR:
+    typed_hits = torch.ops.flagos.native_source_typed_hits("aten::mm")
+    if uses_vendor:
+        assert vendor.audit()["hits"]["mm"] == vendor_hits + 3
+        assert typed_hits == hits
+    else:
+        typed = any(entry["op"] == "aten::mm" for entry in hosts.typed["typed_entries"])
+        assert typed_hits == hits + (3 if typed else 0)
+        # The prebuilt Cython host shares the launcher when typed lowering is absent.
         assert any("mm_kernel" in name for name in hosts.audit()["launched_kernels"])
 
 

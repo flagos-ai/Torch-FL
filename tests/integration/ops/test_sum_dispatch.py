@@ -49,7 +49,7 @@ def _run_subprocess(extra_env: dict, check: bool = True) -> subprocess.Completed
     env.update(extra_env)
     code = (
         "import torch_fl, torch; "
-        "a = torch.randn(4,4,device='flagos:0'); "
+        "a = torch.randn(4,4,device='flagos:0',dtype=torch.float32); "
         "torch.sum(a, dim=0)"
     )
     return subprocess.run(
@@ -136,33 +136,9 @@ class TestSumDimDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """sum.dim_IntList dispatches to the backend this platform's conf routes it to.
-
-        FlagGems-first is the generated default, but it is not unconditional.
-        The FlagGems route for this overload returns no result inside the
-        survey's per-op time budget on the ``2d-bool`` profile, so the NVIDIA
-        conf holds it off FlagGems (measured_flaggems_rollback in
-        scripts/codegen/codegen_ops.py); with no NVIDIA-native kernel to take it
-        instead, a default conf's only remaining route is ``none`` and the op
-        reaches cpu_fallback. GCU routes it to its native ``gcu`` kernel because
-        the FlagGems kernel carries a 64-bit type the GCU300 front end rejects
-        for an int64 operand (see NATIVE_TRITON_GAPS["gcu"]), and MetaX takes the
-        C++ FlagGems slot. Platforms whose conf keeps a FlagGems route still log
-        flagos_python, so asserting the conf's own value keeps this test
-        meaningful on every platform rather than pinning it to the one it was
-        written on.
-
-        Skipped on two distinct unservable routes, and the skip message is built
-        from ``routed_backend_or_none`` to cover both. A conf naming a backend
-        this wheel did not compile leaves the op unclaimed on PrivateUse1, and a
-        conf naming ``none`` leaves it deliberately unaccelerated; either way the
-        call reaches cpu_fallback and logs nothing, so there is no line to
-        assert. ``routed_backend`` refuses a ``none`` route by design, so
-        reporting the route with it would turn this skip into a failure -- the
-        same containment ``mul.Tensor`` in this directory spells out.
-        """
-        if not route_is_served("sum.dim_IntList"):
-            route = routed_backend_or_none("sum.dim_IntList") or "none"
+        """sum.dim_IntList with FP32 input uses the route declared for Float."""
+        if not route_is_served("sum.dim_IntList", dtype="Float"):
+            route = routed_backend_or_none("sum.dim_IntList", dtype="Float") or "none"
             pytest.skip(
                 f"the conf routes sum.dim_IntList to {route}, a backend this "
                 "wheel did not compile or a route deliberately left "
@@ -171,7 +147,7 @@ class TestSumDimDispatch:
             )
         result = _run_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        expected = routed_backend("sum.dim_IntList")
+        expected = routed_backend("sum.dim_IntList", dtype="Float")
         assert f"[flagos dispatch] sum.dim_IntList -> {expected}" in result.stderr
 
 

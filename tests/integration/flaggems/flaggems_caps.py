@@ -283,6 +283,18 @@ def conf_path() -> Path:
     return Path(torch_fl.backend_config_path())
 
 
+def route_for_dtype(value: str, dtype: str | None = None) -> str:
+    """Resolve a backend conf value for the supplied ATen input dtype."""
+    base, *clauses = value.split(";")
+    if dtype is not None:
+        input_dtype = dtype.casefold()
+        for clause in clauses:
+            types, _, override = clause.partition(":")
+            if any(item.strip().casefold() == input_dtype for item in types.split(",")):
+                return override.strip()
+    return base.strip()
+
+
 def load_routes(dtype: str | None = None) -> dict[str, str]:
     """Read the base routes or apply the clauses for the requested ATen dtype."""
     routes: dict[str, str] = {}
@@ -290,15 +302,7 @@ def load_routes(dtype: str | None = None) -> dict[str, str]:
         for line in f:
             name, sep, value = line.split("#")[0].partition("=")
             if sep:
-                base, *clauses = value.split(";")
-                backend = base.strip()
-                if dtype is not None:
-                    for clause in clauses:
-                        types, _, override = clause.partition(":")
-                        if dtype in {item.strip() for item in types.split(",")}:
-                            backend = override.strip()
-                            break
-                routes[name.strip()] = backend
+                routes[name.strip()] = route_for_dtype(value, dtype)
     return routes
 
 
