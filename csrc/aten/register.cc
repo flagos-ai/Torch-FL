@@ -378,7 +378,7 @@ at::Tensor& DeviceProdDimOut(const at::Tensor& self, int64_t dim, bool keepdim,
 
 at::Tensor NormalizeDeviceIndex(const at::Tensor& index, int64_t extent,
                                 bool allow_negative) {
-  auto positions = index.to(at::kLong);
+  auto positions = index.to(at::kLong).contiguous();
   if (!positions.numel()) return positions;
   const auto [minimum, maximum] = at::aminmax(positions);
   auto lower = minimum.item<int64_t>();

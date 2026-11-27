@@ -226,7 +226,7 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "apple": 0,
     "musa": 464,
     "ppu": 590,
-    "nvidia": 550,
+    "nvidia": 551,
     # The sparse TsingMicro config also spells two aliases `flagos_python`.
     "tsingmicro": 63,
 }
