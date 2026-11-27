@@ -75,10 +75,14 @@ record — see [Testing](../../development/testing.md).
 The NVIDIA Native Host wheel builds against CPU PyTorch. Native hosts run
 published FlagGems kernels and use cuBLAS and cuBLASLt for matrix products,
 including BF16 linear layers with bias, and cuSOLVER for linear solves. The NVIDIA
-cuDNN frontend package enables BF16 convolutions and fused inference attention
-for supported dense inputs with multiple query positions. Use the same CUDA
-runtime major version for the frontend and the rest of the process. Builds that find
-`CUTLASS_INCLUDE_DIR` and cuRAND headers enable the CUDA reference's
+cuDNN frontend package enables BF16 convolutions and fused attention for
+supported dense inputs with multiple query positions. Builds with the cuDNN C++
+frontend and runtime libraries can also run fused attention for single-query
+decoding. Use the same CUDA runtime major version throughout the process.
+`CUDNN_FRONTEND_INCLUDE_DIR`, `CUDNN_INCLUDE_DIR`, and `CUDNN_LIBRARY_DIR`
+can point the build to those SDK components.
+
+Builds that find `CUTLASS_INCLUDE_DIR` and cuRAND headers enable the CUDA reference's
 memory-efficient attention algorithm for aligned wide BF16 heads. The kernel
 is instantiated at build time from the published CUTLASS headers and the CPU
 PyTorch wheel's attention template.

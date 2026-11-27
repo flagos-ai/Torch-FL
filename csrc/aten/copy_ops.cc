@@ -208,6 +208,13 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
   // The copy visits TensorIterator's physical dimensions. Collapsing adjacent
   // strides lets the native FlagGems host launch its lower-rank copy kernel.
   if (destination.dim() > 1 && !source.has_names() && !destination.has_names()) {
+    if (source.is_contiguous() && destination.is_contiguous() &&
+        source.sizes().equals(destination.sizes())) {
+      CopyInplaceSourceHost(destination.as_strided({destination.numel()}, {1}),
+                            source.as_strided({source.numel()}, {1}),
+                            /*non_blocking=*/false);
+      return true;
+    }
     const auto iterator = at::TensorIteratorConfig()
         .set_check_mem_overlap(false)
         .resize_outputs(false)

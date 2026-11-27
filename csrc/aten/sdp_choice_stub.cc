@@ -62,6 +62,10 @@
 #include "native_host/backends/nvidia/cutlass_attention.h"
 #endif
 
+#if defined(FLAGOS_HAVE_NVIDIA_CUDNN)
+#include "native_host/backends/nvidia/cudnn_attention.h"
+#endif
+
 // Cambricon and Iluvatar are in the compiled set despite being FlagGems-primary:
 // each has a fused attention of its own (cnnlFlashAttentionForward_v2 on
 // Cambricon, libixattnbkd on Iluvatar), and without an override on this
@@ -467,9 +471,16 @@ at::Tensor WrapperScaledDotProductAttention(
     return at::native::scaled_dot_product_attention(
         query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   }
+#if defined(FLAGOS_HAVE_NVIDIA_CUDNN)
+  if (!attn_mask && dropout_p == 0 && at::globalContext().userEnabledCuDNNSDP()) {
+    auto output = ::flagos::nvidia::TryCuDnnAttention(
+        query, key, value, is_causal, scale, enable_gqa);
+    if (output.defined()) return output;
+  }
+#endif
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_FLAGGEMS_PYTHON)
   if (!attn_mask && dropout_p == 0 && query.dim() == 4 &&
-      query.scalar_type() == at::kBFloat16 && query.size(-1) <= 128 &&
+      query.scalar_type() == at::kBFloat16 && query.size(-1) <= 128 && query.size(2) > 1 &&
       at::globalContext().userEnabledCuDNNSDP()) {
     auto output = at::native::flagos::CallPythonOp_Generic(
         "torch_fl.accelerator.nvidia._cudnn.attention",

@@ -617,6 +617,19 @@ if(_flagos_is_cuda)
     # compatibility driver can load these without compiling newer-toolkit PTX.
     set_property(TARGET ${LIBRARY_NAME} APPEND PROPERTY CUDA_ARCHITECTURES 80-real 90-real)
     list(APPEND _torch_fl_link_libs ${CMAKE_DL_LIBS})
+    find_path(FLAGOS_NVIDIA_CUDNN_FRONTEND_INCLUDE_DIR cudnn_frontend.h
+      HINTS ENV CUDNN_FRONTEND_INCLUDE_DIR PATH_SUFFIXES cudnn_frontend include)
+    find_path(FLAGOS_NVIDIA_CUDNN_INCLUDE_DIR cudnn.h HINTS ENV CUDNN_INCLUDE_DIR)
+    find_library(FLAGOS_NVIDIA_CUDNN_LIBRARY NAMES cudnn libcudnn.so.9
+      HINTS ENV CUDNN_LIBRARY_DIR)
+    if(FLAGOS_NVIDIA_CUDNN_FRONTEND_INCLUDE_DIR AND FLAGOS_NVIDIA_CUDNN_INCLUDE_DIR
+       AND FLAGOS_NVIDIA_CUDNN_LIBRARY)
+      target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HAVE_NVIDIA_CUDNN=1)
+      target_include_directories(${LIBRARY_NAME} PRIVATE
+        ${FLAGOS_NVIDIA_CUDNN_FRONTEND_INCLUDE_DIR} ${FLAGOS_NVIDIA_CUDNN_INCLUDE_DIR})
+      target_sources(${LIBRARY_NAME} PRIVATE native_host/backends/nvidia/cudnn_attention.cc)
+      list(APPEND _torch_fl_link_libs ${FLAGOS_NVIDIA_CUDNN_LIBRARY})
+    endif()
     find_path(FLAGOS_NVIDIA_CUTLASS_INCLUDE_DIR cutlass/cutlass.h
       HINTS ENV CUTLASS_INCLUDE_DIR ENV CUTLASS_PATH PATH_SUFFIXES include)
     find_path(FLAGOS_NVIDIA_CURAND_INCLUDE_DIR curand_kernel.h
