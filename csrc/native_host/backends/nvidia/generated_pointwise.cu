@@ -59,21 +59,38 @@ __global__ void Divide(const float* left, const float* right, float* result,
 
 __global__ void MeanLastDim(const float4* input, float* output, int rows, int vectors,
                             float scale) {
-  const auto group = cg::tiled_partition<32>(cg::this_thread_block());
+  const auto block = cg::this_thread_block();
+  const auto group = cg::tiled_partition<32>(block);
   const int row = blockIdx.x * blockDim.y + threadIdx.y;
-  if (row >= rows) return;
-  const auto* data = input + int64_t(row) * vectors;
   float a = 0, b = 0, c = 0, d = 0;
-  for (int i = group.thread_rank(); i < vectors; i += group.size()) {
-    const auto item = data[i];
-    a += item.x;
-    b += item.y;
-    c += item.z;
-    d += item.w;
+  if (row < rows) {
+    const auto* data = input + int64_t(row) * vectors;
+    for (int i = threadIdx.x; i < vectors; i += blockDim.x) {
+      const auto item = data[i];
+      a += item.x;
+      b += item.y;
+      c += item.z;
+      d += item.w;
+    }
   }
   // Keep the per-component accumulation order before the vendor warp sum.
-  const auto sum = cg::reduce(group, ((a + b) + c) + d, cg::plus<float>());
-  if (group.thread_rank() == 0) output[row] = sum * scale;
+  float value = ((a + b) + c) + d;
+  if (blockDim.x > group.size()) {
+    __shared__ float partial[512];
+    const int lane = block.thread_rank();
+    partial[lane] = value;
+    for (unsigned offset = blockDim.x / 2; offset >= group.size(); offset /= 2) {
+      block.sync();
+      if (threadIdx.x < offset) {
+        value += partial[lane + offset];
+        partial[lane] = value;
+      }
+    }
+  }
+  if (threadIdx.x < group.size()) {
+    const auto sum = cg::reduce(group, value, cg::plus<float>());
+    if (threadIdx.x == 0 && row < rows) output[row] = sum * scale;
+  }
 }
 
 __global__ void ChannelNorm(const __nv_bfloat16* input, __nv_bfloat16* output,
@@ -139,17 +156,16 @@ cudaError_t LaunchDivide(const float* left, const float* right, float* out,
 }
 
 cudaError_t LaunchMeanLastDim(const float* input, float* output, int rows, int width,
-                              float scale, cudaStream_t stream) {
-  constexpr int rows_per_block = 16;
-  MeanLastDim<<<(rows + rows_per_block - 1) / rows_per_block, dim3(32, rows_per_block), 0, stream>>>(
+                              int lanes, int rows_per_block, float scale, cudaStream_t stream) {
+  MeanLastDim<<<(rows + rows_per_block - 1) / rows_per_block, dim3(lanes, rows_per_block), 0, stream>>>(
       reinterpret_cast<const float4*>(input), output, rows, width / 4, scale);
   return cudaGetLastError();
 }
 
-cudaError_t LaunchChannelNorm(const void* input, void* output, int batches,
+cudaError_t LaunchChannelNorm(const void* input, void* output, int groups,
                               int channels, int cells, cudaStream_t stream) {
   constexpr int cells_per_block = 32;
-  const dim3 grid((cells + cells_per_block - 1) / cells_per_block, batches);
+  const dim3 grid((cells + cells_per_block - 1) / cells_per_block, groups);
   ChannelNorm<<<grid, cells_per_block * 4, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input), static_cast<__nv_bfloat16*>(output),
       channels, cells);
