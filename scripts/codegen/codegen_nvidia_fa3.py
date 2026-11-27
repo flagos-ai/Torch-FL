@@ -84,7 +84,8 @@ def generate(source_root: Path, output: Path) -> None:
     end = interface.index("flash_attn_3_cuda =", start)
     interface = interface[:start] + interface[end:]
     interface = interface.replace("torch.ops.flash_attn_3", "torch.ops.torch_fl_fa3")
-    interface = interface.replace("flash_attn_3::", "torch_fl_fa3::")
+    # Keep the public custom-op schemas so existing compiled graphs resolve the
+    # same forward op. Only its raw kernel provider uses the private namespace.
     interface = interface.replace('device_types="cuda"', 'device_types="privateuseone"')
     forward_body = interface.index("    q, k, k_new, v_new =")
     interface = interface[:forward_body] + _CHECK_FORWARD + interface[forward_body:]

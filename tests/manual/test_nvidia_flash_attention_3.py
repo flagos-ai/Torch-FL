@@ -37,6 +37,9 @@ def reference():
 
     assert not torch._C._has_cuda
     assert not torch.ops.flagos.cpu_fallback_allowed()
+    _provider()
+    for operator in ("flash_attn_3::_flash_attn_forward", "torch_fl_fa3::fwd"):
+        assert torch._C._dispatch_has_kernel_for_dispatch_key(operator, "PrivateUse1")
     _check_no_cuda_torch()
     yield torch.load(path, weights_only=True)
     _check_no_cuda_torch()
