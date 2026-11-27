@@ -4088,6 +4088,10 @@ at::Tensor & ScatterInplaceSrcKernelPython(at::Tensor & self, int64_t dim, const
 static TypedSourceSlot ScatterAddFnSource("aten::scatter_add", "flag_gems.scatter_add", "279ddf38208195221ada1e161952cd97d8927faf1d2b8c517c697b028c9fabaf", "{\"abi\": \"279ddf38208195221ada1e161952cd97d8927faf1d2b8c517c697b028c9fabaf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.scatter_add\", \"op\": \"aten::scatter_add\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ScatterAddKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
   if (index.dim() == 2 && !index.is_contiguous()) {
+    if (GetBackendForOp("scatter_reduce.two") == Backend::kFlagGems) {
+      auto result = at::scatter_reduce(self, dim, index.contiguous(), src, "sum");
+      return result;
+    }
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::scatter_add>::call(self, dim, index, src);
   }
   auto result = ScatterAddFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter_add", {self, dim, index, src}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src));
@@ -4098,6 +4102,10 @@ at::Tensor ScatterAddKernelPython(const at::Tensor & self, int64_t dim, const at
 static TypedSourceSlot ScatterAddInplaceFnSource("aten::scatter_add_", "flag_gems.scatter_add_", "577b4d62d45b26437fbf27c5f461a528c2f93240ba68e804a3e90bb69ae47dd1", "{\"abi\": \"577b4d62d45b26437fbf27c5f461a528c2f93240ba68e804a3e90bb69ae47dd1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.scatter_add_\", \"op\": \"aten::scatter_add_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ScatterAddInplaceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
   if (index.dim() == 2 && !index.is_contiguous()) {
+    if (GetBackendForOp("scatter_reduce.two") == Backend::kFlagGems) {
+      auto result = at::scatter_reduce(self, dim, index.contiguous(), src, "sum");
+      return self.copy_(result);
+    }
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::scatter_add_>::call(self, dim, index, src);
   }
   auto result = ScatterAddInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter_add_", {self, dim, index, src}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src));

@@ -1408,9 +1408,18 @@ def gen_flaggems_python_kernel(
                 f"#else\n{body}\n#endif"
             )
         elif op in ("scatter_add", "scatter_add_"):
-            # The FlagGems 2-D kernel reads indices linearly, even when strided.
+            # The FlagGems scatter-add fast path reads indices linearly. The
+            # published scatter-reduce kernel handles the summed updates with
+            # a statically compiled launcher.
+            writeback = "return result;"
+            if op == "scatter_add_":
+                writeback = "return self.copy_(result);"
             prelude += (
                 "  if (index.dim() == 2 && !index.is_contiguous()) {\n"
+                '    if (GetBackendForOp("scatter_reduce.two") == Backend::kFlagGems) {\n'
+                '      auto result = at::scatter_reduce(self, dim, index.contiguous(), src, "sum");\n'
+                f"      {writeback}\n"
+                "    }\n"
                 f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{op}>::call(self, dim, index, src);\n"
                 "  }\n"
             )
