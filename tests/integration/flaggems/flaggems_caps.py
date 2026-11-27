@@ -240,20 +240,16 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "ascend": "none",
     "dcu": "flaggems",
     "gcu": "none",
-    # Iluvatar is the one FlagGems-primary platform that names its own vendor
-    # slot here: csrc/aten/sdp_choice_stub.cc calls CoreX's fused libixattnbkd
-    # kernel when the conf says `iluvatar`, and the shapes/dtypes it was
-    # measured on are gated in backends/iluvatar/fused_attention.h. Every call
-    # outside that class still falls through to the FlagGems/composite path the
-    # other non-boxing platforms record.
+    # The Iluvatar route calls CoreX's fused kernel for the shapes and dtypes
+    # admitted by backends/iluvatar/fused_attention.h.
     "iluvatar": "iluvatar",
     "kunlunxin": "none",
     "metax": "flaggems",
     "apple": "none",
     "musa": "none",
     "ppu": "none",
-    "nvidia": "none",
-    # `backends_tsingmicro.conf` does not name the composite, like the CUDA conf.
+    "nvidia": "nvidia",
+    # The sparse TsingMicro conf omits the composite.
     "tsingmicro": None,
 }
 

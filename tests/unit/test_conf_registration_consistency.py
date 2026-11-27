@@ -308,9 +308,9 @@ def test_full_coverage_confs_share_one_op_set():
 
 @pytest.mark.anyplatform
 def test_cuda_conf_is_the_generated_base_list():
-    """The NVIDIA generator lists SDPA with its default composite route."""
+    """The NVIDIA generator names the backend used by its SDPA composite."""
     routes = _parse_conf(CONF_DIR / "backends_nvidia.conf", conditions=True)
-    assert routes.pop("scaled_dot_product_attention") == "none"
+    assert routes.pop("scaled_dot_product_attention") == "nvidia"
     widened = EXTRA_NATIVE["ascend"]
     assert not (set(routes) & widened), (
         f"backends_nvidia.conf should not list the widened vendor-only ops "
@@ -707,15 +707,8 @@ def test_conf_route_counts_are_stable():
         # trips per forward on the OCR-RM value head -- reach the FlagGems route
         # instead of cpu_fallback. Both effects apply: 549/1485.
         #
-        # The 1485 are `none`, not `nvidia`. That key parses to
-        # Backend::kBoxing (csrc/aten/common.cc), so the default NVIDIA conf was
-        # routing them to the boxing kernel -- the one thing a default conf may
-        # not do (AGENTS.md, "Default confs never route boxing"), and the same
-        # ops the other three CUDA-ABI platforms below already leave at `none`.
-        # The wheel's behaviour is unchanged: register_flaggems_nvidia.inc, the
-        # only registration a boxing-off build includes, claims the 549 FlagGems
-        # routes and none of these, so they already reached cpu_fallback.
-        "nvidia": {"flaggems": 560, "none": 1475},
+        # SDPA names the NVIDIA SDK route registered by sdp_choice_stub.cc.
+        "nvidia": {"flaggems": 560, "none": 1474, "nvidia": 1},
         # dcu/metax/ppu are CUDA-ABI platforms with no vendor kernel of their
         # own on this tree, and a default conf never routes boxing (AGENTS.md,
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each

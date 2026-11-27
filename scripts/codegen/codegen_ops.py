@@ -3205,6 +3205,8 @@ def nvidia_conf_header():
         "#",
         "# Native NVIDIA precision entries serve only measured dtype clauses.",
         "# Uncovered base routes use `none` and reach CPU fallback.",
+        "# SDPA uses the NVIDIA SDK for eligible BF16 inference. Other SDPA",
+        "# inputs use the composite on the original FlagOS tensors.",
         "#",
         "# Exceptions: ops that pass the static discovery gates but cannot use",
         "# the FlagGems route here are held off it",
@@ -3252,6 +3254,8 @@ def nvidia_conf_header():
 def main():
     repo_root = Path(__file__).parent.parent.parent
     conf_path = repo_root / "torch_fl/configs/backends_nvidia.conf"
+    sdpa_op = "scaled_dot_product_attention"
+    sdpa_backend = "nvidia"
     # Refresh only the deterministic dtype clauses without rediscovering the
     # installed FlagGems operator surface or changing unrelated base routes.
     if "--native-routes-only" in sys.argv or "--check-native-routes" in sys.argv:
@@ -3260,8 +3264,14 @@ def main():
         first_op = next(
             index for index, line in enumerate(lines) if "=" in line.split("#", 1)[0]
         )
+        base_routes = [
+            f"{sdpa_op} = {sdpa_backend}"
+            if line.partition("=")[0].strip() == sdpa_op
+            else line
+            for line in lines[first_op:]
+        ]
         expected = render_config_routes(
-            "\n".join(nvidia_conf_header() + lines[first_op:]) + "\n", "nvidia"
+            "\n".join(nvidia_conf_header() + base_routes) + "\n", "nvidia"
         )
         if "--check-native-routes" in sys.argv:
             if current != expected:
@@ -3874,10 +3884,10 @@ def main():
         n_flaggems_routes = 0
         n_held_off_flaggems = 0
         n_metadata_override = 0
-        config_ops = op_info.keys() | {"scaled_dot_product_attention"}
+        config_ops = op_info.keys() | {sdpa_op}
         for op in sorted(config_ops):
-            if op == "scaled_dot_product_attention":
-                backend = fallback_key
+            if op == sdpa_op:
+                backend = sdpa_backend
             elif op in NVIDIA_NATIVE_TRAINING_ADAPTERS:
                 backend = "flaggems"
             elif op in metadata_route_overrides:
@@ -3904,7 +3914,8 @@ def main():
         tileops_annotated = sum(1 for op in op_info if op in TILEOPS_OPS)
         print(
             f"   regenerated {conf_path.name} with {n_flaggems_routes} flaggems "
-            f"and {len(config_ops) - n_flaggems_routes} {fallback_key} routes "
+            f"and {len(config_ops) - n_flaggems_routes - 1} {fallback_key} routes "
+            "plus NVIDIA SDPA "
             f"({tileops_annotated} annotated # tileops, "
             f"{n_held_off_flaggems} flaggems ops held off the FlagGems route)"
         )

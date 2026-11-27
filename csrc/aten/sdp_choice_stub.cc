@@ -1,8 +1,6 @@
 // Copyright (c) 2026, BAAI. All rights reserved.
 //
-// scaled_dot_product_attention composite override for CUDA-boxing platforms
-// (DCU via DTK libtorch_hip, MetaX/maca, PPU/tsingmicro, and any CUDA-
-// compatible backend that reuses the per-op CUDA boxing path).
+// FlagOS override for PyTorch's scaled_dot_product_attention composite.
 //
 // WHY a composite override is needed (measured root cause,
 // docs/bench_qwen3_dcu_route_perf.md): aten::scaled_dot_product_attention is a
@@ -41,10 +39,12 @@
 #include <torch/library.h>
 
 #include <cmath>
+#include <cstdio>
 #include <optional>
 
 #include "common.h"
 #include "device_boxing.h"
+#include "route.h"
 
 #if defined(USE_CAMBRICON) && defined(FLAGOS_CAMBRICON_CNNL_EXTRA)
 #include "backends/cambricon/attention.h"
@@ -80,6 +80,15 @@
 
 namespace at::flagos {
 namespace {
+
+constexpr auto kSdpaOp = "scaled_dot_product_attention";
+
+void LogAttentionDispatch(const char* route) {
+  static const bool enabled = at::native::flagos::LogEnabled("dispatch");
+  if (enabled) {
+    std::fprintf(stderr, "[flagos dispatch] %s -> %s\n", kSdpaOp, route);
+  }
+}
 
 #ifdef FLAGOS_FLAGGEMS_PYTHON
 // The route below exists only when the FlagGems Python path is compiled in, so
@@ -456,42 +465,52 @@ at::Tensor WrapperScaledDotProductAttention(
         query, key, value, resolved_scale, is_causal);
   }
 #endif
-  // Training path: when a grad-requiring input is present the composite's flash
-  // forward records its autograd node on the CUDA-boxed tensors, but the guard
-  // below unboxes them on scope exit -- so backward would later see PrivateUse1
-  // tensors where the graph recorded CUDA (ToCopyBackward0 device mismatch; see
-  // perf/sdpa_train_smoke.py). Fall through to the composite on the flagos
-  // tensors instead: it then takes its math decomposition over leaf ops that
-  // dispatch through the generated, autograd-aware PrivateUse1 kernels --
-  // exactly the semantics this override replaced. This call is the native
-  // composite body, not a dispatch, so it cannot re-enter this impl (no
-  // recursion). Inference (no grad required) takes the fast boxed-CUDA path.
+  // Training calls the composite body directly so backward records the
+  // autograd-aware PrivateUse1 leaf operations on the original tensors.
   if (at::GradMode::is_enabled() &&
       (query.requires_grad() || key.requires_grad() || value.requires_grad())) {
     return at::native::scaled_dot_product_attention(
         query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   }
+  using at::native::flagos::Backend;
+  [[maybe_unused]] static const auto backend =
+      at::native::flagos::HasBackendForOp(kSdpaOp)
+      ? at::native::flagos::GetBackendForOp(kSdpaOp)
+      : Backend::kNone;
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (backend == Backend::kNvidia && !attn_mask && dropout_p == 0) {
 #if defined(FLAGOS_HAVE_NVIDIA_CUDNN)
-  if (!attn_mask && dropout_p == 0 && at::globalContext().userEnabledCuDNNSDP()) {
-    auto output = ::flagos::nvidia::TryCuDnnAttention(
-        query, key, value, is_causal, scale, enable_gqa);
-    if (output.defined()) return output;
-  }
+    if (at::globalContext().userEnabledCuDNNSDP()) {
+      auto output = ::flagos::nvidia::TryCuDnnAttention(
+          query, key, value, is_causal, scale, enable_gqa);
+      if (output.defined()) {
+        LogAttentionDispatch("vendor (cuDNN)");
+        return output;
+      }
+    }
 #endif
-#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_FLAGGEMS_PYTHON)
-  if (!attn_mask && dropout_p == 0 && query.dim() == 4 &&
-      query.scalar_type() == at::kBFloat16 && query.size(-1) <= 128 && query.size(2) > 1 &&
-      at::globalContext().userEnabledCuDNNSDP()) {
-    auto output = at::native::flagos::CallPythonOp_Generic(
-        "torch_fl.accelerator.nvidia._cudnn.attention",
-        {query, key, value, is_causal, scale, enable_gqa});
-    if (output.defined()) return output;
-  }
+#ifdef FLAGOS_FLAGGEMS_PYTHON
+    if (query.dim() == 4 && query.scalar_type() == at::kBFloat16 &&
+        query.size(-1) <= 128 && query.size(2) > 1 &&
+        at::globalContext().userEnabledCuDNNSDP()) {
+      auto output = at::native::flagos::CallPythonOp_Generic(
+          "torch_fl.accelerator.nvidia._cudnn.attention",
+          {query, key, value, is_causal, scale, enable_gqa});
+      if (output.defined()) {
+        LogAttentionDispatch("vendor (cuDNN frontend)");
+        return output;
+      }
+    }
 #endif
 #if defined(FLAGOS_HAVE_NVIDIA_CUTLASS)
-  if (!attn_mask && dropout_p == 0 && !is_causal && !enable_gqa) {
-    auto output = ::flagos::nvidia::TryCutlassAttention(query, key, value, scale);
-    if (output.defined()) return output;
+    if (!is_causal && !enable_gqa) {
+      auto output = ::flagos::nvidia::TryCutlassAttention(query, key, value, scale);
+      if (output.defined()) {
+        LogAttentionDispatch("vendor (CUTLASS)");
+        return output;
+      }
+    }
+#endif
   }
 #endif
 #if defined(USE_ILUVATAR) && defined(FLAGOS_ILUVATAR_KERNEL)
@@ -508,9 +527,7 @@ at::Tensor WrapperScaledDotProductAttention(
   //
   // No backward: this is a forward-only kernel, and the grad-mode fall-through
   // above has already routed a training call to the composite.
-  if (at::native::flagos::HasBackendForOp("scaled_dot_product_attention") &&
-      at::native::flagos::GetBackendForOp("scaled_dot_product_attention") ==
-          at::native::flagos::Backend::kIluvatar &&
+  if (backend == Backend::kIluvatar &&
       at::native::flagos::iluvatar::FusedAttentionEligible(
           query, key, value, attn_mask, dropout_p, is_causal, scale,
           enable_gqa)) {
@@ -522,15 +539,8 @@ at::Tensor WrapperScaledDotProductAttention(
   }
 #endif
 #ifdef FLAGOS_FLAGGEMS_PYTHON
-  // FlagGems route, when the conf asks for it (see the file header). Both halves
-  // are load-bearing: HasBackendForOp() keeps a conf that never names this op on
-  // the boxing path -- an unlisted op reads as kFlagGems, which is the right
-  // default for the generated leaf kernels and would be the wrong reading of
-  // silence here -- and FlagGemsEligible() keeps the calls the Triton kernel was
-  // not measured on there as well.
-  if (at::native::flagos::HasBackendForOp("scaled_dot_product_attention") &&
-      at::native::flagos::GetBackendForOp("scaled_dot_product_attention") ==
-          at::native::flagos::Backend::kFlagGems &&
+  // An explicit FlagGems route uses the fused kernel for eligible inputs.
+  if (backend == Backend::kFlagGems &&
       FlagGemsEligible(query, key, value, attn_mask, dropout_p, is_causal,
                        scale, enable_gqa)) {
     // Pass every argument rather than only those that differ from FlagGems'
@@ -562,10 +572,12 @@ at::Tensor WrapperScaledDotProductAttention(
     // (csrc/aten/generated/flaggems_python_kernels.cc): a tensor crossing back
     // from Python is unboxed explicitly, whatever device it claims.
     at::native::flagos::UnboxToFlagos(result);
+    LogAttentionDispatch(at::native::flagos::BackendLogName(backend));
     return result;
   }
 #endif
   // Let ATen compose the PrivateUse1 operators for unhandled routes.
+  LogAttentionDispatch("composite");
   return at::native::scaled_dot_product_attention(
       query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
 }

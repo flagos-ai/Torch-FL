@@ -87,6 +87,12 @@ memory-efficient attention algorithm for aligned wide BF16 heads. The kernel
 is instantiated at build time from the published CUTLASS headers and the CPU
 PyTorch wheel's attention template.
 
+The generated NVIDIA configuration selects `scaled_dot_product_attention = nvidia`.
+The fused SDK routes handle eligible BF16 inference. Other inputs use the SDPA
+composite on the original FlagOS tensors. `FLAGOS_OP_scaled_dot_product_attention=flaggems`
+selects the FlagGems SDPA implementation for its supported inputs. `FLAGOS_LOG=dispatch`
+reports the selected SDPA implementation.
+
 The Native Host build without vendor PyTorch kernels serves single-rank
 collectives on local device buffers. Multi-rank FlagOS groups in this build
 require FlagCX.
