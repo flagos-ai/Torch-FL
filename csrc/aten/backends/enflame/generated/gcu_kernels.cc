@@ -11,8 +11,16 @@
 #include "../../../generated/ops.h"
 #include <ATen/ATen.h>
 #include <ATen/core/Tensor.h>
+#include <ATen/core/Reduction.h>
 #include <ATen/ExpandUtils.h>
+#include <ATen/MemoryOverlap.h>
+#include <ATen/ops/bitwise_and_ops.h>
+#include <ATen/ops/bitwise_not_ops.h>
+#include <ATen/ops/bitwise_or_ops.h>
+#include <ATen/native/CPUFallback.h>
 #include <ATen/native/RangeUtils.h>
+#include <ATen/native/ReduceOpsUtils.h>
+#include <ATen/native/Resize.h>
 #include <ATen/ops/all.h>
 #include <ATen/ops/arange.h>
 #include <ATen/ops/empty.h>
@@ -20,11 +28,14 @@
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/convolution_backward.h>
+#include <ATen/ops/cumsum_ops.h>
 #include <ATen/ops/embedding.h>
 #include <ATen/ops/embedding_dense_backward.h>
 #include <ATen/ops/index.h>
 #include <ATen/ops/index_select.h>
 #include <ATen/ops/linalg_vector_norm.h>
+#include <ATen/ops/nll_loss_backward_ops.h>
+#include <ATen/ops/nll_loss_forward_ops.h>
 #include <ATen/ops/nonzero.h>
 #include <ATen/ops/nonzero_static.h>
 #include <ATen/ops/result_type.h>
@@ -42,6 +53,9 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "../../../embedding_utils.h"
+#include "../../../fallback.h"
+#include "../../../foreach_utils.h"
 #include "../topsaten_common.h"
 #include "../gcu_copy.h"
 #include "runtime/functions.h"
@@ -51,6 +65,25 @@ namespace at::native::flagos {
 namespace gcu = at::native::flagos::gcu;
 
 namespace {
+
+bool EnflameMeanNllInput(
+    const at::Tensor& self, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction, int64_t ignore_index) {
+  return reduction == at::Reduction::Mean && (!weight || !weight->defined()) &&
+      self.dim() == 2 && self.numel() > 0 && self.scalar_type() == at::kFloat &&
+      gcu::TopsatenIndexSelectFits({self, target}) &&
+      target.dim() == 1 && target.size(0) == self.size(0) &&
+      target.scalar_type() == at::kLong && target.device() == self.device() &&
+      ignore_index >= std::numeric_limits<int32_t>::min() &&
+      ignore_index <= std::numeric_limits<int32_t>::max();
+}
+
+at::Tensor EnflameNllLabels(const at::Tensor& target, int64_t classes, int64_t ignore_index) {
+  const auto in_range = at::logical_and(at::ge(target, 0), at::lt(target, classes));
+  const auto valid = at::logical_or(at::eq(target, ignore_index), in_range);
+  TORCH_CHECK_INDEX(at::all(valid).item<bool>(), "NLL loss target is out of bounds");
+  return gcu::Int64Words(target).select(-1, 0).contiguous().unsqueeze(-1);
+}
 
 // The S60 compiler rejects int64 Triton arithmetic. Compose the vendor int32
 // operations over the two storage words instead of downloading tensor data.
@@ -843,6 +876,109 @@ at::Tensor& SubOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
 
 REGISTER_IMPL_TO_DISPATCHER(SubOutFn, sub_out_dispatcher, Backend::kEnflame, SubOutKernelGcu)
 
+at::Tensor& BitwiseAndTensorOutKernelGcu(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
+  if (out.scalar_type() == at::kLong && self.device() == other.device() &&
+      out.device() == self.device() &&
+      ((self.scalar_type() == at::kLong && other.scalar_type() == at::kBool) ||
+       (self.scalar_type() == at::kBool && other.scalar_type() == at::kLong))) {
+    at::assert_no_internal_overlap(out);
+    at::assert_no_partial_overlap(out, self);
+    at::assert_no_partial_overlap(out, other);
+    const auto& integral = self.scalar_type() == at::kLong ? self : other;
+    const auto& mask = self.scalar_type() == at::kBool ? self : other;
+    const auto shape = at::infer_size(integral.sizes(), mask.sizes());
+    auto result = at::empty(shape, out.options());
+    if (result.numel() != 0) {
+      // A boolean operand retains only the low bit of the original integer.
+      auto low = gcu::Int64Words(integral.expand(shape).contiguous())
+          .select(-1, 0).contiguous();
+      auto mask_dense = mask.expand(shape).contiguous();
+      auto mask_int = at::empty(shape, out.options().dtype(at::kInt));
+      auto and_int = at::empty_like(mask_int);
+      gcu::TopsatenTensorWrapper t_low(low), t_mask(mask_dense), t_mask_int(mask_int),
+          t_and(and_int), t_result(result);
+      auto int_dtype = TOPSATEN_DATA_I32;
+      EXEC_TOPSATEN_CMD(topsatenTo, self, t_mask_int.get(), t_mask.get(),
+          int_dtype, false, false, TOPSATEN_MEMORY_PRESERVE);
+      EXEC_TOPSATEN_CMD(topsatenBitwiseAnd, self, t_and.get(), t_low.get(), t_mask_int.get());
+      auto long_dtype = TOPSATEN_DATA_I64;
+      EXEC_TOPSATEN_CMD(topsatenTo, self, t_result.get(), t_and.get(),
+          long_dtype, false, false, TOPSATEN_MEMORY_PRESERVE);
+    }
+    at::native::resize_output(out, result.sizes());
+    return out.copy_(result);
+  }
+  if (self.scalar_type() != at::kBool || out.scalar_type() != at::kBool ||
+      self.device() != out.device() || other.scalar_type() != at::kBool || other.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::bitwise_and_Tensor_out>::call(
+        self, other, out);
+  }
+  const auto shape = at::infer_size(self.sizes(), other.sizes());
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  at::assert_no_partial_overlap(out, other);
+  auto input = self.expand(shape).contiguous();
+  auto rhs = other.expand(shape).contiguous();
+  gcu::TopsatenTensorWrapper t_rhs(rhs);
+  auto result = at::empty(shape, out.options());
+  if (result.numel() != 0) {
+    gcu::TopsatenTensorWrapper t_input(input), t_result(result);
+    EXEC_TOPSATEN_CMD(topsatenBitwiseAnd, self, t_result.get(), t_input.get(), t_rhs.get());
+  }
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseAndTensorOutFn, bitwise_and_tensor_out_dispatcher, Backend::kEnflame, BitwiseAndTensorOutKernelGcu)
+
+at::Tensor& BitwiseOrTensorOutKernelGcu(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
+  if (self.scalar_type() != at::kBool || out.scalar_type() != at::kBool ||
+      self.device() != out.device() || other.scalar_type() != at::kBool || other.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::bitwise_or_Tensor_out>::call(
+        self, other, out);
+  }
+  const auto shape = at::infer_size(self.sizes(), other.sizes());
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  at::assert_no_partial_overlap(out, other);
+  auto input = self.expand(shape).contiguous();
+  auto rhs = other.expand(shape).contiguous();
+  gcu::TopsatenTensorWrapper t_rhs(rhs);
+  auto result = at::empty(shape, out.options());
+  if (result.numel() != 0) {
+    gcu::TopsatenTensorWrapper t_input(input), t_result(result);
+    EXEC_TOPSATEN_CMD(topsatenBitwiseOr, self, t_result.get(), t_input.get(), t_rhs.get());
+  }
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseOrTensorOutFn, bitwise_or_tensor_out_dispatcher, Backend::kEnflame, BitwiseOrTensorOutKernelGcu)
+
+at::Tensor& BitwiseNotOutKernelGcu(const at::Tensor& self, at::Tensor& out) {
+  if (self.scalar_type() != at::kBool || out.scalar_type() != at::kBool ||
+      self.device() != out.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::bitwise_not_out>::call(
+        self, out);
+  }
+  const auto shape = self.sizes().vec();
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  auto input = self.expand(shape).contiguous();
+  auto result = at::empty(shape, out.options());
+  if (result.numel() != 0) {
+    gcu::TopsatenTensorWrapper t_input(input), t_result(result);
+    EXEC_TOPSATEN_CMD(topsatenBitwiseNot, self, t_result.get(), t_input.get());
+  }
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseNotOutFn, bitwise_not_out_dispatcher, Backend::kEnflame, BitwiseNotOutKernelGcu)
+
 at::Tensor EqTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   if (at::result_type(self, other) == at::kLong) {
     return LongCompare(self, other, 0);
@@ -1231,7 +1367,7 @@ at::Tensor RsubScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, 
   gcu::TopsatenTensorWrapper t_self(self_c);
   gcu::TopsatenTensorWrapper t_other(other_t);
   gcu::TopsatenTensorWrapper t_out(out);
-  EXEC_TOPSATEN_CMD(topsatenRsub, self, t_out.get(), t_other.get(), t_self.get(), t_alpha);
+  EXEC_TOPSATEN_CMD(topsatenRsub, self, t_out.get(), t_self.get(), t_other.get(), t_alpha);
   return out;
 }
 
@@ -1254,7 +1390,7 @@ at::Tensor RsubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, 
   gcu::TopsatenTensorWrapper t_self(self_b);
   gcu::TopsatenTensorWrapper t_other(other_b);
   gcu::TopsatenTensorWrapper t_out(out);
-  EXEC_TOPSATEN_CMD(topsatenRsub, self, t_out.get(), t_other.get(), t_self.get(), t_alpha);
+  EXEC_TOPSATEN_CMD(topsatenRsub, self, t_out.get(), t_self.get(), t_other.get(), t_alpha);
   return out;
 }
 
@@ -1532,20 +1668,10 @@ at::Tensor SumDimIntlistKernelGcu(
       (dtype.has_value() && !gcu::TopsatenSupportsDtype(dtype.value()))) {
     return at::sum(self.cpu(), dim, keepdim, dtype).to(self.device());
   }
-  int64_t ndim = self.dim();
-  std::vector<int64_t> norm_dims;
-  if (dim.has_value() && !dim.value().empty()) {
-    for (int64_t d : dim.value()) norm_dims.push_back(d < 0 ? d + ndim : d);
-  } else {
-    for (int64_t d = 0; d < ndim; ++d) norm_dims.push_back(d);
-  }
-  auto out_shape = self.sizes().vec();
-  std::vector<int64_t> sorted_dims(norm_dims);
-  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
-  for (int64_t d : sorted_dims) {
-    if (keepdim) out_shape[d] = 1;
-    else out_shape.erase(out_shape.begin() + d);
-  }
+  const auto normalized_dim = dim && dim->empty() ? at::OptionalIntArrayRef() : dim;
+  auto norm_dims = at::native::make_dim_vector(normalized_dim, self.dim());
+  at::maybe_wrap_dims(norm_dims, self.dim());
+  const auto out_shape = at::meta::get_reduction_shape(self, norm_dims, keepdim);
 
   auto out_dtype = dtype.value_or(
       true && at::isIntegralType(self.scalar_type(), true)
@@ -1576,20 +1702,10 @@ at::Tensor MeanDimKernelGcu(
       (dtype.has_value() && !gcu::TopsatenSupportsDtype(dtype.value()))) {
     return at::mean(self.cpu(), dim, keepdim, dtype).to(self.device());
   }
-  int64_t ndim = self.dim();
-  std::vector<int64_t> norm_dims;
-  if (dim.has_value() && !dim.value().empty()) {
-    for (int64_t d : dim.value()) norm_dims.push_back(d < 0 ? d + ndim : d);
-  } else {
-    for (int64_t d = 0; d < ndim; ++d) norm_dims.push_back(d);
-  }
-  auto out_shape = self.sizes().vec();
-  std::vector<int64_t> sorted_dims(norm_dims);
-  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
-  for (int64_t d : sorted_dims) {
-    if (keepdim) out_shape[d] = 1;
-    else out_shape.erase(out_shape.begin() + d);
-  }
+  const auto normalized_dim = dim && dim->empty() ? at::OptionalIntArrayRef() : dim;
+  auto norm_dims = at::native::make_dim_vector(normalized_dim, self.dim());
+  at::maybe_wrap_dims(norm_dims, self.dim());
+  const auto out_shape = at::meta::get_reduction_shape(self, norm_dims, keepdim);
 
   auto out_dtype = dtype.value_or(
       false && at::isIntegralType(self.scalar_type(), true)
@@ -1783,6 +1899,89 @@ at::Tensor& ArgmaxOutKernelGcu(
 
 REGISTER_IMPL_TO_DISPATCHER(ArgmaxOutFn, argmax_out_dispatcher, Backend::kEnflame, ArgmaxOutKernelGcu)
 
+at::Tensor CumsumKernelGcu(
+    const at::Tensor& self, int64_t dim, ::std::optional<at::ScalarType> dtype) {
+  const auto output_dtype = dtype.value_or(
+      at::isIntegralType(self.scalar_type(), true) ? at::kLong : self.scalar_type());
+  auto out = at::empty(self.sizes(), self.options().dtype(output_dtype));
+  cumsum_out_dispatcher.DispatchBackend(Backend::kEnflame, self, dim, dtype, out);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kEnflame, CumsumKernelGcu)
+
+at::Tensor& CumsumOutKernelGcu(
+    const at::Tensor& self, int64_t dim, ::std::optional<at::ScalarType> dtype,
+    at::Tensor& out) {
+  gcu::TopsDeviceGuard guard(self);
+  const auto axis = c10::maybe_wrap_dim(dim, self.dim());
+  const auto output_dtype = out.scalar_type();
+  TORCH_CHECK(out.device() == self.device(), "cumsum.out: output device mismatch");
+  TORCH_CHECK(dtype.value_or(output_dtype) == output_dtype, "cumsum.out: output dtype mismatch");
+  const auto input_dtype = self.scalar_type();
+  const bool staged_long = output_dtype == at::kLong;
+  const bool integer_input = input_dtype == at::kInt || input_dtype == at::kBool;
+  if (!((staged_long && (integer_input || input_dtype == at::kLong)) ||
+        (output_dtype == at::kInt && integer_input) ||
+        (output_dtype == at::kFloat && (input_dtype == at::kFloat || integer_input)) ||
+        (output_dtype == at::kBFloat16 && input_dtype == at::kBFloat16))) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::cumsum_out>::call(
+        self, dim, dtype, out);
+  }
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  at::native::resize_output(out, self.sizes());
+  if (self.numel() == 0) return out;
+  if (self.dim() == 0) return out.copy_(self);
+
+  const auto scan_dtype = staged_long ? at::kInt : output_dtype;
+  auto input = self.contiguous();
+  if (staged_long) {
+    const auto length = self.size(axis);
+    // The S60 SDK scans int32. For count masks and other bounded integers,
+    // prove that every prefix fits before narrowing and widening on device.
+    const auto limit = std::numeric_limits<int32_t>::max() / length;
+    if (limit > 0 && input_dtype == at::kLong) {
+      auto words = gcu::Int64Words(input);
+      auto low = words.select(-1, 0);
+      auto high = words.select(-1, 1);
+      auto sign_extended = at::logical_or(
+          at::logical_and(low.ge(0), high.eq(0)),
+          at::logical_and(low.lt(0), high.eq(-1)));
+      if (!at::all(sign_extended).item<bool>()) {
+        return at::native::call_fallback_fn<&cpu_fallback, at::_ops::cumsum_out>::call(
+            self, dim, dtype, out);
+      }
+      input = low.contiguous();
+    }
+    if (limit == 0 || (input_dtype != at::kBool &&
+        !at::all(at::logical_and(input.ge(-limit), input.le(limit))).item<bool>())) {
+      return at::native::call_fallback_fn<&cpu_fallback, at::_ops::cumsum_out>::call(
+          self, dim, dtype, out);
+    }
+  }
+  auto buffer = !staged_long && out.is_contiguous() &&
+          at::get_overlap_status(input, out) == at::MemOverlapStatus::No
+      ? out
+      : at::empty(out.sizes(), out.options().dtype(scan_dtype));
+  gcu::TopsatenTensorWrapper t_input(input), t_output(buffer);
+  EXEC_TOPSATEN_CMD(topsatenCumsum, self, t_output.get(), t_input.get(),
+      static_cast<int32_t>(axis), gcu::ToTopsatenDataType(scan_dtype));
+  if (staged_long) {
+    auto widened = at::empty(out.sizes(), out.options());
+    gcu::TopsatenTensorWrapper t_widened(widened);
+    auto wide_dtype = TOPSATEN_DATA_I64;
+    EXEC_TOPSATEN_CMD(topsatenTo, self, t_widened.get(), t_output.get(),
+        wide_dtype, false, false, TOPSATEN_MEMORY_PRESERVE);
+    out.copy_(widened);
+    return out;
+  }
+  if (!buffer.is_same(out)) out.copy_(buffer);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(CumsumOutFn, cumsum_out_dispatcher, Backend::kEnflame, CumsumOutKernelGcu)
+
 at::Tensor LinalgVectorNormKernelGcu(
     const at::Tensor& self,
     const at::Scalar& ord,
@@ -1908,6 +2107,120 @@ at::Tensor PrivSoftmaxKernelGcu(const at::Tensor& self, int64_t dim, bool half_t
 }
 
 REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kEnflame, PrivSoftmaxKernelGcu)
+
+at::Tensor PrivLogSoftmaxKernelGcu(const at::Tensor& self, int64_t dim, bool half_to_float) {
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
+    return at::_log_softmax(self.cpu(), dim, half_to_float).to(self.device());
+  }
+  int64_t d = dim < 0 ? dim + self.dim() : dim;
+  auto out_dtype = half_to_float ? at::kFloat : self.scalar_type();
+  auto out = at::empty(self.sizes(), self.options().dtype(out_dtype));
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenLogSoftmaxForward, self, t_out.get(), t_self.get(), d, half_to_float);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxFn, priv_log_softmax_dispatcher, Backend::kEnflame, PrivLogSoftmaxKernelGcu)
+
+std::tuple<at::Tensor&, at::Tensor&> NllLossForwardOutputKernelGcu(
+    const at::Tensor& self, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction,
+    int64_t ignore_index, at::Tensor& output, at::Tensor& total_weight) {
+  if (!EnflameMeanNllInput(self, target, weight, reduction, ignore_index) ||
+      output.scalar_type() != at::kFloat || output.device() != self.device() ||
+      total_weight.scalar_type() != at::kFloat || total_weight.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::nll_loss_forward_output>::call(
+        self, target, weight, reduction, ignore_index, output, total_weight);
+  }
+  gcu::TopsDeviceGuard guard(self);
+  at::assert_no_internal_overlap(output);
+  at::assert_no_internal_overlap(total_weight);
+  at::assert_no_overlap(output, self);
+  at::assert_no_overlap(output, target);
+  at::assert_no_overlap(total_weight, self);
+  at::assert_no_overlap(total_weight, target);
+  at::assert_no_overlap(output, total_weight);
+  const auto labels = EnflameNllLabels(target, self.size(1), ignore_index);
+  const auto active = at::ne(labels, ignore_index);
+  const auto safe_labels = at::where(active, labels, at::zeros_like(labels));
+  const auto log_probs = self.contiguous();
+  auto selected = at::empty(labels.sizes(), self.options());
+  gcu::TopsatenTensorWrapper t_selected(selected), t_input(log_probs), t_labels(safe_labels);
+  EXEC_TOPSATEN_CMD(topsatenGather, self, t_selected.get(), t_input.get(), int64_t{1},
+      t_labels.get(), false);
+  const auto zero = at::zeros({1}, self.options());
+  const auto total = at::sum(active.to(at::kFloat));
+  const auto loss = at::div(at::neg(at::sum(at::where(active, selected, zero))), total);
+  at::native::resize_output(output, {});
+  at::native::resize_output(total_weight, {});
+  output.copy_(loss);
+  total_weight.copy_(total);
+  return {output, total_weight};
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NllLossForwardOutputFn, nll_loss_forward_output_dispatcher, Backend::kEnflame, NllLossForwardOutputKernelGcu)
+
+std::tuple<at::Tensor, at::Tensor> NllLossForwardKernelGcu(
+    const at::Tensor& self, const at::Tensor& target,
+    const std::optional<at::Tensor>& weight, int64_t reduction, int64_t ignore_index) {
+  auto output = at::empty({0}, self.options());
+  auto total_weight = at::empty({0}, self.options());
+  nll_loss_forward_output_dispatcher(self, target, weight, reduction, ignore_index,
+                                     output, total_weight);
+  return {output, total_weight};
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NllLossForwardFn, nll_loss_forward_dispatcher, Backend::kEnflame, NllLossForwardKernelGcu)
+
+at::Tensor& NllLossBackwardGradInputKernelGcu(
+    const at::Tensor& grad_output, const at::Tensor& self,
+    const at::Tensor& target, const std::optional<at::Tensor>& weight,
+    int64_t reduction, int64_t ignore_index, const at::Tensor& total_weight,
+    at::Tensor& grad_input) {
+  if (!EnflameMeanNllInput(self, target, weight, reduction, ignore_index) ||
+      grad_output.scalar_type() != at::kFloat || grad_output.device() != self.device() ||
+      total_weight.scalar_type() != at::kFloat || total_weight.device() != self.device() ||
+      total_weight.numel() != 1 || grad_output.numel() != 1 ||
+      grad_input.scalar_type() != at::kFloat || grad_input.device() != self.device()) {
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::nll_loss_backward_grad_input>::call(
+        grad_output, self, target, weight, reduction, ignore_index, total_weight, grad_input);
+  }
+  gcu::TopsDeviceGuard guard(self);
+  at::assert_no_internal_overlap(grad_input);
+  at::assert_no_overlap(grad_input, self);
+  at::assert_no_overlap(grad_input, target);
+  at::assert_no_overlap(grad_input, grad_output);
+  at::assert_no_overlap(grad_input, total_weight);
+  const auto labels = EnflameNllLabels(target, self.size(1), ignore_index);
+  const auto active = at::ne(labels, ignore_index);
+  const auto safe_labels = at::where(active, labels, at::zeros_like(labels));
+  const auto scaled = at::div(at::neg(grad_output.reshape({1})), total_weight.reshape({1}));
+  const auto source = at::where(active, scaled, at::zeros_like(scaled));
+  at::native::resize_output(grad_input, self.sizes());
+  auto result = grad_input.is_contiguous() ? grad_input : at::empty(self.sizes(), self.options());
+  result.zero_();
+  gcu::TopsatenTensorWrapper t_grad(result), t_labels(safe_labels), t_source(source);
+  EXEC_TOPSATEN_CMD(topsatenScatter, self, t_grad.get(), t_grad.get(), int64_t{1},
+      t_labels.get(), t_source.get());
+  if (!result.is_same(grad_input)) grad_input.copy_(result);
+  return grad_input;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NllLossBackwardGradInputFn, nll_loss_backward_grad_input_dispatcher, Backend::kEnflame, NllLossBackwardGradInputKernelGcu)
+
+at::Tensor NllLossBackwardKernelGcu(
+    const at::Tensor& grad_output, const at::Tensor& self,
+    const at::Tensor& target, const std::optional<at::Tensor>& weight,
+    int64_t reduction, int64_t ignore_index, const at::Tensor& total_weight) {
+  auto grad_input = at::empty({0}, self.options());
+  nll_loss_backward_grad_input_dispatcher(grad_output, self, target, weight, reduction,
+                                          ignore_index, total_weight, grad_input);
+  return grad_input;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NllLossBackwardFn, nll_loss_backward_dispatcher, Backend::kEnflame, NllLossBackwardKernelGcu)
 
 at::Tensor ClampKernelGcu(
     const at::Tensor& self,
@@ -2571,14 +2884,18 @@ at::Tensor PrivSoftmaxBackwardDataKernelGcu(
     return at::_softmax_backward_data(grad_output.cpu(), output.cpu(), dim, input_dtype)
         .to(grad_output.device());
   }
-  int64_t d = dim < 0 ? dim + output.dim() : dim;
-  auto grad_c = grad_output.contiguous();
-  auto out_c = output.contiguous();
-  auto result = at::empty(out_c.sizes(), out_c.options().dtype(input_dtype));
+  const auto d = c10::maybe_wrap_dim(dim, output.dim());
+  TORCH_CHECK(grad_output.sizes().equals(output.sizes()),
+      "softmax backward requires matching gradient and output shapes");
+  auto result = at::empty(output.sizes(), output.options().dtype(input_dtype));
+  if (!result.numel()) return result;
+  auto grad_c = grad_output.dim() ? grad_output.contiguous() : grad_output.view({1});
+  auto out_c = output.dim() ? output.contiguous() : output.view({1});
+  auto result_c = result.dim() ? result : result.view({1});
 
   gcu::TopsatenTensorWrapper t_grad(grad_c);
   gcu::TopsatenTensorWrapper t_out(out_c);
-  gcu::TopsatenTensorWrapper t_result(result);
+  gcu::TopsatenTensorWrapper t_result(result_c);
   EXEC_TOPSATEN_CMD(
       topsatenSoftmaxBackwardData, grad_output, t_result.get(), t_grad.get(), t_out.get(), d,
       gcu::ToTopsatenDataType(input_dtype));
@@ -2586,6 +2903,53 @@ at::Tensor PrivSoftmaxBackwardDataKernelGcu(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataFn, priv_softmax_backward_data_dispatcher, Backend::kEnflame, PrivSoftmaxBackwardDataKernelGcu)
+
+at::Tensor PrivLogSoftmaxBackwardDataKernelGcu(
+    const at::Tensor& grad_output,
+    const at::Tensor& output,
+    int64_t dim,
+    at::ScalarType input_dtype) {
+  if (!gcu::TopsatenSupportsDtype(grad_output.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(input_dtype)) {
+    return at::_log_softmax_backward_data(grad_output.cpu(), output.cpu(), dim, input_dtype)
+        .to(grad_output.device());
+  }
+  const auto d = c10::maybe_wrap_dim(dim, output.dim());
+  TORCH_CHECK(grad_output.sizes().equals(output.sizes()),
+      "softmax backward requires matching gradient and output shapes");
+  auto result = at::empty(output.sizes(), output.options().dtype(input_dtype));
+  if (!result.numel()) return result;
+  auto grad_c = grad_output.dim() ? grad_output.contiguous() : grad_output.view({1});
+  auto out_c = output.dim() ? output.contiguous() : output.view({1});
+  auto result_c = result.dim() ? result : result.view({1});
+
+  gcu::TopsatenTensorWrapper t_grad(grad_c);
+  gcu::TopsatenTensorWrapper t_out(out_c);
+  gcu::TopsatenTensorWrapper t_result(result_c);
+  EXEC_TOPSATEN_CMD(
+      topsatenLogSoftmaxBackwardData, grad_output, t_result.get(), t_grad.get(), t_out.get(), d,
+      gcu::ToTopsatenDataType(input_dtype));
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxBackwardDataFn, priv_log_softmax_backward_data_dispatcher, Backend::kEnflame, PrivLogSoftmaxBackwardDataKernelGcu)
+
+at::Tensor& PrivLogSoftmaxBackwardDataOutKernelGcu(
+    const at::Tensor& grad_output, const at::Tensor& output,
+    int64_t dim, at::ScalarType input_dtype, at::Tensor& out) {
+  TORCH_CHECK(out.device() == output.device() && out.scalar_type() == input_dtype,
+      "softmax backward out requires the input device and input dtype");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, grad_output);
+  at::assert_no_partial_overlap(out, output);
+  auto result = priv_log_softmax_backward_data_dispatcher.DispatchBackend(
+      Backend::kEnflame, grad_output, output, dim, input_dtype);
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxBackwardDataOutFn, priv_log_softmax_backward_data_out_dispatcher, Backend::kEnflame, PrivLogSoftmaxBackwardDataOutKernelGcu)
 
 at::Tensor SiluBackwardKernelGcu(
     const at::Tensor& grad_output,
@@ -3094,9 +3458,23 @@ at::Tensor EmbeddingDenseBackwardKernelGcu(const at::Tensor& grad, const at::Ten
   }
   auto grad_2d = grad_c.reshape({-1, embed_dim});
   auto indices_2d = indices_i32.reshape({-1, 1});
+  gcu::TopsatenTensorWrapper t_indices(indices_2d);
+  if (scale_grad_by_freq && grad.scalar_type() == at::kFloat) {
+    // TOPS can leave the last feature unscaled on an FP32 row. Compute
+    // the counts on-device and scale each token before the SDK reduction.
+    const auto flat_indices = indices_i32.reshape({num_indices});
+    grad_2d = ScaleEmbeddingGradByFrequency(
+        grad_2d, flat_indices, [&](const at::Tensor& ones) {
+          auto counts = at::empty({num_weights, 1}, grad_c.options());
+          gcu::TopsatenTensorWrapper t_ones(ones), t_counts(counts);
+          EXEC_TOPSATEN_CMD(topsatenEmbeddingDenseBackward, grad, t_counts.get(), t_ones.get(), t_indices.get(),
+              num_weights, -1, false);
+          return counts;
+        });
+    scale_grad_by_freq = false;
+  }
 
   gcu::TopsatenTensorWrapper t_grad(grad_2d);
-  gcu::TopsatenTensorWrapper t_indices(indices_2d);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(topsatenEmbeddingDenseBackward, grad, t_out.get(), t_grad.get(), t_indices.get(), num_weights, padding_idx, scale_grad_by_freq);
   return out;
@@ -3179,6 +3557,7 @@ void ForeachAddInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& sca
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(topsatenForeachAdd, self[0], t_out.get(), t_self.get(), t_scalar);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceScalarFn, foreach_add_inplace_scalar_dispatcher, Backend::kEnflame, ForeachAddInplaceScalarKernelGcu)
@@ -3200,6 +3579,7 @@ void ForeachAddInplaceListKernelGcu(
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(
       topsatenForeachAdd, self[0], t_out.get(), t_self.get(), t_other.get(), t_alpha);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceListFn, foreach_add_inplace_list_dispatcher, Backend::kEnflame, ForeachAddInplaceListKernelGcu)
@@ -3225,6 +3605,7 @@ void ForeachAddInplaceTensorKernelGcu(
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(
       topsatenForeachAdd, self[0], t_out.get(), t_self.get(), t_other.get(), t_alpha);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceTensorFn, foreach_add_inplace_tensor_dispatcher, Backend::kEnflame, ForeachAddInplaceTensorKernelGcu)
@@ -3238,6 +3619,7 @@ void ForeachSubInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& sca
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(topsatenForeachSub, self[0], t_out.get(), t_self.get(), t_scalar);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachSubInplaceScalarFn, foreach_sub_inplace_scalar_dispatcher, Backend::kEnflame, ForeachSubInplaceScalarKernelGcu)
@@ -3259,6 +3641,7 @@ void ForeachSubInplaceListKernelGcu(
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(
       topsatenForeachSub, self[0], t_out.get(), t_self.get(), t_other.get(), t_alpha);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachSubInplaceListFn, foreach_sub_inplace_list_dispatcher, Backend::kEnflame, ForeachSubInplaceListKernelGcu)
@@ -3272,6 +3655,7 @@ void ForeachMulInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& sca
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(topsatenForeachMul, self[0], t_out.get(), t_self.get(), t_scalar);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachMulInplaceScalarFn, foreach_mul_inplace_scalar_dispatcher, Backend::kEnflame, ForeachMulInplaceScalarKernelGcu)
@@ -3287,6 +3671,7 @@ void ForeachMulInplaceListKernelGcu(at::TensorList self, at::TensorList other) {
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(
       topsatenForeachMul, self[0], t_out.get(), t_self.get(), t_other.get());
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachMulInplaceListFn, foreach_mul_inplace_list_dispatcher, Backend::kEnflame, ForeachMulInplaceListKernelGcu)
@@ -3300,6 +3685,7 @@ void ForeachDivInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& sca
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(topsatenForeachDiv, self[0], t_out.get(), t_self.get(), t_scalar);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceScalarFn, foreach_div_inplace_scalar_dispatcher, Backend::kEnflame, ForeachDivInplaceScalarKernelGcu)
@@ -3315,6 +3701,7 @@ void ForeachDivInplaceListKernelGcu(at::TensorList self, at::TensorList other) {
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(
       topsatenForeachDiv, self[0], t_out.get(), t_self.get(), t_other.get());
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceListFn, foreach_div_inplace_list_dispatcher, Backend::kEnflame, ForeachDivInplaceListKernelGcu)
@@ -3333,6 +3720,7 @@ void ForeachDivInplaceScalarlistKernelGcu(at::TensorList self, at::ArrayRef<at::
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(topsatenForeachDiv, self[0], t_out.get(), t_self.get(), t_scalars);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceScalarlistFn, foreach_div_inplace_scalarlist_dispatcher, Backend::kEnflame, ForeachDivInplaceScalarlistKernelGcu)
@@ -3345,6 +3733,7 @@ void ForeachNegInplaceKernelGcu(at::TensorList self) {
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(topsatenForeachNeg, self[0], t_out.get(), t_self.get());
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachNegInplaceFn, foreach_neg_inplace_dispatcher, Backend::kEnflame, ForeachNegInplaceKernelGcu)
@@ -3357,6 +3746,7 @@ void ForeachSqrtInplaceKernelGcu(at::TensorList self) {
   gcu::TopsatenTensorList t_self(self);
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(topsatenForeachSqrt, self[0], t_out.get(), t_self.get());
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachSqrtInplaceFn, foreach_sqrt_inplace_dispatcher, Backend::kEnflame, ForeachSqrtInplaceKernelGcu)
@@ -3398,6 +3788,7 @@ void ForeachLerpInplaceScalarKernelGcu(
   gcu::TopsatenTensorList t_out(self);
   EXEC_TOPSATEN_CMD(
       topsatenForeachLerp, self[0], t_out.get(), t_self.get(), t_end.get(), t_weight);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachLerpInplaceScalarFn, foreach_lerp_inplace_scalar_dispatcher, Backend::kEnflame, ForeachLerpInplaceScalarKernelGcu)
@@ -3423,6 +3814,7 @@ void ForeachAddcmulInplaceScalarKernelGcu(
   EXEC_TOPSATEN_CMD(
       topsatenForeachAddcmul, self[0], t_out.get(), t_self.get(), t_t1.get(), t_t2.get(),
       t_value);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddcmulInplaceScalarFn, foreach_addcmul_inplace_scalar_dispatcher, Backend::kEnflame, ForeachAddcmulInplaceScalarKernelGcu)
@@ -3453,6 +3845,7 @@ void ForeachAddcmulInplaceScalarlistKernelGcu(
   EXEC_TOPSATEN_CMD(
       topsatenForeachAddcmul, self[0], t_out.get(), t_self.get(), t_t1.get(), t_t2.get(),
       t_scalars);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddcmulInplaceScalarlistFn, foreach_addcmul_inplace_scalarlist_dispatcher, Backend::kEnflame, ForeachAddcmulInplaceScalarlistKernelGcu)
@@ -3478,6 +3871,7 @@ void ForeachAddcdivInplaceScalarKernelGcu(
   EXEC_TOPSATEN_CMD(
       topsatenForeachAddcdiv, self[0], t_out.get(), t_self.get(), t_t1.get(), t_t2.get(),
       t_value);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddcdivInplaceScalarFn, foreach_addcdiv_inplace_scalar_dispatcher, Backend::kEnflame, ForeachAddcdivInplaceScalarKernelGcu)
@@ -3508,6 +3902,7 @@ void ForeachAddcdivInplaceScalarlistKernelGcu(
   EXEC_TOPSATEN_CMD(
       topsatenForeachAddcdiv, self[0], t_out.get(), t_self.get(), t_t1.get(), t_t2.get(),
       t_scalars);
+  BumpForeachVersions(self);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddcdivInplaceScalarlistFn, foreach_addcdiv_inplace_scalarlist_dispatcher, Backend::kEnflame, ForeachAddcdivInplaceScalarlistKernelGcu)

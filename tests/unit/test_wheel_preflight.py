@@ -43,16 +43,20 @@ spec.loader.exec_module(preflight)
 @pytest.mark.parametrize(
     "mutation", [None, "binary", "cpu_library", "version", "location"]
 )
-def test_metax_native_precision_bundle_is_verified_without_imports(mutation):
+@pytest.mark.parametrize("vendor", ["metax", "thead"])
+def test_device_only_native_precision_bundle_is_verified_without_imports(
+    vendor, mutation
+):
     prefix = "native_host/_generated/"
+    libraries = prefix + f"{vendor}_vendor"
     assets = {
-        prefix + "_metax_vendor.so": b"typed host glue",
-        prefix + "metax_vendor/libc10_cuda.so": b"original vendor runtime",
-        prefix + "metax_vendor/libtorch_cuda.so": b"original vendor GPU kernels",
+        prefix + f"_{vendor}_vendor.so": b"typed host glue",
+        libraries + "/libc10_cuda.so": b"original vendor runtime",
+        libraries + "/libtorch_cuda.so": b"original vendor GPU kernels",
     }
     record = {
-        "vendor": "metax",
-        "vendor_torch": "2.10.0+metax3.8.1.0",
+        "vendor": vendor,
+        "vendor_torch": {"metax": "2.10.0+metax3.8.1.0", "thead": "2.10.0"}[vendor],
         "artifacts": {
             path: hashlib.sha256(data).hexdigest() for path, data in assets.items()
         },
@@ -61,27 +65,33 @@ def test_metax_native_precision_bundle_is_verified_without_imports(mutation):
         "build": {
             "vendor_torch_libraries": True,
             "vendor_torch_version": record["vendor_torch"],
-            "bundle_libdir": prefix + "metax_vendor",
+            "bundle_libdir": libraries,
         }
     }
     if mutation == "binary":
-        assets[prefix + "metax_vendor/libtorch_cuda.so"] = b"changed numerical source"
+        assets[libraries + "/libtorch_cuda.so"] = b"changed numerical source"
     elif mutation == "cpu_library":
-        record["artifacts"][prefix + "metax_vendor/libtorch_cpu.so"] = "0" * 64
+        record["artifacts"][libraries + "/libtorch_cpu.so"] = "0" * 64
     elif mutation == "version":
         manifest["build"]["vendor_torch_version"] = "unmeasured"
     elif mutation == "location":
-        manifest["build"]["bundle_libdir"] = "lib_metax"
+        manifest["build"]["bundle_libdir"] = f"lib_{vendor}"
     files = {"torch_fl/" + path: data for path, data in assets.items()}
     files["torch_fl/" + prefix + "vendor_manifest.json"] = json.dumps(record).encode()
     if mutation is None:
         preflight.check_native_vendor_bundle(
-            manifest, files.__getitem__, files.__contains__, "metax"
+            manifest, files.__getitem__, files.__contains__, vendor
         )
+        if vendor == "thead":
+            files["torch_fl/lib_thead/libtorch_cuda.so"] = b"boxing bundle"
+            with pytest.raises(ValueError, match="full vendor Torch bundle"):
+                preflight.check_native_vendor_bundle(
+                    manifest, files.__getitem__, files.__contains__, vendor
+                )
     else:
         with pytest.raises(ValueError, match="vendor|artifact"):
             preflight.check_native_vendor_bundle(
-                manifest, files.__getitem__, files.__contains__, "metax"
+                manifest, files.__getitem__, files.__contains__, vendor
             )
 
 

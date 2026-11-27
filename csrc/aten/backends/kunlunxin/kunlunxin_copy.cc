@@ -15,14 +15,8 @@ namespace at::native::flagos::kunlunxin {
 
 namespace {
 
-// Which dtypes these two primitives hand to the vendor. The XPU op library's
-// copy and cast wrappers are exercised on the dtype pairs this backend's
-// operators need -- the float types, and the sub-int64 integer types a mask or
-// an index tensor passes through. int64, double and complex are declined: they
-// have not been measured through this path on this hardware, and declining is
-// free, because both callers keep their host round-trip as the fallback. An
-// unmapped pair therefore costs a memcpy pair rather than risking a wrong
-// answer.
+// Dtypes supported by both XPU copy and cast. StridedCopy also accepts int64
+// index tensors through the vendor's contiguous entry point.
 bool KunlunxinCopyDtype(at::ScalarType type) {
   switch (type) {
     case at::kFloat:
@@ -75,7 +69,7 @@ bool StridedCopy(const at::Tensor& dst, const at::Tensor& src) {
   if (dst.scalar_type() != src.scalar_type()) {
     return false;
   }
-  if (!KunlunxinCopyDtype(dst.scalar_type())) {
+  if (!KunlunxinCopyDtype(dst.scalar_type()) && dst.scalar_type() != at::kLong) {
     return false;
   }
   if (dst.numel() == 0) {
@@ -127,7 +121,10 @@ at::Tensor DtypeCast(const at::Tensor& src, at::ScalarType dtype) {
   if (src.scalar_type() == dtype) {
     return at::Tensor();
   }
-  if (!KunlunxinCopyDtype(src.scalar_type()) || !KunlunxinCopyDtype(dtype)) {
+  const bool index_to_float = src.scalar_type() == at::kLong && dtype == at::kFloat;
+  const bool bool_to_index = src.scalar_type() == at::kBool && dtype == at::kLong;
+  if (!index_to_float && !bool_to_index &&
+      (!KunlunxinCopyDtype(src.scalar_type()) || !KunlunxinCopyDtype(dtype))) {
     return at::Tensor();
   }
 

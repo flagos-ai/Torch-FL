@@ -43,13 +43,8 @@
 
 namespace at::native::flagos::kunlunxin {
 
-// The vendor context, created once per device. `create_context()` binds to
-// whatever device is current when it is called, so the cache is keyed by device
-// and creation switches the current device around the call. A context is never
-// destroyed: `destroy_context()` would have to run from a static destructor,
-// whose ordering against libxpurt's own teardown is unknown, and a process that
-// exits without it reclaims the same memory one instruction later. GCU's
-// `EnsureTopsatenInit` makes the same trade for the same reason.
+// Keep library contexts bound to process-lifetime streams. Explicit user
+// streams use the SDK default context with both queues fenced below.
 inline int XdnnDeviceIndex(const at::Tensor& tensor) {
   if (!tensor.defined() || !tensor.device().is_privateuseone()) {
     return 0;
@@ -58,13 +53,28 @@ inline int XdnnDeviceIndex(const at::Tensor& tensor) {
   return device < 0 ? 0 : device;
 }
 
+inline XPUStream KunlunxinSubmissionStream(int device) {
+#ifdef FLAGOS_NATIVE_HOSTS
+  auto current = GetCurrentStreamForDevice(device);
+  if (current == GetDefaultStreamForDevice(device)) {
+    return reinterpret_cast<XPUStream>(current);
+  }
+#else
+  static_cast<void>(device);
+#endif
+  return nullptr;
+}
+
 inline xpytorch::xpu::api::Context* GetKunlunxinContext(const at::Tensor& tensor) {
   const int device = XdnnDeviceIndex(tensor);
+  const auto stream = KunlunxinSubmissionStream(device);
   static std::mutex mutex;
-  static std::unordered_map<int, xpytorch::xpu::api::Context*> contexts;
+  static std::unordered_map<
+      int, std::unordered_map<XPUStream, xpytorch::xpu::api::Context*>> contexts;
   std::lock_guard<std::mutex> lock(mutex);
-  const auto it = contexts.find(device);
-  if (it != contexts.end()) {
+  auto& by_stream = contexts[device];
+  const auto it = by_stream.find(stream);
+  if (it != by_stream.end()) {
     return it->second;
   }
 
@@ -82,7 +92,8 @@ inline xpytorch::xpu::api::Context* GetKunlunxinContext(const at::Tensor& tensor
       context != nullptr,
       "kunlunxin: create_context() returned null on device ",
       device);
-  contexts.emplace(device, context);
+  context->set_stream(stream);
+  by_stream.emplace(stream, context);
   return context;
 }
 
@@ -96,26 +107,20 @@ inline std::string KunlunxinStatusName(int status) {
   return name + " (" + std::to_string(status) + ")";
 }
 
-// `xpu_wait(nullptr)` is the only synchronisation primitive the XPU SDK exports:
-// there is no `xpu_device_synchronize`, `xpu_stream_synchronize` or
-// `xpu_stream_query`. A null stream waits for the device's default stream, which
-// is where every kernel here lands -- `GetKunlunxinContext` leaves the context's
-// `xpu_stream` at its default, and the runtime layer's stream bookkeeping
-// (csrc/runtime/accelerator/kunlunxin/stream.cc) records the caller's stream
-// without ever handing it to the SDK's launch path. So this drains exactly the
-// work this op queued.
-//
-// Called on both sides of every vendor call. The trailing drain is what makes
-// the op synchronous, which the dispatcher's contract requires. The leading one
-// is the discipline measured on GCU: a vendor kernel that is merely *submitted*
-// behind already-queued work does not necessarily read that work's output, and
-// on this backend the other producer is the FlagGems/Triton path, which shares
-// the same default stream (an op listed `= flaggems` in
-// configs/backends_kunlunxin.conf launches through triton into the same queue).
-// It is close to free in the steady state because the post-op drain has already
-// emptied the stream.
+// On the default FlagOS stream, Native Host sends XDNN and FlagGems to the
+// same queue. On a user stream, a fence orders it with the SDK default queue.
 inline void DrainXpuStream() {
-  xpu_wait(nullptr);
+  int device = 0;
+  TORCH_CHECK(xpu_current_device(&device) == XPU_SUCCESS,
+      "kunlunxin: cannot query the current XPU device");
+  auto stream = KunlunxinSubmissionStream(device);
+#ifdef FLAGOS_NATIVE_HOSTS
+  auto current = reinterpret_cast<XPUStream>(GetCurrentStreamForDevice(device));
+  if (current != stream) {
+    TORCH_CHECK(xpu_wait(current) == XPU_SUCCESS, "kunlunxin: stream wait failed");
+  }
+#endif
+  TORCH_CHECK(xpu_wait(stream) == XPU_SUCCESS, "kunlunxin: stream wait failed");
 }
 
 // The base predicate: exactly the aten dtypes `ToXdnnScalarType` below maps.

@@ -168,8 +168,7 @@ bool MpsSupportsPredicateDtype(at::ScalarType dtype);
 bool MpsGatherIndex(
     const at::Tensor& out,
     const at::Tensor& source,
-    const at::Tensor& addresses,
-    at::IntArrayRef source_storage_shape);
+    const at::Tensor& addresses);
 
 // Resolve aten's cumsum axis against the operand rank. False for a rank-zero
 // tensor or an axis outside the rank, where the reference reports the error.
@@ -1187,6 +1186,9 @@ MPSGraphTensor* MpsPowByScalar(
     const at::Scalar& exponent,
     at::ScalarType dtype);
 
+// Initialize a newly allocated one-element float tensor in shared storage.
+bool MpsInitializeFloatScalar(const at::Tensor& scalar, float value);
+
 // One string naming a graph *body*: the op, plus every host value the body bakes
 // in as a constant (an `alpha`, the axes a reduction covers). The operands' own
 // signature -- dtype, shape and element count of every operand and of `out` --
@@ -1255,10 +1257,8 @@ std::string MpsGraphKey(const char* op, const Parts&... parts) {
 //     the same stream is already ordered behind the graph.
 //   * Reads that leave the device -- the CPU round-trip a declined op or
 //     `.cpu()` takes -- go through the runtime's copy path, which drains.
-//   * A sentinel command buffer is committed after the graph
-//     (FlagosMPSStreamSentinel), so StreamQuery and StreamSynchronize see this
-//     work rather than only what the runtime itself committed. That is what the
-//     caching allocator's block-reuse check reads.
+//   * The runtime commits the final graph command buffer. StreamQuery,
+//     StreamSynchronize and the caching allocator track that buffer.
 //
 // False when an operand or `out` is not backed by a buffer the runtime owns
 // (MpsBufferOf), or when `build` returns nil to decline, or when the graph does

@@ -46,6 +46,12 @@ codegen is organized around **categories**.
   make `GetBackendForOp` route that op to the `kAscend` slot at runtime. The codegen also writes
   the generated operators into that conf.
 
+With Native Host enabled, eligible ACLNN operators prepare their arguments and workspace on the
+calling thread and enqueue one C++ submission on the default stream. CANN owns the PTA executor
+lookup used by the vendor's eager path. Transfers, events, FlagGems launches, and raw stream access
+wait for earlier host submissions so they keep their stream order. Custom streams and blocking
+execution submit the operators directly.
+
 ## 3. Output location and build
 
 Generated file: `csrc/aten/backends/ascend/generated/ascend_kernels.cc`
@@ -118,7 +124,7 @@ hardware):
 | `softmax_fwd` | Tensor + `int64 dim` + half_to_float | input shape; half_to_float→float | `aclnn<Name>(self, dim, out)` |
 | `reduce_all` | Tensor (whole-tensor reduction) | bool scalar | `aclnn<Name>(flat, dim_list, false, out)` (flatten to 1-D and reduce) |
 | `reduce_sum_dtype` | Tensor + `OptionalIntArrayRef dim` + keepdim + optional dtype | reduced along dim, dtype promoted | `aclnn<Name>(self, dims, keepdim, aclDataType, out)` |
-| `reduce_mean_dtype` | same as above | same as above | `aclnnMeanV2(self, dims, keepdim, int32 dtype, out)` |
+| `reduce_mean_dtype` | same as above | reduced along dim, with optional output dtype | `aclnnMean(self, dims, keepdim, aclDataType, out)` |
 | `adaptive_avg_pool2d` | self + `SymInt[2] output_size` | leading dims + output_size; **NCHW format** | `aclnn<Name>(self, outSize, out)` |
 | `avg_pool2d` | self + k/stride/pad + ceil/countPad + divOverride | pooling formula; **NCHW format** | `aclnn<Name>(self, k, s, p, ceil, cntPad, div, cubeType, out)` |
 | `max_pool2d_indices` | self + k/stride/pad/dil + ceil | **tuple(out, int64 indices)**, pooling formula | `aclnn<Name>(self, k, s, p, dil, ceil, out, idx)` |

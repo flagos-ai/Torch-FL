@@ -6,7 +6,9 @@
 
   m.impl("add.Tensor", WrapperAddTensor);
   m.impl("cat", WrapperCat);
+  m.impl("embedding_dense_backward", WrapperEmbeddingDenseBackward);
   m.impl("mean.dim", WrapperMeanDim);
   m.impl("mul.Tensor", WrapperMulTensor);
+  m.impl("mul.out", WrapperMulOut);
   m.impl("mul_.Tensor", WrapperMulInplaceTensor);
   m.impl("slice.Tensor", WrapperSliceTensor);

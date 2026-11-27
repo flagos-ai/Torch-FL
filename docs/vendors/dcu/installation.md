@@ -84,6 +84,10 @@ facade can select the matching runtime.
 
 Full measurements and rationale: [vendor-free-core-libs.md](vendor-free-core-libs.md).
 
+With the pinned Native Host precision bundle, BF16 and FP32 `cat` use the DTK
+eager kernel on the selected HCU stream. The generated adapter uses ATen's
+structured metadata to allocate the result on FlagOS storage.
+
 ## Verification
 
 ### Basic Device Check

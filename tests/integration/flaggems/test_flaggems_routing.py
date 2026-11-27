@@ -17,7 +17,7 @@
 For every operator in ``FLAGGEMS_ROUTING_CALLS`` this runs the call on the device
 in a fresh child with ``FLAGOS_LOG=dispatch`` and asserts the child's
 ``[flagos dispatch] <op> -> <backend>`` line names exactly the backend the active
-conf routes the operator to.
+conf resolves for the probe's FP32 inputs, including installed dtype overrides.
 
 Two skips, both data-driven and neither a platform name:
 
@@ -28,9 +28,8 @@ Two skips, both data-driven and neither a platform name:
     * this wheel cannot run a FlagGems kernel at all (no kernel set in the build
       record, no device, or the FlagGems/Triton packages do not import).
 
-An operator the conf *does* route to FlagGems and that then dispatches elsewhere
-or raises is a failure: that is a claimed route the runtime does not take, which
-is the one thing this suite refuses to accept.
+For an operator with a FlagGems base route, the probe must dispatch to the
+configured backend for its input dtype and complete successfully.
 """
 
 import pytest
@@ -40,7 +39,6 @@ from flaggems_caps import (
     accel_label,
     conf_route,
     flaggems_runtime_unavailable,
-    route_reason,
     routes_to_flaggems,
 )
 from flaggems_probe import probe_routes
@@ -72,8 +70,9 @@ def test_operator_dispatches_where_the_conf_routes_it(op: str):
     if reason:
         pytest.skip(reason)
 
-    backend, why = route_reason(op)
-    assert why == "routed", f"{op} unexpectedly resolved to {why}"
+    from tests.integration.ops.backend_conf import routed_backend
+
+    backend = routed_backend(op, dtype="Float")
     entry = _probe()[op]
     assert entry["error"] is None, f"{op}: {entry['error']}"
     assert entry["dispatched_backend"] == backend, (

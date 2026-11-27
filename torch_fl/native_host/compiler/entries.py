@@ -156,8 +156,9 @@ def bind_parameters(record, public):
     return bound
 
 
-def emit_entries(catalog, groups, selections=()):
+def emit_entries(catalog, groups, selections=(), *, tensor_ranks=None):
     """Generate schema-specific callbacks; unsupported conversions stay visible."""
+    tensor_ranks = tensor_ranks or {}
     declarations, records, rejected = [], [], []
     declarations.extend(
         f"std::atomic<int64_t> SourceVariantHits_{row['id']}{{0}};"
@@ -235,6 +236,9 @@ def emit_entries(catalog, groups, selections=()):
                     )
                     checks.append(check)
                     values[argument.name] = expression
+                for parameter, rank in tensor_ranks.get(name, {}).items():
+                    tensor = values[parameter]
+                    checks.append(f"{tensor}.dim()=={rank}")
                 invocation = (
                     namespace
                     + "::Forward("
@@ -308,6 +312,7 @@ def emit_entries(catalog, groups, selections=()):
 HEADER = r"""
 #include <atomic>
 #include <ATen/ops/_local_scalar_dense_native.h>
+#include <c10/core/InferenceMode.h>
 class PublishedSourceGuard {
  uint64_t mask_;
  std::optional<c10::Device> device_;

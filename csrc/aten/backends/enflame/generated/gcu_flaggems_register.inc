@@ -249,14 +249,13 @@
 //   - zeros
 //   - zeros_like
 //
-// Total: 247 ops registered here, 107 further FlagGems ops already claimed by gcu_register.inc.
+// Total: 246 ops registered here, 113 further FlagGems ops already claimed by gcu_register.inc.
 
   m.impl("_conv_depthwise2d", WrapperPrivConvDepthwise2d);
   m.impl("_efficient_attention_backward", WrapperPrivEfficientAttentionBackward);
   m.impl("_embedding_bag_dense_backward", WrapperPrivEmbeddingBagDenseBackward);
   m.impl("_flash_attention_backward", WrapperPrivFlashAttentionBackward);
   m.impl("_is_all_true", WrapperPrivIsAllTrue);
-  m.impl("_log_softmax", WrapperPrivLogSoftmax);
   m.impl("_masked_scale", WrapperPrivMaskedScale);
   m.impl("_prelu_kernel", WrapperPrivPreluKernel);
   m.impl("_scaled_dot_product_cudnn_attention_backward", WrapperPrivScaledDotProductCudnnAttentionBackward);

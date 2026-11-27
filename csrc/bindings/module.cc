@@ -567,7 +567,10 @@ PyObject* _getDeviceCount(PyObject* self, PyObject* noargs) {
 
 PyObject* _synchronize(PyObject* self, PyObject* noargs) {
   HANDLE_TH_ERRORS
-  DeviceSynchronize();
+  const auto status = ::DeviceSynchronize();
+  TORCH_CHECK(
+      status == Success, "flagos: device synchronization failed (",
+      static_cast<int>(status), ")");
   Py_RETURN_NONE;
   END_HANDLE_TH_ERRORS
 }

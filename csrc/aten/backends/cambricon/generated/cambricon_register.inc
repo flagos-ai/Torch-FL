@@ -6,7 +6,14 @@
 // file to build backends_cambricon.conf, so the routes and the registrations
 // cannot drift apart. Included from the USE_CAMBRICON arm of
 // csrc/aten/register.cc when FLAGOS_CAMBRICON_KERNEL is defined.
+  m.impl("_foreach_add_.Scalar", WrapperForeachAddInplaceScalar);
+  m.impl("_foreach_div_.ScalarList", WrapperForeachDivInplaceScalarlist);
+  m.impl("_foreach_lerp_.Scalar", WrapperForeachLerpInplaceScalar);
+  m.impl("_foreach_mul_.Scalar", WrapperForeachMulInplaceScalar);
+  m.impl("_foreach_sqrt", WrapperForeachSqrt);
   m.impl("_log_softmax", WrapperPrivLogSoftmax);
+  m.impl("_log_softmax_backward_data", WrapperPrivLogSoftmaxBackwardData);
+  m.impl("_log_softmax_backward_data.out", WrapperPrivLogSoftmaxBackwardDataOut);
   m.impl("_safe_softmax", WrapperPrivSafeSoftmax);
   m.impl("_softmax", WrapperPrivSoftmax);
   m.impl("_softmax_backward_data", WrapperPrivSoftmaxBackwardData);
@@ -19,17 +26,24 @@
   m.impl("addcdiv_", WrapperAddcdivInplace);
   m.impl("addcmul_", WrapperAddcmulInplace);
   m.impl("alias", WrapperAlias);
+  m.impl("all", WrapperAll);
   m.impl("arange", WrapperArange);
   m.impl("arange.start", WrapperArangeStart);
+  m.impl("argmax", WrapperArgmax);
   m.impl("bmm", WrapperBmm);
   m.impl("cat", WrapperCat);
+  m.impl("constant_pad_nd", WrapperConstantPadNd);
   m.impl("cumsum", WrapperCumsum);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div_.Scalar", WrapperDivInplaceScalar);
   m.impl("embedding", WrapperEmbedding);
   m.impl("embedding_dense_backward", WrapperEmbeddingDenseBackward);
   m.impl("fill_.Scalar", WrapperFillInplaceScalar);
+  m.impl("full", WrapperFull);
+  m.impl("le.Tensor", WrapperLeTensor);
   m.impl("lerp_.Scalar", WrapperLerpInplaceScalar);
+  m.impl("masked_fill.Scalar", WrapperMaskedFillScalar);
+  m.impl("max", WrapperMax);
   m.impl("mean", WrapperMean);
   m.impl("mean.dim", WrapperMeanDim);
   m.impl("mm", WrapperMm);

@@ -108,10 +108,9 @@ def target_ops() -> list:
     measured = set(g.KUNLUNXIN_FLAGGEMS_MEASURED)
     ceiling = g.flaggems_python_ops_for(VENDOR)
 
-    # The native half wins by default (NATIVE_KERNEL_PREFERRED), but a measured
-    # FlagGems route outranks it. Both .inc files live in one TORCH_LIBRARY_IMPL
-    # body, so an op in both is a duplicate m.impl -- refuse instead of choosing.
-    both = sorted(measured & native)
+    # Both fragments feed the same TORCH_LIBRARY_IMPL. Dtype-routed operators
+    # use the vendor fragment's wrapper to reach either dispatcher slot.
+    both = sorted((measured & native) - g.KUNLUNXIN_DTYPE_ROUTES.keys())
     if both:
         raise SystemExit(
             "measured for FlagGems but already claimed by the native half: "

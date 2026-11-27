@@ -101,6 +101,7 @@
   m.impl("mm.out", WrapperMmOut);
   m.impl("mul.Scalar", WrapperMulScalar);
   m.impl("mul.Tensor", WrapperMulTensor);
+  m.impl("mul_.Scalar", WrapperMulInplaceScalar);
   m.impl("mul_.Tensor", WrapperMulInplaceTensor);
   m.impl("native_dropout", WrapperNativeDropout);
   m.impl("native_dropout_backward", WrapperNativeDropoutBackward);

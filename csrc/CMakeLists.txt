@@ -32,6 +32,22 @@ file(GLOB _runtime_sources
 list(APPEND SOURCE_FILES ${_runtime_sources})
 list(SORT SOURCE_FILES)
 
+list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/cuda_bfloat16_silu\\.cu$")
+if(_flagos_is_ppu AND FLAGOS_NATIVE_HOSTS AND FLAGOS_BUILD_VENDOR)
+  # The PPU SDK driver requires its explicit compile form for a device object.
+  set(_silu_source "${CMAKE_CURRENT_SOURCE_DIR}/aten/generated/cuda_bfloat16_silu.cu")
+  set(_silu_object "${CMAKE_CURRENT_BINARY_DIR}/cuda_bfloat16_silu.o")
+  add_custom_command(
+    OUTPUT "${_silu_object}"
+    COMMAND "${CMAKE_CUDA_COMPILER}" -std=c++17 -arch=sm_80 -O2 -Xcompiler=-fPIC
+      -c "${_silu_source}" -o "${_silu_object}"
+    DEPENDS "${_silu_source}"
+    VERBATIM
+  )
+  set_source_files_properties("${_silu_object}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+  list(APPEND SOURCE_FILES "${_silu_object}")
+endif()
+
 # The TsingMicro rocprofiler tool is built as its own shared library (below)
 # and must never be linked into libtorch_fl.so: rocprofiler dlopens its tools
 # during its own initialization, and the main library pulls in libhpgr.so.
@@ -260,6 +276,59 @@ endif()
 set(_torch_fl_sources ${SOURCE_FILES})
 
 add_library(${LIBRARY_NAME} SHARED ${_torch_fl_sources})
+
+if(_flagos_is_musa AND FLAGOS_BUILD_VENDOR)
+  find_program(FLAGOS_MUSA_COMPILER NAMES mcc
+    HINTS "$ENV{MUSA_HOME}/bin" "/usr/local/musa/bin" REQUIRED)
+  set(_musa_foreach_dir "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/mthreads/generated")
+  set(_musa_foreach_object "${CMAKE_CURRENT_BINARY_DIR}/musa_foreach_device.o")
+  add_custom_command(
+    OUTPUT "${_musa_foreach_object}"
+    COMMAND "${FLAGOS_MUSA_COMPILER}" -x musa -std=c++17 -O3 -fPIC
+      --offload-arch=mp_22 --offload-arch=mp_31 -ffp-contract=off
+      -c "${_musa_foreach_dir}/musa_foreach.mu" -o "${_musa_foreach_object}"
+    DEPENDS "${_musa_foreach_dir}/musa_foreach.mu" "${_musa_foreach_dir}/musa_foreach.h"
+    VERBATIM)
+  set_source_files_properties("${_musa_foreach_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+  target_sources(${LIBRARY_NAME} PRIVATE "${_musa_foreach_object}")
+endif()
+if(_flagos_is_metax AND FLAGOS_NATIVE_HOSTS AND FLAGOS_BUILD_VENDOR)
+  find_program(FLAGOS_MACA_COMPILER NAMES mxcc
+    HINTS "${MACA_PATH}/mxgpu_llvm/bin" "${MACA_PATH}/bin" REQUIRED)
+  find_library(FLAGOS_MACA_RUNTIME NAMES mcruntime
+    HINTS "${MACA_PATH}/lib" "${MACA_PATH}/lib64" REQUIRED)
+  set(_metax_generated "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/metax/generated")
+  foreach(_kind IN ITEMS foreach cat)
+    set(_metax_device_object "${CMAKE_CURRENT_BINARY_DIR}/metax_${_kind}_device.o")
+    add_custom_command(
+      OUTPUT "${_metax_device_object}"
+      COMMAND "${FLAGOS_MACA_COMPILER}" -x maca -offload-arch=xcore1000
+        "--maca-path=${MACA_PATH}" -std=c++17 -O3 -fPIC -ffp-contract=off
+        -c "${_metax_generated}/${_kind}.mc" -o "${_metax_device_object}"
+      DEPENDS "${_metax_generated}/${_kind}.mc" "${_metax_generated}/${_kind}.h"
+      VERBATIM)
+    set_source_files_properties("${_metax_device_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    target_sources(${LIBRARY_NAME} PRIVATE "${_metax_device_object}")
+  endforeach()
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_METAX_NATIVE_CAT=1)
+  target_link_libraries(${LIBRARY_NAME} PRIVATE "${FLAGOS_MACA_RUNTIME}")
+endif()
+if(_flagos_is_iluvatar AND FLAGOS_NATIVE_HOSTS AND FLAGOS_BUILD_VENDOR)
+  find_program(FLAGOS_COREX_COMPILER NAMES clang++
+    PATHS "${COREX_PATH}/bin" NO_DEFAULT_PATH REQUIRED)
+  set(_iluvatar_generated "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/iluvatar/generated")
+  set(_iluvatar_device_object "${CMAKE_CURRENT_BINARY_DIR}/iluvatar_foreach_device.o")
+  add_custom_command(
+    OUTPUT "${_iluvatar_device_object}"
+    COMMAND "${FLAGOS_COREX_COMPILER}" -x ivcore "--cuda-path=${COREX_PATH}"
+      --cuda-gpu-arch=ivcore11 -std=c++17 -O3 -fPIC -ffp-contract=off
+      -c "${_iluvatar_generated}/foreach.ivcore" -o "${_iluvatar_device_object}"
+    DEPENDS "${_iluvatar_generated}/foreach.ivcore" "${_iluvatar_generated}/foreach.h"
+    VERBATIM)
+  set_source_files_properties("${_iluvatar_device_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+  target_sources(${LIBRARY_NAME} PRIVATE "${_iluvatar_device_object}")
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_ILUVATAR_KERNELS=1)
+endif()
 set_target_properties(${LIBRARY_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # CUPTI headers for the profiler child (Stage B). Runtime symbols are dlopen'd,
@@ -426,6 +495,17 @@ if(FLAGOS_NATIVE_HOSTS)
   if(_flagos_is_metax AND FLAGOS_BUILD_VENDOR)
     target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_METAX_VENDOR=1)
   endif()
+  if(_flagos_is_ppu AND FLAGOS_BUILD_VENDOR)
+    get_filename_component(_thead_sdk_root "${CUDAToolkit_ROOT}" DIRECTORY)
+    set(_thead_sdk_hints "$ENV{PPU_SDK}" "$ENV{PPU_HOME}" "${_thead_sdk_root}" "/usr/local/PPU_SDK")
+    find_path(FLAGOS_THEAD_BLAS_INCLUDE acblas_v2.h
+      HINTS ${_thead_sdk_hints} PATH_SUFFIXES include NO_DEFAULT_PATH REQUIRED)
+    find_library(FLAGOS_THEAD_BLAS_LIBRARY acblas
+      HINTS ${_thead_sdk_hints} PATH_SUFFIXES lib lib64 NO_DEFAULT_PATH REQUIRED)
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_THEAD_VENDOR=1)
+    target_include_directories(${LIBRARY_NAME} PRIVATE "${FLAGOS_THEAD_BLAS_INCLUDE}")
+    target_link_libraries(${LIBRARY_NAME} PRIVATE "${FLAGOS_THEAD_BLAS_LIBRARY}")
+  endif()
 endif()
 
 # Select the generated claims after the SDK and build switches are resolved.
@@ -567,6 +647,23 @@ elseif(_flagos_is_kunlunxin)
     target_include_directories(${LIBRARY_NAME} PRIVATE
         ${XDNN_PYTORCH_INCLUDE_DIRS})
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${XDNN_PYTORCH_LIB})
+    if(FLAGOS_NATIVE_HOSTS)
+      find_path(FLAGOS_XBLASLT_INCLUDE xblas_lt_api.h
+        PATHS "${XDNN_ROOT}/xhpc/xblas/include" NO_DEFAULT_PATH)
+      find_library(FLAGOS_XBLASLT_LIB xpu_blas
+        PATHS "${XDNN_ROOT}" NO_DEFAULT_PATH)
+      if(FLAGOS_XBLASLT_INCLUDE AND FLAGOS_XBLASLT_LIB)
+        target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_KUNLUNXIN_XBLASLT=1)
+        target_include_directories(${LIBRARY_NAME} PRIVATE "${FLAGOS_XBLASLT_INCLUDE}")
+        target_link_libraries(${LIBRARY_NAME} PRIVATE "${FLAGOS_XBLASLT_LIB}")
+        find_library(FLAGOS_XPUAPI_LIB xpuapi PATHS "${XDNN_ROOT}" NO_DEFAULT_PATH)
+        if(FLAGOS_XPUAPI_LIB AND EXISTS "${FLAGOS_XBLASLT_INCLUDE}/xblas_legacy_api.h"
+            AND EXISTS "${FLAGOS_XBLASLT_INCLUDE}/newcontext.h")
+          target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_KUNLUNXIN_SCALED_LINEAR=1)
+          target_link_libraries(${LIBRARY_NAME} PRIVATE "${FLAGOS_XPUAPI_LIB}")
+        endif()
+      endif()
+    endif()
   endif()
 elseif(_flagos_is_iluvatar)
   # Iluvatar owns its runtime: backends/iluvatar_memory.h (no c10::cuda caching

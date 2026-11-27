@@ -43,15 +43,25 @@
 // never ordered against each other.
 namespace {
 
+thread_local std::unordered_map<int, cudaStream_t> current_streams;
+
+#if !defined(FLAGOS_NATIVE_CUDA_CONTEXT)
 std::mutex stream_mutex;
 std::unordered_map<int, cudaStream_t> default_streams;
-thread_local std::unordered_map<int, cudaStream_t> current_streams;
+#endif
 
 // A stream is bound to the device that was current when it was created, so the creating
 // call has to run on `device` even when another one is current -- which is the normal case,
 // since the registry is queried for a device other than the caller's on every multi-device
 // run.
 cudaStream_t get_default_stream(int device) {
+#if defined(FLAGOS_NATIVE_CUDA_CONTEXT)
+  int count = 0;
+  if (::GetDeviceCount(&count) != Success || device < 0 || device >= count) return nullptr;
+  // Use the same default queue as an ordinary vendor Torch CUDA operation.
+  // The explicit handle leaves nullptr available for a failed lookup.
+  return cudaStreamLegacy;
+#else
   std::lock_guard<std::mutex> lock(stream_mutex);
   auto it = default_streams.find(device);
   if (it != default_streams.end()) {
@@ -88,6 +98,7 @@ cudaStream_t get_default_stream(int device) {
 
   default_streams.emplace(device, stream);
   return stream;
+#endif
 }
 
 }  // namespace

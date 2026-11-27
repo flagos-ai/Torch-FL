@@ -15,18 +15,18 @@ when a platform gains or loses one.
 | lane (`FLAGOS_ACCELERATOR` id) | Kind | runtime dir | aten backend | Python compat | conf routes | CI |
 |---|---|---|---|---|---|---|
 | `nvidia` | FlagGems-primary on CUDA | `nvidia` | FlagGems, optional native precision | `nvidia` | 2034 | yes |
-| `thead` | FlagGems-primary on the PPU runtime | `nvidia` | FlagGems | `thead` | 2042 | yes |
-| `metax` | FlagGems-primary on MACA | `metax` | FlagGems, optional AOT native hosts | `metax` | 2042 | yes |
-| `hygon` | FlagGems-primary on DTK | `nvidia` (+ DTK-core shim) | FlagGems, optional AOT native hosts | `hygon` | 2042 | yes |
-| `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | `kunlunxin` (FlagGems shim only) | 2042 | yes |
-| `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2042 | yes |
-| `enflame` | vendor-native (topsaten) | `enflame` | `enflame` | `enflame` | 2042 | yes |
-| `mthreads` | vendor-native (mudnn) | `mthreads` | `mthreads` | `mthreads` (stream/event only) | 2042 | yes |
+| `thead` | FlagGems-primary on the PPU runtime | `nvidia` | FlagGems | `thead` | 2043 | yes |
+| `metax` | FlagGems-primary on MACA | `metax` | FlagGems, optional AOT native hosts | `metax` | 2043 | yes |
+| `hygon` | FlagGems-primary on DTK | `nvidia` (+ DTK-core shim) | FlagGems, optional AOT native hosts | `hygon` | 2043 | yes |
+| `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | `kunlunxin` (FlagGems shim only) | 2043 | yes |
+| `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2043 | yes |
+| `enflame` | vendor-native (topsaten) | `enflame` | `enflame` | `enflame` | 2043 | yes |
+| `mthreads` | vendor-native (mudnn) | `mthreads` | `mthreads` | `mthreads` (stream/event only) | 2043 | yes |
 | `tsingmicro` | FlagGems-primary on the Kuiper TX runtime | `tsingmicro` | `tsingmicro` (RNG kernels only; ops otherwise FlagGems) | `tsingmicro` (Qwen-Image-2.1 rope shim only) | 81 | no |
-| `drobotics` | vendor-native (compiled single-op .hbm artifacts) + graph compile | `bpu` | `bpu` (generated elementwise kernels; needs `FLAGOS_BPU_OPLIB`) | `bpu` | 2042 | no |
-| `iluvatar` | FlagGems-primary + native vendor kernels | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2042 | yes |
-| `apple` | vendor-native (Metal / MPSGraph) | `apple` | `apple` (MPSGraph-first: 37 native routes) | `apple` (stream/event only) | 2042 | yes |
-| `cambricon` | vendor-native (cnrt runtime; FlagGems-primary, CNNL kernels pending) | `cambricon` | `cambricon` (FlagGems register only; CNNL kernels pending) | `cambricon` | 2042 | no |
+| `drobotics` | vendor-native (compiled single-op .hbm artifacts) + graph compile | `bpu` | `bpu` (generated elementwise kernels; needs `FLAGOS_BPU_OPLIB`) | `bpu` | 2043 | no |
+| `iluvatar` | FlagGems-primary + native vendor kernels | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2043 | yes |
+| `apple` | vendor-native (Metal / MPSGraph) | `apple` | `apple` (MPSGraph-first: 37 native routes) | `apple` (stream/event only) | 2043 | yes |
+| `cambricon` | vendor-native (cnrt runtime; FlagGems-primary, CNNL kernels pending) | `cambricon` | `cambricon` (FlagGems register only; CNNL kernels pending) | `cambricon` | 2043 | no |
 
 Column notes:
 
@@ -188,5 +188,5 @@ Authoritative membership of the three per-platform trees. Machine-checked
 against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
 - `csrc/runtime/accelerator/`: apple, ascend, bpu, cambricon, enflame, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, tsingmicro
-- `csrc/aten/backends/`: apple, ascend, bpu, cambricon, enflame, flagos, iluvatar, kunlunxin, mthreads, soft_lowp, tsingmicro
+- `csrc/aten/backends/`: apple, ascend, bpu, cambricon, enflame, flagos, iluvatar, kunlunxin, metax, mthreads, soft_lowp, tsingmicro
 - `torch_fl/accelerator/`: apple, ascend, bpu, cambricon, enflame, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, thead, tsingmicro

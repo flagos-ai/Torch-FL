@@ -19,6 +19,9 @@ def device_runtime(tmp_path_factory):
         pytest.skip("C++ compiler is unavailable")
     directory = tmp_path_factory.mktemp("ascend-device")
     (directory / "acl").mkdir()
+    (directory / "aclnn").mkdir()
+    (directory / "macros.h").write_text("#pragma once\n#define FLAGOS_EXPORT\n")
+    (directory / "aclnn/acl_meta.h").write_text("#pragma once\nstruct aclOpExecutor;\n")
     (directory / "flagos.h").write_text(
         "#pragma once\n"
         "enum Error_t { Success, ErrorUnknown, ErrorInvalidDevice };\n"
@@ -32,7 +35,9 @@ def device_runtime(tmp_path_factory):
         "aclError aclrtGetDeviceCount(uint32_t*);\n"
         "aclError aclrtSetDevice(int); aclError aclrtSynchronizeDevice();\n"
     )
-    (directory / "acl/acl_rt.h").write_text('#include "acl.h"\n')
+    (directory / "acl/acl_rt.h").write_text(
+        '#include "acl.h"\nusing aclrtStream = void*;\n'
+    )
     source = directory / "probe.cc"
     source.write_text(
         r"""
@@ -43,9 +48,14 @@ def device_runtime(tmp_path_factory):
 #include <string>
 #include <thread>
 Error_t GetDeviceCount(int*);
+Error_t DeviceSynchronize();
 std::atomic<int> init_calls{0}, count_calls{0}, set_calls{0};
 int init_error=0, count_error=0, set_error=0;
 thread_local int bound=-1;
+bool flushed=false;
+namespace at::native::flagos::ascend {
+void FlushAscendEager() { flushed=true; }
+}
 aclError aclInit(const char*) { ++init_calls; return init_error; }
 aclError aclrtGetDeviceCount(uint32_t* count) {
   ++count_calls; *count=2; return count_error;
@@ -53,7 +63,7 @@ aclError aclrtGetDeviceCount(uint32_t* count) {
 aclError aclrtSetDevice(int device) {
   ++set_calls; if (!set_error) bound=device; return set_error;
 }
-aclError aclrtSynchronizeDevice() { return 0; }
+aclError aclrtSynchronizeDevice() { assert(flushed); return 0; }
 int main(int argc, char** argv) {
   assert(argc==2);
   const std::string mode=argv[1];
@@ -108,6 +118,7 @@ int main(int argc, char** argv) {
   });
   worker.join();
   assert(GetDevice(&device)==Success && device==0 && bound==0);
+  assert(DeviceSynchronize()==Success && flushed);
   assert(init_calls==1);
 }
 """
@@ -119,6 +130,7 @@ int main(int argc, char** argv) {
             "-std=c++17",
             "-pthread",
             "-Werror",
+            "-DUSE_ASCEND",
             "-I" + str(directory),
             str(ROOT / "csrc/runtime/accelerator/ascend/device.cc"),
             str(source),

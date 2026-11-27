@@ -128,6 +128,7 @@ constexpr BackendInfo kBackends[] = {
     {Backend::kDrobotics, "drobotics", "vendor"},
     {Backend::kNvidia, "nvidia", "vendor"},
     {Backend::kHygon, "hygon", "vendor"},
+    {Backend::kThead, "thead", "vendor"},
     {Backend::kNone, "none", nullptr},
 };
 static_assert([] {
@@ -143,7 +144,6 @@ struct BackendAlias {
 };
 
 constexpr BackendAlias kAliases[] = {
-    {"thead", Backend::kNone},  // T-Head has no native kernel slot.
     {"bpu", Backend::kDrobotics},
     {"flaggems_python", Backend::kFlagGems},
 };

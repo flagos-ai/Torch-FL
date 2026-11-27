@@ -52,6 +52,10 @@ class FLAGOS_EXPORT CachingDeviceAllocator final : public at::Allocator {
   // Record that a block's memory is used on the given stream.
   // This ensures the block won't be reused until the stream completes.
   void record_stream(const at::DataPtr& ptr, Stream_t stream);
+  bool owns_data_ptr(const at::DataPtr& ptr) const;
+#if defined(USE_ASCEND)
+  bool owns_data_ptr_on_stream(const at::DataPtr& ptr, Stream_t stream) const;
+#endif
 
   // Get statistics for a device.
   AllocatorStats get_stats(int device);

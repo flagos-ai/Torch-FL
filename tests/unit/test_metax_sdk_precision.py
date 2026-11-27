@@ -78,19 +78,21 @@ def test_sdk_binary_identity_allows_installation_at_another_path(sdk, tmp_path):
     module._verify_sdk(manifest)
 
 
-def test_sdk_precision_is_explicit_and_native_only():
+@pytest.mark.parametrize("vendor", ["metax", "thead"])
+def test_sdk_precision_is_explicit_and_native_only(vendor):
     generator = runpy.run_path(str(ROOT / "scripts/codegen/gen_vendor_confs.py"))
-    config = ROOT / "torch_fl/configs/backends_metax.conf"
+    config = ROOT / f"torch_fl/configs/backends_{vendor}.conf"
     native = generator["render_native_host_config"](
-        "metax", generator["parse_conf"](config)
+        vendor, generator["parse_conf"](config)
     )
     ordinary = config.read_text()
     for operation in ("mm", "bmm"):
-        assert f"{operation} = flaggems; BFloat16:metax\n" in native
-        assert f"{operation} = flaggems; BFloat16:metax\n" not in ordinary
+        assert f"{operation} = flaggems; BFloat16:{vendor}\n" in native
+        assert f"{operation} = flaggems; BFloat16:{vendor}\n" not in ordinary
 
 
-def test_generated_sdk_entries_match_the_validated_policy():
+@pytest.mark.parametrize(("vendor", "name"), [("metax", "MetaX"), ("thead", "T-Head")])
+def test_generated_sdk_entries_match_the_validated_policy(vendor, name):
     pytest.importorskip("torchgen")
     spec = importlib.util.spec_from_file_location(
         "metax_sdk_generator",
@@ -98,8 +100,13 @@ def test_generated_sdk_entries_match_the_validated_policy():
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module.render() == module.render() == module.OUTPUT.read_text()
-    bad = copy.deepcopy(module.NATIVE_SDK_PRECISION["metax"])
+    output = module.OUTPUT.with_name(f"{vendor}_native_precision_kernels.cc")
+    assert (
+        module.render(vendor=vendor)
+        == module.render(vendor=vendor)
+        == output.read_text()
+    )
+    bad = copy.deepcopy(module.NATIVE_SDK_PRECISION[vendor])
     bad["operators"][0]["dtypes"] = ["Float"]
-    with pytest.raises(ValueError, match="unmeasured MetaX SDK dtype"):
-        module.render(bad)
+    with pytest.raises(ValueError, match=f"unmeasured {name} SDK dtype"):
+        module.render(bad, vendor=vendor)

@@ -65,6 +65,7 @@ _CHILD_SRC = textwrap.dedent(
 
     DEVICE = %(device)r
     torch.manual_seed(0)
+    torch.set_default_dtype(torch.float32)
     %(prelude)s
 
     CALLS = %(calls)s

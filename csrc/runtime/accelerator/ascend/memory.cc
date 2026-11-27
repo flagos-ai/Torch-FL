@@ -135,6 +135,7 @@ class MemoryManager {
       default: return ErrorUnknown;
     }
 
+    at::native::flagos::ascend::FlushAscendEager();
     aclError err = aclrtMemcpyAsync(dst, count, src, count, acl_kind, (aclrtStream)stream);
     return (err == ACL_SUCCESS) ? Success : ErrorUnknown;
   }
@@ -160,11 +161,13 @@ class MemoryManager {
   }
 
   Error_t memset(void* devPtr, int value, size_t count) {
+    at::native::flagos::ascend::FlushAscendEager();
     aclError err = aclrtMemset(devPtr, count, value, count);
     return (err == ACL_SUCCESS) ? Success : ErrorUnknown;
   }
 
   Error_t memsetAsync(void* devPtr, int value, size_t count, Stream_t stream) {
+    at::native::flagos::ascend::FlushAscendEager();
     aclError err = aclrtMemsetAsync(devPtr, count, value, count, (aclrtStream)stream);
     return (err == ACL_SUCCESS) ? Success : ErrorUnknown;
   }

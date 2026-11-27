@@ -5,12 +5,13 @@
 
 #include <ATen/ATen.h>
 #include <c10/core/DeviceGuard.h>
-#include <c10/core/GradMode.h>
 #include <c10/core/impl/VirtualGuardImpl.h>
 
 #include <atomic>
 #include <string>
 #include <tuple>
+
+#include "source_host.h"
 
 namespace at::native::flagos {
 
@@ -74,12 +75,12 @@ class TypedSourceSlot {
  public:
   TypedSourceSlot(const char* op, const char* host, const char* abi, const char* catalog);
   bool Available() const {
-    return address.load(std::memory_order_acquire) != 0 && !c10::GradMode::is_enabled();
+    return address.load(std::memory_order_acquire) != 0 && CanRun();
   }
   template <class R, class F, class... A>
   R Call(F&& fallback, const A&... args) const {
     const auto target = address.load(std::memory_order_acquire);
-    if (target && !c10::GradMode::is_enabled()) {
+    if (target && CanRun()) {
       TypedSourceGuard guard;
       if ((guard.Check(args) && ...)) {
         guard.Enter();
@@ -100,6 +101,14 @@ class TypedSourceSlot {
   const char* const catalog;
   std::atomic<uintptr_t> address{0};
   mutable std::atomic<int64_t> hits{0};
+
+ private:
+  bool CanRun() const {
+    // ATen's mixed-scalar where creates a scalar tensor inside a composite
+    // with grad mode enabled. That factory has no differentiable inputs.
+    return scalar_factory_ || NativeSourceCanRun();
+  }
+  const bool scalar_factory_;
 };
 
 }  // namespace at::native::flagos

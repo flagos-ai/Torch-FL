@@ -14,12 +14,27 @@
 
 #include <flagos.h>
 #include <cuda_runtime.h>
+#if defined(FLAGOS_NATIVE_CUDA_CONTEXT)
+#include <cuda.h>
+
+namespace {
+
+bool HasCudaContextOnDevice(int device) noexcept {
+  int current = -1;
+  return cuCtxGetDevice(&current) == CUDA_SUCCESS && current == device;
+}
+
+}  // namespace
+#endif
 
 Error_t GetDeviceCount(int* count) {
   if (!count) {
     return ErrorUnknown;
   }
 
+#if defined(FLAGOS_NATIVE_CUDA_CONTEXT)
+  if (cuDeviceGetCount(count) == CUDA_SUCCESS) return Success;
+#endif
   int cuda_count = 0;
   cudaError_t err = cudaGetDeviceCount(&cuda_count);
   if (err != cudaSuccess) {
@@ -44,11 +59,24 @@ Error_t GetDevice(int* device) {
     return ErrorUnknown;
   }
 
+#if defined(FLAGOS_NATIVE_CUDA_CONTEXT)
+  // The active driver context already carries the thread's device index.
+  // Let the runtime initialize or report the device on a new host thread.
+  if (cuCtxGetDevice(device) == CUDA_SUCCESS) {
+    return Success;
+  }
+#endif
   cudaError_t err = cudaGetDevice(device);
   return (err == cudaSuccess) ? Success : ErrorUnknown;
 }
 
 Error_t SetDevice(int device) {
+#if defined(FLAGOS_NATIVE_CUDA_CONTEXT) && defined(FLAGOS_ACCEL_PPU)
+  // The PPU runtime exposes a device ordinal even on an unbound thread.
+  // Only skip cudaSetDevice when the driver confirms a matching context.
+  if (HasCudaContextOnDevice(device)) return Success;
+#endif
+
   int count = 0;
   GetDeviceCount(&count);
 
@@ -63,6 +91,19 @@ Error_t SetDevice(int device) {
 
   return Success;
 }
+
+#if defined(FLAGOS_NATIVE_CUDA_CONTEXT)
+namespace c10::flagos {
+
+FLAGOS_EXPORT void SetCudaGuardDevice(int device) noexcept {
+  if (HasCudaContextOnDevice(device)) return;
+  // A fresh autograd worker may have a runtime device index but no context.
+  // The CUDA runtime establishes the context before the worker launches.
+  ::SetDevice(device);
+}
+
+}  // namespace c10::flagos
+#endif
 
 Error_t DeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority) {
   cudaError_t err = cudaDeviceGetStreamPriorityRange(leastPriority, greatestPriority);

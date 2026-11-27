@@ -46,7 +46,16 @@ with patch.dict(sys.modules, {"torch": SimpleNamespace(device=type("Device", (),
     _spec.loader.exec_module(metax)
 
 # Attribute ids the function reads, and the values this fake reports for them.
-_ATTRS = {16: 64, 10: 32, 39: 1024, 8: 49152, 81: 131072, 21: 8, 22: 0}
+_ATTRS = {
+    16: 64,
+    38: 8 * 1024 * 1024,
+    10: 32,
+    39: 1024,
+    8: 49152,
+    81: 131072,
+    21: 8,
+    22: 0,
+}
 
 
 class _Fn:
@@ -134,6 +143,7 @@ def test_probe_restores_the_device_it_found():
     assert runtime.current_device == 3
     assert props.total_memory == 8192
     assert props.name == "MetaX Fake"
+    assert props.L2_cache_size == 8 * 1024 * 1024
     assert runtime.meminfo_calls == 1
 
 

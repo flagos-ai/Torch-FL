@@ -172,6 +172,9 @@ class Dispatcher {
       case Backend::kHygon:
         hygon_fn_.store(fn, std::memory_order_release);
         break;
+      case Backend::kThead:
+        thead_fn_.store(fn, std::memory_order_release);
+        break;
       case Backend::kNvidia:
         nvidia_fn_.store(fn, std::memory_order_release);
         break;
@@ -198,6 +201,11 @@ class Dispatcher {
 
   template <typename... Args>
   decltype(auto) operator()(Args&&... args) const {
+    return DispatchWithFallback(nullptr, std::forward<Args>(args)...);
+  }
+
+  template <typename... Args>
+  decltype(auto) DispatchWithFallback(FnPtr fallback, Args&&... args) const {
     // Hot path: the op name is fixed (op_name_) and the backend routing is
     // immutable once the config is loaded, so resolve it once and cache. This
     // avoids constructing a std::string from op_name_ and hashing it in the
@@ -212,7 +220,10 @@ class Dispatcher {
     auto fn = ResolveFn(op_name_, *configured, backend, args...);
     LogDispatch(op_name_, backend);
 
-    if (!fn) ThrowIfForcedBackendMissing(op_name_, backend);
+    if (!fn) {
+      ThrowIfForcedBackendMissing(op_name_, backend);
+      fn = fallback;
+    }
 
     TORCH_CHECK(fn, op_name_, DispatchFailureMessage(backend));
     return fn(std::forward<Args>(args)...);
@@ -305,7 +316,7 @@ class Dispatcher {
       fn = DecodedFallbackFn(stay, backend);
       if (!fn) throw std::runtime_error(DecodedRefusalFor(route_key, backend));
     }
-    LogDispatch(route_key, backend);
+    LogDispatch(route_key.c_str(), backend);
     return fn;
   }
 
@@ -321,15 +332,14 @@ class Dispatcher {
   // key; the kernel is called with `args` alone.
   template <typename... Args>
   decltype(auto) DispatchAs(const char* op, Args&&... args) const {
-    const std::string op_name(op);
-    const auto& configured = GetBackendConfigForOp(op_name);
+    const auto& configured = GetBackendConfigForOp(op);
     auto backend = configured.backend;
-    auto fn = ResolveFn(op_name.c_str(), configured, backend, args...);
-    LogDispatch(op_name, backend);
+    auto fn = ResolveFn(op, configured, backend, args...);
+    LogDispatch(op, backend);
 
-    if (!fn) ThrowIfForcedBackendMissing(op_name, backend);
+    if (!fn) ThrowIfForcedBackendMissing(op, backend);
 
-    TORCH_CHECK(fn, op_name, DispatchFailureMessage(backend));
+    TORCH_CHECK(fn, op, DispatchFailureMessage(backend));
     return fn(std::forward<Args>(args)...);
   }
 
@@ -409,6 +419,7 @@ class Dispatcher {
       case Backend::kApple:         return apple_fn_;
       case Backend::kNvidia:        return nvidia_fn_.load(std::memory_order_acquire);
       case Backend::kHygon:         return hygon_fn_.load(std::memory_order_acquire);
+      case Backend::kThead:         return thead_fn_.load(std::memory_order_acquire);
       // TileOPs kernels live in Python and are bound via torch.library on
       // PrivateUse1, which intercepts before this dispatcher is reached. A conf
       // entry of "tileops" therefore only lands here when that registration did
@@ -478,10 +489,10 @@ class Dispatcher {
            "registered for";
   }
 
-  static void LogDispatch(const std::string& op_name, Backend backend) {
+  static void LogDispatch(const char* op_name, Backend backend) {
     static const bool enabled = LogEnabled("dispatch");
     if (!enabled) return;
-    fprintf(stderr, "[flagos dispatch] %s -> %s\n", op_name.c_str(),
+    fprintf(stderr, "[flagos dispatch] %s -> %s\n", op_name,
             BackendLogName(backend));
   }
 
@@ -503,6 +514,7 @@ class Dispatcher {
   FnPtr cambricon_fn_      = nullptr;
   FnPtr tileops_fn_        = nullptr;
   FnPtr apple_fn_          = nullptr;
+  std::atomic<FnPtr> thead_fn_{nullptr};
 };
 
 namespace detail {

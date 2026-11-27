@@ -57,8 +57,12 @@
 #include <cudnn.h>
 #include <cuda_runtime.h>
 #include "runtime/accelerator/iluvatar/iluvatar_context.h"
+#if defined(FLAGOS_NATIVE_HOSTS)
+#include "runtime/allocator/caching_device_allocator.h"
+#endif
 
 #include <cstdint>
+#include <dlfcn.h>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -155,36 +159,37 @@ inline void IluvatarSynchronizeStream(int device) {
   }
 }
 
-// The vendor handle, created once per device and bound to that device's current
-// stream on every call (a handle carries a stream, and the current stream can
-// change between ops, so rebinding each call is what keeps the handle on the
-// caller's stream rather than on whichever one existed at creation).
-//
-// Must be called with `device` already current -- IluvatarDeviceGuard does
-// that. Handles are never destroyed: destruction would have to run from a static
-// destructor whose ordering against the vendor runtime's own teardown is
-// unknown, and a process that exits without it reclaims the same memory one
-// instruction later (the same trade Kunlunxin's context cache and GCU's
-// EnsureTopsatenInit make).
+inline void IluvatarFinishMatrix(int device) {
+#if defined(FLAGOS_NATIVE_HOSTS)
+  const auto stream = GetCurrentStreamForDevice(device);
+  // The default stream orders operand storage and temporary copies with the
+  // BLAS submission. Its allocator pool does not reuse blocks on other queues.
+  if (stream && stream == GetDefaultStreamForDevice(device) &&
+      c10::flagos::CachingDeviceAllocator::is_enabled()) return;
+#endif
+  IluvatarSynchronizeStream(device);
+}
+
+// cuDNN handles carry a mutable stream, so a calling thread owns one
+// handle per device and binds its current stream before submitting an op.
 inline cudnnHandle_t GetCudnnHandle(int device) {
-  static std::mutex mutex;
-  static std::unordered_map<int, cudnnHandle_t> handles;
-  std::lock_guard<std::mutex> lock(mutex);
-  auto it = handles.find(device);
-  if (it == handles.end()) {
-    cudnnHandle_t handle = nullptr;
+  struct Handle {
+    cudnnHandle_t value = nullptr;
+    ~Handle() {
+      if (value) cudnnDestroy(value);
+    }
+  };
+  static thread_local std::unordered_map<int, Handle> handles;
+  auto& handle = handles[device].value;
+  if (!handle) {
     TORCH_CHECK(
         cudnnCreate(&handle) == CUDNN_STATUS_SUCCESS,
-        "iluvatar: cudnnCreate failed on device ",
-        device);
-    it = handles.emplace(device, handle).first;
+        "iluvatar: cudnnCreate failed on device ", device);
   }
   TORCH_CHECK(
-      cudnnSetStream(it->second, IluvatarCurrentStream(device)) ==
-          CUDNN_STATUS_SUCCESS,
-      "iluvatar: cudnnSetStream failed on device ",
-      device);
-  return it->second;
+      cudnnSetStream(handle, IluvatarCurrentStream(device)) == CUDNN_STATUS_SUCCESS,
+      "iluvatar: cudnnSetStream failed on device ", device);
+  return handle;
 }
 
 inline cublasHandle_t GetCublasHandle(int device) {
@@ -338,6 +343,20 @@ inline ixblasDataType_t IluvatarGemmComputeType(at::ScalarType type) {
     default:
       return ToBlasDataType(type);
   }
+}
+
+// Resolve the optional CoreX entry at runtime. Older runtimes can continue
+// using the individual GemmEx calls, and do not need a newer BLAS symbol.
+using StridedBatchedGemm = ixblasStatus_t (*)(
+    ixblasHandle_t, ixblasOperation_t, ixblasOperation_t, int, int, int,
+    const void*, const void*, ixblasDataType_t, int, long long,
+    const void*, ixblasDataType_t, int, long long, const void*, void*,
+    ixblasDataType_t, int, long long, int, ixblasDataType_t, ixblasGemmAlgo_t);
+
+inline StridedBatchedGemm GetStridedBatchedGemm() {
+  static const auto function = reinterpret_cast<StridedBatchedGemm>(
+      dlsym(RTLD_DEFAULT, "ixblasGemmStridedBatchedEx"));
+  return function;
 }
 
 // Scratch space for the ops that need it (conv forward queries

@@ -4,6 +4,8 @@
 // Host metadata and SDK calls only; numerical kernels belong to MACA BLAS.
 #pragma once
 
+#include "sdk_blas_layout.h"
+
 #include <ATen/ATen.h>
 #include <c10/core/DeviceGuard.h>
 #include <flagos.h>
@@ -11,7 +13,6 @@
 #include <mcr/mc_runtime.h>
 #include <dlfcn.h>
 
-#include <limits>
 #include <map>
 #include <memory>
 
@@ -20,12 +21,6 @@ namespace at::native::flagos::metax_precision {
 inline void Check(mcblasStatus_t status, const char* operation) {
   TORCH_CHECK(status == MCBLAS_STATUS_SUCCESS,
               "native MetaX ", operation, " failed: ", static_cast<int>(status));
-}
-
-inline int Dimension(int64_t value) {
-  TORCH_CHECK(value >= 0 && value <= std::numeric_limits<int>::max(),
-              "native MetaX BLAS dimension exceeds its integer ABI");
-  return static_cast<int>(value);
 }
 
 inline std::string LibraryOf(void* address) {
@@ -75,22 +70,6 @@ inline BlasState& State(const at::Tensor& input) {
   return *state;
 }
 
-struct Operand {
-  at::Tensor tensor;
-  mcblasOperation_t transpose;
-  int leading;
-};
-
-inline Operand Describe(at::Tensor value) {
-  const auto rows = value.size(-2), columns = value.size(-1);
-  if (value.stride(-1) == 1 && value.stride(-2) >= std::max<int64_t>(columns, 1))
-    return {value, MCBLAS_OP_N, Dimension(value.stride(-2))};
-  if (value.stride(-2) == 1 && value.stride(-1) >= std::max<int64_t>(rows, 1))
-    return {value, MCBLAS_OP_T, Dimension(value.stride(-1))};
-  value = value.contiguous();
-  return {value, MCBLAS_OP_N, Dimension(std::max<int64_t>(columns, 1))};
-}
-
 template <int Rank>
 at::Tensor Matrix(const at::Tensor& left, const at::Tensor& right) {
   TORCH_CHECK(left.dim() == Rank && right.dim() == Rank,
@@ -103,35 +82,31 @@ at::Tensor Matrix(const at::Tensor& left, const at::Tensor& right) {
   if constexpr (Rank == 3)
     TORCH_CHECK(left.size(0) == right.size(0), "native MetaX BLAS batch dimensions differ");
   c10::OptionalDeviceGuard guard(left.device());
-  const int m = Dimension(left.size(-2)), n = Dimension(right.size(-1));
-  const int k = Dimension(left.size(-1));
+  const int m = sdk_blas::Dimension(left.size(-2)), n = sdk_blas::Dimension(right.size(-1));
+  const int k = sdk_blas::Dimension(left.size(-1));
   auto sizes = left.sizes().vec();
   sizes.back() = n;
   auto output = at::empty(sizes, left.options());
   if (!output.numel()) return output;
   if (!k) return output.zero_();
-  auto a = Describe(right), b = Describe(left);
-  // C(row-major)^T = B^T A^T in the column-major SDK API. Preserve actual
-  // transpose and leading dimensions, including the vendor's degenerate cases.
-  if (a.transpose == MCBLAS_OP_N && k <= 1) a.leading = std::max(n, 1);
-  if (a.transpose == MCBLAS_OP_T && n <= 1) a.leading = std::max(k, 1);
-  if (b.transpose == MCBLAS_OP_N && m <= 1) b.leading = std::max(k, 1);
-  if (b.transpose == MCBLAS_OP_T && k <= 1) b.leading = std::max(m, 1);
+  const auto [a, b] = sdk_blas::ColumnMajorOperands(left, right, m, n, k);
+  const auto trans_a = a.transpose ? MCBLAS_OP_T : MCBLAS_OP_N;
+  const auto trans_b = b.transpose ? MCBLAS_OP_T : MCBLAS_OP_N;
   const int leading_output = std::max(n, 1);
   const float alpha = 1.0f, beta = 0.0f;
   auto& state = State(left);
   if constexpr (Rank == 2) {
-    Check(mcblasGemmEx(state.handle, a.transpose, b.transpose, n, m, k,
+    Check(mcblasGemmEx(state.handle, trans_a, trans_b, n, m, k,
           &alpha, a.tensor.data_ptr(), MACA_R_16BF, a.leading,
           b.tensor.data_ptr(), MACA_R_16BF, b.leading, &beta,
           output.data_ptr(), MACA_R_16BF, leading_output,
           MCBLAS_COMPUTE_32F, MCBLAS_GEMM_DEFAULT_TENSOR_OP), "mcblasGemmEx");
   } else {
-    Check(mcblasGemmStridedBatchedEx(state.handle, a.transpose, b.transpose, n, m, k,
+    Check(mcblasGemmStridedBatchedEx(state.handle, trans_a, trans_b, n, m, k,
           &alpha, a.tensor.data_ptr(), MACA_R_16BF, a.leading, a.tensor.stride(0),
           b.tensor.data_ptr(), MACA_R_16BF, b.leading, b.tensor.stride(0), &beta,
           output.data_ptr(), MACA_R_16BF, leading_output, output.stride(0),
-          Dimension(left.size(0)), MCBLAS_COMPUTE_32F,
+          sdk_blas::Dimension(left.size(0)), MCBLAS_COMPUTE_32F,
           MCBLAS_GEMM_DEFAULT_TENSOR_OP), "mcblasGemmStridedBatchedEx");
   }
   return output;

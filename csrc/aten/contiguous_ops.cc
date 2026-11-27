@@ -106,7 +106,9 @@ void copy_strided_via_host(
     const at::Tensor& result) {
   if (TryGemsDeviceCopy(self, result)) return;
   TORCH_CHECK(CpuFallbackAllowed(),
-              "native FlagGems hosts do not permit CPU fallback: device contiguous/clone");
+              "native FlagGems hosts do not permit CPU fallback: device contiguous/clone ",
+              self.scalar_type(), " sizes=", self.sizes(),
+              " strides=", self.strides(), " destination strides=", result.strides());
   size_t storage_size = self.storage().nbytes();
   at::Tensor storage_cpu = at::empty(
       {static_cast<int64_t>(storage_size)},
@@ -301,8 +303,7 @@ at::Tensor clone(
 #elif defined(USE_KUNLUNXIN)
   const bool copied_on_device = kunlunxin::StridedCopy(result, self);
 #elif defined(USE_CAMBRICON)
-  // No CNNL strided-copy kernel yet; the `copy_` fallback just below serves it.
-  const bool copied_on_device = false;
+  const bool copied_on_device = cambricon::StridedCopy(result, self);
 #else
   const bool copied_on_device = ascend::StridedCopy(result, self);
 #endif

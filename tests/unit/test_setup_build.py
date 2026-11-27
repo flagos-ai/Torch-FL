@@ -615,14 +615,30 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
 
 
 @pytest.mark.parametrize("inplace", [False, True])
-def test_metax_stages_one_config_and_restores_the_default(
-    monkeypatch, tmp_path, clean_kernel_env, inplace
+@pytest.mark.parametrize(
+    "vendor,route",
+    [
+        ("ascend", "mean.dim = ascend\n"),
+        ("cambricon", "add.Tensor = flaggems\n"),
+        ("cambricon", "add.Scalar = flaggems; Float,Half,BFloat16,Int:cambricon\n"),
+        ("metax", "bmm = flaggems; BFloat16:metax\n"),
+        ("metax", "_log_softmax = flaggems\n"),
+        ("thead", "bmm = flaggems; BFloat16:thead\n"),
+        ("thead", "mean.dim = flaggems\n"),
+        ("thead", "sum.dim_IntList = flaggems\n"),
+        ("thead", "silu_backward = flaggems\n"),
+    ],
+)
+def test_native_host_stages_one_config_and_restores_the_default(
+    monkeypatch, tmp_path, clean_kernel_env, inplace, vendor, route
 ):
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
+    monkeypatch.setenv("FLAGOS_BUILD_VENDOR", "1")
     namespace, kwargs = _load_setup(monkeypatch)
     write_record = namespace["_write_build_config"]
-    monkeypatch.setitem(write_record.__globals__, "FLAGOS_ACCELERATOR", "metax")
+    platform = namespace["_normalize_accelerator"](vendor)
+    monkeypatch.setitem(write_record.__globals__, "FLAGOS_ACCELERATOR", platform)
     monkeypatch.setitem(write_record.__globals__, "BASE_DIR", str(tmp_path))
     monkeypatch.setitem(write_record.__globals__, "_native_vendor_cohort", lambda: None)
     command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
@@ -630,31 +646,32 @@ def test_metax_stages_one_config_and_restores_the_default(
     command.inplace = inplace
 
     package = tmp_path / "torch_fl"
-    default = package / "configs/backends_metax.conf"
-    source = ROOT / "torch_fl/configs/backends_metax.conf"
+    default = package / f"configs/backends_{vendor}.conf"
+    source = ROOT / "torch_fl" / f"configs/backends_{vendor}.conf"
     ordinary = source.read_bytes()
     default.parent.mkdir(parents=True)
     default.write_bytes(ordinary)
     legacy = default.with_name("backends_metax_native_host.conf")
-    if not inplace:
+    if not inplace and vendor == "metax":
         legacy.touch()
 
     write_record(
-        _build_config("metax", "flaggems", "vendor", native_hosts=True),
+        _build_config(platform, "flaggems", "vendor", native_hosts=True),
         inplace=inplace,
     )
-    command._stage_metax_config(tmp_path, native=True)
+    command._stage_native_host_config(tmp_path, vendor, native=True)
     record = runpy.run_path(str(package / "_build_config.py"))
-    expected = "lib/backends_metax.conf" if inplace else "configs/backends_metax.conf"
+    directory = "lib" if inplace else "configs"
+    expected = f"{directory}/backends_{vendor}.conf"
     assert record["BACKEND_CONFIG"] == expected
     staged = package / expected
-    assert "bmm = flaggems; BFloat16:metax\n" in staged.read_text()
+    assert route in staged.read_text()
     assert source.read_bytes() == ordinary
     assert not legacy.exists()
 
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "0")
-    write_record(_build_config("metax", "flaggems"), inplace=inplace)
-    command._stage_metax_config(tmp_path, native=False)
+    write_record(_build_config(platform, "flaggems"), inplace=inplace)
+    command._stage_native_host_config(tmp_path, vendor, native=False)
     assert "BACKEND_CONFIG" not in runpy.run_path(str(package / "_build_config.py"))
     assert default.read_bytes() == ordinary
     if inplace:
@@ -683,9 +700,16 @@ def test_ordinary_wheel_clears_stale_native_host_stage(
     assert sorted(path.name for path in native.iterdir()) == ["load.py"]
 
 
-@pytest.mark.parametrize("vendor", ["cambricon", "tsingmicro"])
-def test_native_host_build_requires_a_validated_backend_adapter(
-    monkeypatch, clean_kernel_env, vendor
+@pytest.mark.parametrize(
+    "vendor, requirement, supported",
+    [
+        ("cambricon", "triton==3.4.0+mlu2.1.1", True),
+        ("tsingmicro", "flagtree==0.7.0+tsingmicro3.6", True),
+        ("drobotics", None, False),
+    ],
+)
+def test_native_host_build_selects_the_platform_launch_adapter(
+    monkeypatch, tmp_path, clean_kernel_env, vendor, requirement, supported
 ):
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
@@ -702,15 +726,24 @@ def test_native_host_build_requires_a_validated_backend_adapter(
         "FLAGOS_ACCELERATOR",
         vendor,
     )
+    calls = []
     monkeypatch.setattr(
-        subprocess,
-        "check_call",
-        lambda *args, **kwargs: pytest.fail("unvalidated backend reached the compiler"),
+        subprocess, "check_call", lambda command, **_: calls.append(command)
     )
     command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
     command.ensure_finalized()
-    with pytest.raises(RuntimeError, match="no validated native-host launch adapter"):
+    command.build_lib = str(tmp_path)
+    if supported:
+        assert requirement in namespace["_flagos_sibling_requires"]()
         command._build_native_hosts()
+        assert len(calls) == 1
+        assert calls[0][1].endswith("torch_fl/native_host/build.py")
+    else:
+        with pytest.raises(
+            RuntimeError, match="no validated native-host launch adapter"
+        ):
+            command._build_native_hosts()
+        assert not calls
 
 
 def test_native_vendor_records_the_verified_cohort(
@@ -724,7 +757,8 @@ def test_native_vendor_records_the_verified_cohort(
         "flag_gems": "5.4.0",
         "requirements": ["nvidia-cublas==13.1.0.3"],
     }
-    monkeypatch.setitem(globals_, "_native_vendor_cohort", lambda: (None, record))
+    cohort = SimpleNamespace(bundle_directory=lambda vendor: Path("lib"))
+    monkeypatch.setitem(globals_, "_native_vendor_cohort", lambda: (cohort, record))
     monkeypatch.setitem(globals_, "BASE_DIR", str(tmp_path))
     monkeypatch.setitem(
         sys.modules,
@@ -746,6 +780,7 @@ def test_native_vendor_records_the_verified_cohort(
     )
     assert manifest["build"]["vendor_torch_libraries"] is True
     assert manifest["build"]["vendor_torch_version"] == "2.10.0+cu130"
+    assert manifest["build"]["bundle_libdir"] == "lib"
     requirements = namespace["_install_requires"]()
     assert "torch==2.10.0+cpu" in requirements
     assert "flag_gems==5.4.0" in requirements

@@ -80,7 +80,7 @@ class MpsDeviceMemory final : public DeviceMemoryInterface {
   }
 
   Error_t event_create(Event_t* event) override {
-    return EventCreate(event);
+    return FlagosMPSAllocatorEventCreate(event);
   }
 
   Error_t event_destroy(Event_t event) override {
@@ -88,14 +88,11 @@ class MpsDeviceMemory final : public DeviceMemoryInterface {
   }
 
   Error_t event_record(Event_t event, Stream_t stream) override {
-    return EventRecord(event, stream);
+    return FlagosMPSAllocatorEventRecord(event, stream);
   }
 
   Error_t event_query(Event_t event) override {
-    // Must return ErrorNotReady (not a generic error) while the recorded signal
-    // is outstanding: the allocator's block-reuse path reads that value
-    // specifically. EventQuery already does.
-    return EventQuery(event);
+    return FlagosMPSAllocatorEventQuery(event);
   }
 
   Error_t memcpy(void* dst, const void* src, size_t count, MemcpyKind kind)

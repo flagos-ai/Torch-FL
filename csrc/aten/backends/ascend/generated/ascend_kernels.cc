@@ -10,7 +10,9 @@
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ATen.h>
+#include <array>
 #include <ATen/WrapDimUtils.h>
+#include <ATen/native/ReduceOpsUtils.h>
 #include <ATen/ops/_conj_native.h>
 #include <ATen/ops/_neg_view_native.h>
 #include <ATen/ops/diagonal_native.h>
@@ -57,6 +59,7 @@
 #include <ATen/ops/trunc.h>
 #include <c10/core/Scalar.h>
 #include <c10/core/DefaultDtype.h>
+#include <c10/util/SmallVector.h>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -64,6 +67,7 @@
 #include "../op_preparation.h"
 #include "../op_api_common.h"
 #include "../dtype_support.h"
+#include "../../../foreach_utils.h"
 #include "runtime/generator.h"
 
 namespace at::native::flagos {
@@ -406,7 +410,12 @@ at::Tensor BitwiseRightShiftTensorKernelAscend(const at::Tensor& self, const at:
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -434,8 +443,8 @@ at::Tensor BitwiseRightShiftTensorKernelAscend(const at::Tensor& self, const at:
   ascend::ExecAscendCached(
       "aclnnRightShift", "aclnnRightShiftGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   auto saturated = at::zeros_like(out);
@@ -460,7 +469,12 @@ at::Tensor BitwiseLeftShiftTensorKernelAscend(const at::Tensor& self, const at::
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -488,8 +502,8 @@ at::Tensor BitwiseLeftShiftTensorKernelAscend(const at::Tensor& self, const at::
   ascend::ExecAscendCached(
       "aclnnLeftShift", "aclnnLeftShiftGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   auto saturated = at::zeros_like(out);
@@ -890,8 +904,8 @@ at::Tensor SqrtKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnSqrt", "aclnnSqrtGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -924,8 +938,8 @@ at::Tensor ExpKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnExp", "aclnnExpGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -952,8 +966,8 @@ at::Tensor TanhKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnTanh", "aclnnTanhGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -980,8 +994,8 @@ at::Tensor SigmoidKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnSigmoid", "aclnnSigmoidGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1008,8 +1022,8 @@ at::Tensor ReciprocalKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnReciprocal", "aclnnReciprocalGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1036,8 +1050,8 @@ at::Tensor LogKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnLog", "aclnnLogGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1064,8 +1078,8 @@ at::Tensor FloorKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnFloor", "aclnnFloorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1092,8 +1106,8 @@ at::Tensor CeilKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnCeil", "aclnnCeilGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1120,8 +1134,8 @@ at::Tensor ErfKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnErf", "aclnnErfGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1148,8 +1162,8 @@ at::Tensor ErfcKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnErfc", "aclnnErfcGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1176,8 +1190,8 @@ at::Tensor Expm1KernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnExpm1", "aclnnExpm1GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1204,8 +1218,8 @@ at::Tensor Log2KernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnLog2", "aclnnLog2GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1232,8 +1246,8 @@ at::Tensor Log10KernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnLog10", "aclnnLog10GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1260,8 +1274,8 @@ at::Tensor Log1pKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnLog1p", "aclnnLog1pGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1288,8 +1302,8 @@ at::Tensor RoundKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnRound", "aclnnRoundGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1316,8 +1330,8 @@ at::Tensor TruncKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnTrunc", "aclnnTruncGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1344,8 +1358,8 @@ at::Tensor FracKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnFrac", "aclnnFracGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1372,8 +1386,8 @@ at::Tensor SignKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnSign", "aclnnSignGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1407,8 +1421,8 @@ at::Tensor SgnKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnSign", "aclnnSignGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1435,8 +1449,8 @@ at::Tensor ReluKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnRelu", "aclnnReluGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1463,8 +1477,8 @@ at::Tensor CoshKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnCosh", "aclnnCoshGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1491,8 +1505,8 @@ at::Tensor SinhKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnSinh", "aclnnSinhGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1519,8 +1533,8 @@ at::Tensor AsinKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnAsin", "aclnnAsinGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1547,8 +1561,8 @@ at::Tensor AtanKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnAtan", "aclnnAtanGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1575,8 +1589,8 @@ at::Tensor TanKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnTan", "aclnnTanGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1603,8 +1617,8 @@ at::Tensor AsinhKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnAsinh", "aclnnAsinhGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1631,8 +1645,8 @@ at::Tensor AcoshKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnAcosh", "aclnnAcoshGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1659,8 +1673,8 @@ at::Tensor AtanhKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnAtanh", "aclnnAtanhGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1687,8 +1701,8 @@ at::Tensor LogicalNotKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnLogicalNot", "aclnnLogicalNotGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1715,8 +1729,8 @@ at::Tensor BitwiseNotKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnBitwiseNot", "aclnnBitwiseNotGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1749,8 +1763,8 @@ at::Tensor AbsKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnAbs", "aclnnAbsGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1777,8 +1791,8 @@ at::Tensor AcosKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnAcos", "aclnnAcosGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1811,8 +1825,8 @@ at::Tensor CosKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnCos", "aclnnCosGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1845,8 +1859,8 @@ at::Tensor SinKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnSin", "aclnnSinGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1879,8 +1893,8 @@ at::Tensor NegKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnNeg", "aclnnNegGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1907,8 +1921,8 @@ at::Tensor RsqrtKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnRsqrt", "aclnnRsqrtGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1935,8 +1949,8 @@ at::Tensor SiluKernelAscend(const at::Tensor& self) {
   ascend::ExecAscendCached(
       "aclnnSilu", "aclnnSiluGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -1976,16 +1990,17 @@ at::Tensor DivTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
     // Match the vendor BF16 scalar path without rounding the scalar to BF16.
     auto scalar_dtype = self.scalar_type() == at::kBFloat16
         ? at::kFloat : self.scalar_type();
-    ascend::AclScalarWrapper acl_sc(sc, scalar_dtype);
+    std::optional<ascend::AclScalarWrapper> acl_sc;
     static void* sOpAddr = nullptr; static void* sWsAddr = nullptr;
     ascend::SigHasher hsh; hsh.tensor(self);
     { double sv = sc.toDouble(); hsh.val(sv); }
     ascend::ExecAscendCached(
         "aclnnDivs", "aclnnDivsGetWorkspaceSize", sOpAddr, sWsAddr, hsh.h,
         {&self}, {&out},
-        [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-            std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-          return gws(in[0].acl_tensor, acl_sc.get(), out_t[0].acl_tensor, pws, pex);
+        [&](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+            ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
+          acl_sc.emplace(sc, scalar_dtype);
+          return gws(in[0].acl_tensor, acl_sc->get(), out_t[0].acl_tensor, pws, pex);
         });
     return out;
   }
@@ -1996,7 +2011,12 @@ at::Tensor DivTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2016,8 +2036,8 @@ at::Tensor DivTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   ascend::ExecAscendCached(
       "aclnnDiv", "aclnnDivGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2054,16 +2074,17 @@ at::Tensor MulTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
     // Match the vendor BF16 scalar path without rounding the scalar to BF16.
     auto scalar_dtype = self.scalar_type() == at::kBFloat16
         ? at::kFloat : self.scalar_type();
-    ascend::AclScalarWrapper acl_sc(sc, scalar_dtype);
+    std::optional<ascend::AclScalarWrapper> acl_sc;
     static void* sOpAddr = nullptr; static void* sWsAddr = nullptr;
     ascend::SigHasher hsh; hsh.tensor(self);
     { double sv = sc.toDouble(); hsh.val(sv); }
     ascend::ExecAscendCached(
         "aclnnMuls", "aclnnMulsGetWorkspaceSize", sOpAddr, sWsAddr, hsh.h,
         {&self}, {&out},
-        [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-            std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-          return gws(in[0].acl_tensor, acl_sc.get(), out_t[0].acl_tensor, pws, pex);
+        [&](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+            ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
+          acl_sc.emplace(sc, scalar_dtype);
+          return gws(in[0].acl_tensor, acl_sc->get(), out_t[0].acl_tensor, pws, pex);
         });
     return out;
   }
@@ -2074,7 +2095,12 @@ at::Tensor MulTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2094,8 +2120,8 @@ at::Tensor MulTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   ascend::ExecAscendCached(
       "aclnnMul", "aclnnMulGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2116,7 +2142,12 @@ at::Tensor BitwiseAndTensorKernelAscend(const at::Tensor& self, const at::Tensor
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2136,8 +2167,8 @@ at::Tensor BitwiseAndTensorKernelAscend(const at::Tensor& self, const at::Tensor
   ascend::ExecAscendCached(
       "aclnnBitwiseAndTensor", "aclnnBitwiseAndTensorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2158,7 +2189,12 @@ at::Tensor PowTensorTensorKernelAscend(const at::Tensor& self, const at::Tensor&
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2178,8 +2214,8 @@ at::Tensor PowTensorTensorKernelAscend(const at::Tensor& self, const at::Tensor&
   ascend::ExecAscendCached(
       "aclnnPowTensorTensor", "aclnnPowTensorTensorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2200,7 +2236,12 @@ at::Tensor Atan2KernelAscend(const at::Tensor& self, const at::Tensor& other) {
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2220,8 +2261,8 @@ at::Tensor Atan2KernelAscend(const at::Tensor& self, const at::Tensor& other) {
   ascend::ExecAscendCached(
       "aclnnAtan2", "aclnnAtan2GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2242,7 +2283,12 @@ at::Tensor MaximumKernelAscend(const at::Tensor& self, const at::Tensor& other) 
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2262,8 +2308,8 @@ at::Tensor MaximumKernelAscend(const at::Tensor& self, const at::Tensor& other) 
   ascend::ExecAscendCached(
       "aclnnMaximum", "aclnnMaximumGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2284,7 +2330,12 @@ at::Tensor MinimumKernelAscend(const at::Tensor& self, const at::Tensor& other) 
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2304,8 +2355,8 @@ at::Tensor MinimumKernelAscend(const at::Tensor& self, const at::Tensor& other) 
   ascend::ExecAscendCached(
       "aclnnMinimum", "aclnnMinimumGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2326,7 +2377,12 @@ at::Tensor BitwiseOrTensorKernelAscend(const at::Tensor& self, const at::Tensor&
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2346,8 +2402,8 @@ at::Tensor BitwiseOrTensorKernelAscend(const at::Tensor& self, const at::Tensor&
   ascend::ExecAscendCached(
       "aclnnBitwiseOrTensor", "aclnnBitwiseOrTensorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2368,7 +2424,12 @@ at::Tensor BitwiseXorTensorKernelAscend(const at::Tensor& self, const at::Tensor
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2388,8 +2449,8 @@ at::Tensor BitwiseXorTensorKernelAscend(const at::Tensor& self, const at::Tensor
   ascend::ExecAscendCached(
       "aclnnBitwiseXorTensor", "aclnnBitwiseXorTensorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2424,17 +2485,18 @@ at::Tensor SubTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
     at::Scalar sc = other.item();
     auto out = ascend::OpPreparation::apply_tensor_without_format(
         self.sizes(), self.options());
-    ascend::AclScalarWrapper acl_sc(sc, self.scalar_type());
-    ascend::AclScalarWrapper acl_alpha_s(alpha, self.scalar_type());
+    std::optional<ascend::AclScalarWrapper> acl_sc, acl_alpha_s;
     static void* sOpAddr = nullptr; static void* sWsAddr = nullptr;
     ascend::SigHasher hsh; hsh.tensor(self);
     { double sv = sc.toDouble(); hsh.val(sv); double av = alpha.toDouble(); hsh.val(av); }
     ascend::ExecAscendCached(
         "aclnnSubs", "aclnnSubsGetWorkspaceSize", sOpAddr, sWsAddr, hsh.h,
         {&self}, {&out},
-        [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-            std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-          return gws(in[0].acl_tensor, acl_sc.get(), acl_alpha_s.get(), out_t[0].acl_tensor, pws, pex);
+        [&](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+            ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
+          acl_sc.emplace(sc, self.scalar_type());
+          acl_alpha_s.emplace(alpha, self.scalar_type());
+          return gws(in[0].acl_tensor, acl_sc->get(), acl_alpha_s->get(), out_t[0].acl_tensor, pws, pex);
         });
     return out;
   }
@@ -2445,7 +2507,12 @@ at::Tensor SubTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2458,18 +2525,18 @@ at::Tensor SubTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   const at::Tensor& other_b = other_c;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       out_shape, result_options);
-  ascend::AclScalarWrapper acl_alpha(alpha, result_dtype);
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self_b); hsh.tensor(other_b);
-  { double av = alpha.toDouble(); hsh.val(av); }
-  ascend::ExecAscendCached(
+  hsh.scalar(alpha);
+  ascend::ExecAscendCached<true>(
       "aclnnSub", "aclnnSubGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, in[1].acl_tensor, acl_alpha.get(), out_t[0].acl_tensor, pws, pex);
+      [alpha, result_dtype, acl_alpha = std::shared_ptr<ascend::AclScalarWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_alpha = std::make_shared<ascend::AclScalarWrapper>(alpha, result_dtype);
+        return gws(in[0].acl_tensor, in[1].acl_tensor, acl_alpha->get(), out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -2503,17 +2570,18 @@ at::Tensor AddTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
     at::Scalar sc = other.item();
     auto out = ascend::OpPreparation::apply_tensor_without_format(
         self.sizes(), self.options());
-    ascend::AclScalarWrapper acl_sc(sc, self.scalar_type());
-    ascend::AclScalarWrapper acl_alpha_s(alpha, self.scalar_type());
+    std::optional<ascend::AclScalarWrapper> acl_sc, acl_alpha_s;
     static void* sOpAddr = nullptr; static void* sWsAddr = nullptr;
     ascend::SigHasher hsh; hsh.tensor(self);
     { double sv = sc.toDouble(); hsh.val(sv); double av = alpha.toDouble(); hsh.val(av); }
     ascend::ExecAscendCached(
         "aclnnAdds", "aclnnAddsGetWorkspaceSize", sOpAddr, sWsAddr, hsh.h,
         {&self}, {&out},
-        [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-            std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-          return gws(in[0].acl_tensor, acl_sc.get(), acl_alpha_s.get(), out_t[0].acl_tensor, pws, pex);
+        [&](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+            ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
+          acl_sc.emplace(sc, self.scalar_type());
+          acl_alpha_s.emplace(alpha, self.scalar_type());
+          return gws(in[0].acl_tensor, acl_sc->get(), acl_alpha_s->get(), out_t[0].acl_tensor, pws, pex);
         });
     return out;
   }
@@ -2524,7 +2592,12 @@ at::Tensor AddTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2537,18 +2610,18 @@ at::Tensor AddTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   const at::Tensor& other_b = other_c;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       out_shape, result_options);
-  ascend::AclScalarWrapper acl_alpha(alpha, result_dtype);
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self_b); hsh.tensor(other_b);
-  { double av = alpha.toDouble(); hsh.val(av); }
-  ascend::ExecAscendCached(
+  hsh.scalar(alpha);
+  ascend::ExecAscendCached<true>(
       "aclnnAdd", "aclnnAddGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, in[1].acl_tensor, acl_alpha.get(), out_t[0].acl_tensor, pws, pex);
+      [alpha, result_dtype, acl_alpha = std::shared_ptr<ascend::AclScalarWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_alpha = std::make_shared<ascend::AclScalarWrapper>(alpha, result_dtype);
+        return gws(in[0].acl_tensor, in[1].acl_tensor, acl_alpha->get(), out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -2690,7 +2763,12 @@ at::Tensor EqTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2710,8 +2788,8 @@ at::Tensor EqTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
   ascend::ExecAscendCached(
       "aclnnEqTensor", "aclnnEqTensorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2732,7 +2810,12 @@ at::Tensor NeTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2752,8 +2835,8 @@ at::Tensor NeTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
   ascend::ExecAscendCached(
       "aclnnNeTensor", "aclnnNeTensorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2774,7 +2857,12 @@ at::Tensor GtTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2794,8 +2882,8 @@ at::Tensor GtTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
   ascend::ExecAscendCached(
       "aclnnGtTensor", "aclnnGtTensorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2816,7 +2904,12 @@ at::Tensor LtTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2836,8 +2929,8 @@ at::Tensor LtTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
   ascend::ExecAscendCached(
       "aclnnLtTensor", "aclnnLtTensorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2858,7 +2951,12 @@ at::Tensor GeTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2878,8 +2976,8 @@ at::Tensor GeTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
   ascend::ExecAscendCached(
       "aclnnGeTensor", "aclnnGeTensorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2900,7 +2998,12 @@ at::Tensor LogicalAndKernelAscend(const at::Tensor& self, const at::Tensor& othe
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2920,8 +3023,8 @@ at::Tensor LogicalAndKernelAscend(const at::Tensor& self, const at::Tensor& othe
   ascend::ExecAscendCached(
       "aclnnLogicalAnd", "aclnnLogicalAndGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -2942,7 +3045,12 @@ at::Tensor LogicalOrKernelAscend(const at::Tensor& self, const at::Tensor& other
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -2962,8 +3070,8 @@ at::Tensor LogicalOrKernelAscend(const at::Tensor& self, const at::Tensor& other
   ascend::ExecAscendCached(
       "aclnnLogicalOr", "aclnnLogicalOrGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -3340,18 +3448,18 @@ at::Tensor LeakyReluKernelAscend(const at::Tensor& self, const at::Scalar& s) {
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
-  ascend::AclScalarWrapper acl_s(s, self.scalar_type());
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self);
-  { double sv = s.toDouble(); hsh.val(sv); }
-  ascend::ExecAscendCached(
+  hsh.scalar(s);
+  ascend::ExecAscendCached<true>(
       "aclnnLeakyRelu", "aclnnLeakyReluGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, acl_s.get(), out_t[0].acl_tensor, pws, pex);
+      [s, input_dtype = self.scalar_type(), acl_s = std::shared_ptr<ascend::AclScalarWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_s = std::make_shared<ascend::AclScalarWrapper>(s, input_dtype);
+        return gws(in[0].acl_tensor, acl_s->get(), out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -3366,18 +3474,18 @@ at::Tensor ClampMinKernelAscend(const at::Tensor& self, const at::Scalar& s) {
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
-  ascend::AclScalarWrapper acl_s(s, self.scalar_type());
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self);
-  { double sv = s.toDouble(); hsh.val(sv); }
-  ascend::ExecAscendCached(
+  hsh.scalar(s);
+  ascend::ExecAscendCached<true>(
       "aclnnClampMin", "aclnnClampMinGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, acl_s.get(), out_t[0].acl_tensor, pws, pex);
+      [s, input_dtype = self.scalar_type(), acl_s = std::shared_ptr<ascend::AclScalarWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_s = std::make_shared<ascend::AclScalarWrapper>(s, input_dtype);
+        return gws(in[0].acl_tensor, acl_s->get(), out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -3392,18 +3500,18 @@ at::Tensor ClampMaxKernelAscend(const at::Tensor& self, const at::Scalar& s) {
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
-  ascend::AclScalarWrapper acl_s(s, self.scalar_type());
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self);
-  { double sv = s.toDouble(); hsh.val(sv); }
-  ascend::ExecAscendCached(
+  hsh.scalar(s);
+  ascend::ExecAscendCached<true>(
       "aclnnClampMax", "aclnnClampMaxGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, acl_s.get(), out_t[0].acl_tensor, pws, pex);
+      [s, input_dtype = self.scalar_type(), acl_s = std::shared_ptr<ascend::AclScalarWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_s = std::make_shared<ascend::AclScalarWrapper>(s, input_dtype);
+        return gws(in[0].acl_tensor, acl_s->get(), out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -3418,18 +3526,18 @@ at::Tensor FmodScalarKernelAscend(const at::Tensor& self, const at::Scalar& s) {
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
-  ascend::AclScalarWrapper acl_s(s, self.scalar_type());
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self);
-  { double sv = s.toDouble(); hsh.val(sv); }
-  ascend::ExecAscendCached(
+  hsh.scalar(s);
+  ascend::ExecAscendCached<true>(
       "aclnnFmodScalar", "aclnnFmodScalarGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, acl_s.get(), out_t[0].acl_tensor, pws, pex);
+      [s, input_dtype = self.scalar_type(), acl_s = std::shared_ptr<ascend::AclScalarWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_s = std::make_shared<ascend::AclScalarWrapper>(s, input_dtype);
+        return gws(in[0].acl_tensor, acl_s->get(), out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -3480,18 +3588,18 @@ at::Tensor PowTensorScalarKernelAscend(const at::Tensor& self, const at::Scalar&
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
-  ascend::AclScalarWrapper acl_s(s, self.scalar_type());
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self);
-  { double sv = s.toDouble(); hsh.val(sv); }
-  ascend::ExecAscendCached(
+  hsh.scalar(s);
+  ascend::ExecAscendCached<true>(
       "aclnnPowTensorScalar", "aclnnPowTensorScalarGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, acl_s.get(), out_t[0].acl_tensor, pws, pex);
+      [s, input_dtype = self.scalar_type(), acl_s = std::shared_ptr<ascend::AclScalarWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_s = std::make_shared<ascend::AclScalarWrapper>(s, input_dtype);
+        return gws(in[0].acl_tensor, acl_s->get(), out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -3678,7 +3786,12 @@ at::Tensor FmodTensorKernelAscend(const at::Tensor& self, const at::Tensor& othe
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -3698,8 +3811,8 @@ at::Tensor FmodTensorKernelAscend(const at::Tensor& self, const at::Tensor& othe
   ascend::ExecAscendCached(
       "aclnnFmodTensor", "aclnnFmodTensorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -3720,7 +3833,12 @@ at::Tensor FloorDivideKernelAscend(const at::Tensor& self, const at::Tensor& oth
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -3740,8 +3858,8 @@ at::Tensor FloorDivideKernelAscend(const at::Tensor& self, const at::Tensor& oth
   ascend::ExecAscendCached(
       "aclnnFloorDivide", "aclnnFloorDivideGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -3762,7 +3880,12 @@ at::Tensor LogicalXorKernelAscend(const at::Tensor& self, const at::Tensor& othe
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -3782,8 +3905,8 @@ at::Tensor LogicalXorKernelAscend(const at::Tensor& self, const at::Tensor& othe
   ascend::ExecAscendCached(
       "aclnnLogicalXor", "aclnnLogicalXorGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -4000,7 +4123,12 @@ at::Tensor PrivPreluKernelKernelAscend(const at::Tensor& self, const at::Tensor&
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
       : other.to(self.options().dtype(result_dtype));
-  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto out_shape = self_c.sizes();
+  at::DimVector broadcast_shape;
+  if (out_shape != other_c.sizes()) {
+    broadcast_shape = at::infer_size_dimvector(out_shape, other_c.sizes());
+    out_shape = broadcast_shape;
+  }
   auto result_options = self.options().dtype(result_dtype);
   // aclnn binary ops broadcast and honor strides internally (verified), so we
   // pass self/other_c straight through instead of expand().contiguous(). This
@@ -4020,8 +4148,8 @@ at::Tensor PrivPreluKernelKernelAscend(const at::Tensor& self, const at::Tensor&
   ascend::ExecAscendCached(
       "aclnnPrelu", "aclnnPreluGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self_b, &other_b}, {&out},
-      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+         ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -4143,6 +4271,40 @@ REGISTER_IMPL_TO_DISPATCHER(MaxDimFn, max_dim_dispatcher, Backend::kAscend, MaxD
 
 REGISTER_IMPL_TO_DISPATCHER(MinDimFn, min_dim_dispatcher, Backend::kAscend, MinDimKernelAscend)
 
+at::Tensor ArgmaxKernelAscend(const at::Tensor& self, std::optional<int64_t> dim, bool keepdim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  if (self.scalar_type() != at::kFloat && self.scalar_type() != at::kHalf) {
+    return argmax_dispatcher.DispatchBackend(Backend::kFlagGems, self, dim, keepdim);
+  }
+  auto options = self.options().dtype(at::kLong);
+  if (!self.dim()) {
+    if (dim) c10::maybe_wrap_dim(*dim, self.dim());
+    return at::zeros({}, options);
+  }
+  if (!dim) TORCH_CHECK(self.numel(), "argmax: an empty tensor requires a dimension");
+  const auto input = dim ? self : self.reshape({-1});
+  const auto axis = c10::maybe_wrap_dim(dim.value_or(0), input.dim());
+  TORCH_CHECK_INDEX(input.size(axis), "argmax: expected a non-empty reduction dimension");
+  auto shape = input.sizes().vec();
+  if (keepdim) shape[axis] = 1;
+  else shape.erase(shape.begin() + axis);
+  auto out = ascend::OpPreparation::apply_tensor_without_format(shape, options);
+  if (out.numel()) {
+    ascend::AclTensorWrapper in(input), result(out);
+    EXEC_ASCEND_CMD_SIG(aclnnArgMax,
+        (const aclTensor*, int64_t, bool, aclTensor*, uint64_t*, aclOpExecutor**),
+        in.get(), axis, keepdim, result.acl_tensor);
+  }
+  if (!dim && keepdim) return out.reshape(c10::SmallVector<int64_t, 8>(self.dim(), 1));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ArgmaxFn, argmax_dispatcher, Backend::kAscend, ArgmaxKernelAscend)
+
 at::Tensor CeluKernelAscend(const at::Tensor& self, const at::Scalar& s) {
   // Issue #326: make the primary tensor's device current, so the
   // workspace, launch stream and executor cache below all agree on it.
@@ -4151,18 +4313,18 @@ at::Tensor CeluKernelAscend(const at::Tensor& self, const at::Scalar& s) {
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
-  ascend::AclScalarWrapper acl_s(s, self.scalar_type());
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self);
-  { double sv = s.toDouble(); hsh.val(sv); }
-  ascend::ExecAscendCached(
+  hsh.scalar(s);
+  ascend::ExecAscendCached<true>(
       "aclnnCelu", "aclnnCeluGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, acl_s.get(), out_t[0].acl_tensor, pws, pex);
+      [s, input_dtype = self.scalar_type(), acl_s = std::shared_ptr<ascend::AclScalarWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_s = std::make_shared<ascend::AclScalarWrapper>(s, input_dtype);
+        return gws(in[0].acl_tensor, acl_s->get(), out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -4177,18 +4339,18 @@ at::Tensor SoftshrinkKernelAscend(const at::Tensor& self, const at::Scalar& s) {
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
-  ascend::AclScalarWrapper acl_s(s, self.scalar_type());
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self);
-  { double sv = s.toDouble(); hsh.val(sv); }
-  ascend::ExecAscendCached(
+  hsh.scalar(s);
+  ascend::ExecAscendCached<true>(
       "aclnnSoftshrink", "aclnnSoftshrinkGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, acl_s.get(), out_t[0].acl_tensor, pws, pex);
+      [s, input_dtype = self.scalar_type(), acl_s = std::shared_ptr<ascend::AclScalarWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_s = std::make_shared<ascend::AclScalarWrapper>(s, input_dtype);
+        return gws(in[0].acl_tensor, acl_s->get(), out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -4203,18 +4365,18 @@ at::Tensor HardshrinkKernelAscend(const at::Tensor& self, const at::Scalar& s) {
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
-  ascend::AclScalarWrapper acl_s(s, self.scalar_type());
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
   ascend::SigHasher hsh; hsh.tensor(self);
-  { double sv = s.toDouble(); hsh.val(sv); }
-  ascend::ExecAscendCached(
+  hsh.scalar(s);
+  ascend::ExecAscendCached<true>(
       "aclnnHardshrink", "aclnnHardshrinkGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, acl_s.get(), out_t[0].acl_tensor, pws, pex);
+      [s, input_dtype = self.scalar_type(), acl_s = std::shared_ptr<ascend::AclScalarWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_s = std::make_shared<ascend::AclScalarWrapper>(s, input_dtype);
+        return gws(in[0].acl_tensor, acl_s->get(), out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -4548,18 +4710,17 @@ at::Tensor CatKernelAscend(const at::ITensorListRef& tensors, int64_t dim) {
 
   namespace ascend = at::native::flagos::ascend;
 
-  auto materialized = tensors.materialize();
-  TORCH_CHECK(!materialized.empty(), "cat: expected a non-empty list of tensors");
+  TORCH_CHECK(!tensors.empty(), "cat: expected a non-empty list of tensors");
 
-  std::vector<at::Tensor> valid_tensors;
-  for (const auto& t : materialized) {
-    if (t.get().numel() > 0) {
-      valid_tensors.push_back(t.get());
+  c10::SmallVector<at::Tensor, 4> valid_tensors;
+  for (const auto& t : tensors) {
+    if (t.numel() > 0) {
+      valid_tensors.push_back(t);
     }
   }
 
   if (valid_tensors.empty()) {
-    return materialized[0].get().clone();
+    return (*tensors.begin()).clone();
   }
   if (valid_tensors.size() == 1) {
     return valid_tensors[0].clone();
@@ -4569,7 +4730,7 @@ at::Tensor CatKernelAscend(const at::ITensorListRef& tensors, int64_t dim) {
   auto ndim = first.dim();
   if (dim < 0) dim += ndim;
 
-  std::vector<int64_t> out_sizes(first.sizes().begin(), first.sizes().end());
+  c10::SmallVector<int64_t, 8> out_sizes(first.sizes().begin(), first.sizes().end());
   for (size_t i = 1; i < valid_tensors.size(); ++i) {
     out_sizes[dim] += valid_tensors[i].size(dim);
   }
@@ -4577,13 +4738,35 @@ at::Tensor CatKernelAscend(const at::ITensorListRef& tensors, int64_t dim) {
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       out_sizes, first.options());
 
-  std::vector<ascend::AclTensorWrapper> wrappers;
+#if defined(FLAGOS_NATIVE_HOSTS)
+  if (valid_tensors.size() == 2) {
+    static void* opApiFuncAddr = nullptr;
+    static void* getWsFuncAddr = nullptr;
+    ascend::SigHasher hash;
+    hash.val(dim);
+    hash.tensor(valid_tensors[0]);
+    hash.tensor(valid_tensors[1]);
+    ascend::ExecAscendCached<true>(
+        "aclnnCat", "aclnnCatGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hash.h,
+        {&valid_tensors[0], &valid_tensors[1]}, {&out},
+        [dim, list = std::array<const aclTensor*, 2>{}](
+            ascend::GwsFunc gws, ascend::AclTensorArgs& in, ascend::AclTensorArgs& out_t,
+            uint64_t* workspace, aclOpExecutor** executor) mutable {
+          list = {in[0].get(), in[1].get()};
+          auto* tensors = aclCreateTensorList(list.data(), list.size());
+          return gws(tensors, dim, out_t[0].get(), workspace, executor);
+        });
+    return out;
+  }
+#endif
+
+  c10::SmallVector<ascend::AclTensorWrapper, 4> wrappers;
   wrappers.reserve(valid_tensors.size());
   for (auto& t : valid_tensors) {
     wrappers.emplace_back(t);
   }
 
-  std::vector<const aclTensor*> acl_tensors;
+  c10::SmallVector<const aclTensor*, 4> acl_tensors;
   acl_tensors.reserve(valid_tensors.size());
   for (auto& w : wrappers) {
     acl_tensors.push_back(w.get());
@@ -7046,6 +7229,7 @@ void ForeachMulInplaceScalarKernelAscend(at::TensorList self, const at::Scalar& 
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachMulInplaceScalarKernelAscendChunk(self.slice(off, n), scalar);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7089,6 +7273,7 @@ void ForeachAddInplaceScalarKernelAscend(at::TensorList self, const at::Scalar& 
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachAddInplaceScalarKernelAscendChunk(self.slice(off, n), scalar);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7157,6 +7342,7 @@ void ForeachLerpInplaceScalarKernelAscend(at::TensorList self, at::TensorList te
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachLerpInplaceScalarKernelAscendChunk(self.slice(off, n), tensors1.slice(off, n), weight);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7212,6 +7398,7 @@ void ForeachAddcmulInplaceScalarKernelAscend(at::TensorList self, at::TensorList
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachAddcmulInplaceScalarKernelAscendChunk(self.slice(off, n), tensor1.slice(off, n), tensor2.slice(off, n), value);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7310,6 +7497,7 @@ void ForeachDivInplaceScalarlistKernelAscend(at::TensorList self, at::ArrayRef<a
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachDivInplaceScalarlistKernelAscendChunk(self.slice(off, n), scalars.slice(off, n));
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7337,6 +7525,42 @@ static void ForeachAddcdivInplaceScalarlistKernelAscendChunk(at::TensorList self
   aclTensorList* self_list = aclCreateTensorList(self_ptrs.data(), self_ptrs.size());
   aclTensorList* t1_list = aclCreateTensorList(t1_ptrs.data(), t1_ptrs.size());
   aclTensorList* t2_list = aclCreateTensorList(t2_ptrs.data(), t2_ptrs.size());
+
+#if defined(FLAGOS_NATIVE_HOSTS)
+  if (self.front().scalar_type() == at::kBFloat16 && scalars.front().isFloatingPoint()) {
+    // Match the BF16 rounding of the scalar-list input while using the
+    // FP32 scalar descriptor supported by CANN for BF16 tensors.
+    const auto value = scalars.front().toDouble();
+    if (std::isfinite(value) && value != 0.0 &&
+        std::all_of(scalars.begin(), scalars.end(), [value](const at::Scalar& scalar) {
+          return scalar.isFloatingPoint() && scalar.toDouble() == value;
+        })) {
+      bool dense = true;
+      for (size_t i = 0; i < self.size() && dense; ++i) {
+        for (const auto* tensor : {&self[i], &tensor1[i], &tensor2[i]}) {
+          dense &= tensor->device() == self.front().device() &&
+              tensor->scalar_type() == at::kBFloat16 && tensor->is_contiguous() &&
+              tensor->numel() > 0 && tensor->dim() <= 8 &&
+              tensor->sizes() == self[i].sizes();
+        }
+      }
+      static const bool scalar_v2_available = [] {
+        void* launch = nullptr;
+        void* workspace = nullptr;
+        ascend::GetApiFunc("aclnnForeachAddcdivScalarV2",
+            "aclnnForeachAddcdivScalarV2GetWorkspaceSize", launch, workspace);
+        return launch && workspace;
+      }();
+      if (dense && scalar_v2_available) {
+        const auto rounded = scalars.front().to<at::BFloat16>();
+        ascend::AclScalarWrapper scalar(static_cast<float>(rounded), at::kFloat);
+        EXEC_ASCEND_CMD(aclnnForeachAddcdivScalarV2,
+            self_list, t1_list, t2_list, scalar.get(), self_list);
+        return;
+      }
+    }
+  }
+#endif
 
   // aclnnForeachAddcdivScalarList's "scalars" param is a plain device aclTensor
   // (1-D, one element per list entry), NOT an aclScalarList -- unlike div's
@@ -7381,6 +7605,7 @@ void ForeachAddcdivInplaceScalarlistKernelAscend(at::TensorList self, at::Tensor
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachAddcdivInplaceScalarlistKernelAscendChunk(self.slice(off, n), tensor1.slice(off, n), tensor2.slice(off, n),
         scalars.slice(off, n));
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7477,6 +7702,7 @@ void ForeachClampMinInplaceScalarKernelAscend(at::TensorList self, const at::Sca
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachClampMinInplaceScalarKernelAscendChunk(self.slice(off, n), scalar);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7518,6 +7744,7 @@ void ForeachClampMaxInplaceScalarKernelAscend(at::TensorList self, const at::Sca
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachClampMaxInplaceScalarKernelAscendChunk(self.slice(off, n), scalar);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7616,6 +7843,7 @@ void ForeachMulInplaceTensorKernelAscend(at::TensorList self, const at::Tensor& 
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
     ForeachMulInplaceTensorKernelAscendChunk(self.slice(off, n), other);
+    BumpForeachVersions(self.slice(off, n));
   }
 }
 
@@ -7994,8 +8222,8 @@ at::Tensor PrivSoftmaxKernelAscend(const at::Tensor& self, int64_t dim, bool hal
   ascend::ExecAscendCached(
       "aclnnSoftmax", "aclnnSoftmaxGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+      [&](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
         return gws(in[0].acl_tensor, dim, out_t[0].acl_tensor, pws, pex);
       });
   return out;
@@ -8071,26 +8299,19 @@ at::Tensor SumDimIntlistKernelAscend(const at::Tensor& self, at::OptionalIntArra
       ? dtype.value()
       : (c10::isIntegralType(self.scalar_type(), /*includeBool=*/true)
              ? at::kLong : self.scalar_type());
-  int64_t ndim = self.dim();
-  std::vector<int64_t> norm_dims;
-  if (dim.has_value() && !dim.value().empty()) {
+  const int64_t ndim = self.dim();
+  const auto dim_mask = at::native::make_dim_mask(dim, ndim);
+  c10::SmallVector<int64_t, 8> norm_dims;
+  if (ndim != 0 && dim.has_value() && !dim.value().empty()) {
     for (int64_t d : dim.value()) norm_dims.push_back(d < 0 ? d + ndim : d);
   } else {
     for (int64_t d = 0; d < ndim; ++d) norm_dims.push_back(d);
   }
-  auto out_shape = self.sizes().vec();
-  std::vector<int64_t> sorted_dims(norm_dims);
-  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
-  for (int64_t d : sorted_dims) {
-    if (keepdim) out_shape[d] = 1;
-    else out_shape.erase(out_shape.begin() + d);
-  }
+  const auto out_shape = at::native::shape_from_dim_mask(self, dim_mask, keepdim);
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       out_shape, self.options().dtype(out_dtype));
-  ascend::AclTensorWrapper acl_self(self);
-  ascend::AclTensorWrapper acl_out(out);
-  ascend::AclIntArrayWrapper acl_dim(norm_dims);
   aclDataType acl_dtype = ascend::ToAclDataType(out_dtype);
+  std::optional<ascend::AclIntArrayWrapper> acl_dim;
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
@@ -8101,9 +8322,10 @@ at::Tensor SumDimIntlistKernelAscend(const at::Tensor& self, at::OptionalIntArra
   ascend::ExecAscendCached(
       "aclnnReduceSum", "aclnnReduceSumGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, acl_dim.get(), keepdim, acl_dtype, out_t[0].acl_tensor, pws, pex);
+      [&](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) {
+        acl_dim.emplace(norm_dims);
+        return gws(in[0].acl_tensor, acl_dim->get(), keepdim, acl_dtype, out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }
@@ -8188,26 +8410,18 @@ at::Tensor MeanDimKernelAscend(const at::Tensor& self, at::OptionalIntArrayRef d
       ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_dtype = dtype.has_value() ? dtype.value() : self.scalar_type();
-  int64_t ndim = self.dim();
-  std::vector<int64_t> norm_dims;
-  if (dim.has_value() && !dim.value().empty()) {
+  const int64_t ndim = self.dim();
+  const auto dim_mask = at::native::make_dim_mask(dim, ndim);
+  c10::SmallVector<int64_t, 8> norm_dims;
+  if (ndim != 0 && dim.has_value() && !dim.value().empty()) {
     for (int64_t d : dim.value()) norm_dims.push_back(d < 0 ? d + ndim : d);
   } else {
     for (int64_t d = 0; d < ndim; ++d) norm_dims.push_back(d);
   }
-  auto out_shape = self.sizes().vec();
-  std::vector<int64_t> sorted_dims(norm_dims);
-  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
-  for (int64_t d : sorted_dims) {
-    if (keepdim) out_shape[d] = 1;
-    else out_shape.erase(out_shape.begin() + d);
-  }
+  const auto out_shape = at::native::shape_from_dim_mask(self, dim_mask, keepdim);
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       out_shape, self.options().dtype(out_dtype));
-  ascend::AclTensorWrapper acl_self(self);
-  ascend::AclTensorWrapper acl_out(out);
-  ascend::AclIntArrayWrapper acl_dim(norm_dims);
-  auto acl_dtype = static_cast<int32_t>(ascend::ToAclDataType(out_dtype));
+  const auto acl_dtype = ascend::ToAclDataType(out_dtype);
 
   static void* opApiFuncAddr = nullptr;
   static void* getWsFuncAddr = nullptr;
@@ -8215,12 +8429,18 @@ at::Tensor MeanDimKernelAscend(const at::Tensor& self, at::OptionalIntArrayRef d
   for (int64_t d : norm_dims) hsh.val(d);
   hsh.val(keepdim);
   hsh.val(acl_dtype);
-  ascend::ExecAscendCached(
-      "aclnnMeanV2", "aclnnMeanV2GetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
+  ascend::ExecAscendCached<true>(
+      "aclnnMean", "aclnnMeanGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
       {&self}, {&out},
-      [&](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
-          std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
-        return gws(in[0].acl_tensor, acl_dim.get(), keepdim, acl_dtype, out_t[0].acl_tensor, pws, pex);
+      [dims = std::move(norm_dims), keepdim, acl_dtype,
+       acl_dim = std::shared_ptr<ascend::AclIntArrayWrapper>{}](ascend::GwsFunc gws, ascend::AclTensorArgs& in,
+          ascend::AclTensorArgs& out_t, uint64_t* pws, aclOpExecutor** pex) mutable {
+        acl_dim = std::make_shared<ascend::AclIntArrayWrapper>(dims);
+        using GetWorkspaceSize = int (*)(const aclTensor*, const aclIntArray*, bool,
+                                         aclDataType, aclTensor*, uint64_t*, aclOpExecutor**);
+        auto prepare = reinterpret_cast<GetWorkspaceSize>(gws);
+        return prepare(in[0].get(), acl_dim->get(), keepdim, acl_dtype,
+                       out_t[0].acl_tensor, pws, pex);
       });
   return out;
 }

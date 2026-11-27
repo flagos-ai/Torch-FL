@@ -789,9 +789,18 @@ def build_deps(*, inplace=False):
     return build_config
 
 
-def _metax_config_path(inplace: bool) -> Path:
+_NATIVE_HOST_CONFIG_VENDORS = (
+    "ascend",
+    "cambricon",
+    "iluvatar",
+    "metax",
+    "thead",
+)
+
+
+def _native_host_config_path(vendor: str, inplace: bool) -> Path:
     # Leave the checked-in default intact for an in-place build.
-    return Path("lib" if inplace else "configs") / "backends_metax.conf"
+    return Path("lib" if inplace else "configs") / f"backends_{vendor}.conf"
 
 
 def _write_build_config(build_config: dict, *, inplace=False) -> None:
@@ -812,8 +821,9 @@ def _write_build_config(build_config: dict, *, inplace=False) -> None:
         f"NATIVE_HOSTS = {native_hosts}\n"
         f"NATIVE_VENDOR = {_native_vendor_cohort() is not None}\n"
     )
-    if native_hosts and platform == "metax":
-        content += f"BACKEND_CONFIG = {_metax_config_path(inplace).as_posix()!r}\n"
+    if native_hosts and vendor in _NATIVE_HOST_CONFIG_VENDORS:
+        path_value = _native_host_config_path(vendor, inplace).as_posix()
+        content += f"BACKEND_CONFIG = {path_value!r}\n"
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
@@ -845,8 +855,8 @@ def _write_compatibility_manifest(wheel_version: str, build_config: dict) -> Non
         wheel_version=wheel_version,
         kernels=build_config["kernels"],
         bundle_libdir=(
-            "native_host/_generated/metax_vendor"
-            if native_vendor is not None and platform == "metax"
+            native_vendor[0].bundle_directory(build_config["vendor"]).as_posix()
+            if native_vendor is not None
             else bundle_libdir
         ),
         vendor_torch_libraries=native_vendor is not None
@@ -873,7 +883,7 @@ def _native_vendor_cohort():
     """Resolve the optional precision module's published binary cohort."""
     library = os.environ.get("FLAGOS_VENDOR_TORCH_LIB")
     if (
-        FLAGOS_ACCELERATOR not in {"cuda", "dcu", "metax"}
+        FLAGOS_ACCELERATOR not in {"cuda", "dcu", "metax", "ppu"}
         or not _env_module().flag("FLAGOS_BUILD_NATIVE_HOST")
         or not library
     ):
@@ -1014,12 +1024,12 @@ def _verify_built_native_libs() -> None:
 class BuildExtWithCmake(_build_ext):
     """Run cmake before setuptools builds torch_fl._C."""
 
-    def _stage_metax_config(self, destination, *, native):
+    def _stage_native_host_config(self, destination, vendor, *, native):
         package = Path(destination) / "torch_fl"
-        target = package / _metax_config_path(self.inplace)
-        source = Path(SOURCE_DIR) / "torch_fl" / _metax_config_path(False)
+        target = package / _native_host_config_path(vendor, self.inplace)
+        source = Path(SOURCE_DIR) / "torch_fl" / _native_host_config_path(vendor, False)
 
-        if not self.inplace:
+        if not self.inplace and vendor == "metax":
             # An existing build tree may still carry the old variant filename.
             (target.parent / "backends_metax_native_host.conf").unlink(missing_ok=True)
         if not native:
@@ -1037,7 +1047,9 @@ class BuildExtWithCmake(_build_ext):
         generator = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(generator)
         text = generator.render_native_host_config(
-            "metax", generator.parse_conf(source)
+            vendor,
+            generator.parse_conf(source),
+            vendor_kernels=_kernel_switches(FLAGOS_ACCELERATOR)["FLAGOS_BUILD_VENDOR"],
         )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
@@ -1045,7 +1057,8 @@ class BuildExtWithCmake(_build_ext):
     def _build_native_hosts(self):
         destination = os.path.abspath(BASE_DIR if self.inplace else self.build_lib)
         if not _env_module().flag("FLAGOS_BUILD_NATIVE_HOST"):
-            self._stage_metax_config(destination, native=False)
+            for vendor in _NATIVE_HOST_CONFIG_VENDORS:
+                self._stage_native_host_config(destination, vendor, native=False)
             if not self.inplace:
                 # build_lib can be reused when switching back to an ordinary wheel.
                 for name in ("csrc", "_generated"):
@@ -1079,7 +1092,17 @@ class BuildExtWithCmake(_build_ext):
                 "MetaX native hosts require a clean staging tree without bundled "
                 "vendor libtorch; build from a clean source tree"
             )
-        self._stage_metax_config(destination, native=vendor == "metax")
+        if (
+            vendor == "thead"
+            and (Path(destination) / "torch_fl/lib_thead/libtorch_cuda.so").is_file()
+        ):
+            raise RuntimeError(
+                "T-Head Native Host cannot use the full vendor Torch boxing bundle"
+            )
+        for config_vendor in _NATIVE_HOST_CONFIG_VENDORS:
+            self._stage_native_host_config(
+                destination, config_vendor, native=config_vendor == vendor
+            )
         env = os.environ.copy()
         if vendor == "nvidia":
             _setup_cuda_build_env(env)
@@ -1329,7 +1352,11 @@ def _get_setup_kwargs():
             "native_host/_generated/typed/*.json",
             "native_host/_generated/typed/*.py",
             "native_host/_generated/licenses/*",
+            "native_host/_generated/device_kernels/index.json",
+            "native_host/_generated/device_kernels/*/*",
+            "native_host/_generated/published_sources/*.pyc",
             "native_host/_generated/metax_vendor/*.so*",
+            "native_host/_generated/thead_vendor/*.so*",
             "host_compiler/include/torch/csrc/inductor/cpp_wrapper/*.h",
             "host_compiler/include/torch/csrc/inductor/cpp_wrapper/device_internal/*.h",
             "lib/*.so*",
@@ -1491,8 +1518,7 @@ def _requires_python() -> str:
     pins = _version_pins()
     version = pins.get(f"FLAGTREE_PYTHON_VERSION_{FLAGOS_ACCELERATOR}")
     if not version:
-        # tsingmicro and bpu build no FlagTree; they also publish no wheel, so
-        # this only affects a local build of one of them.
+        # A platform without an interpreter pin can still build locally.
         return ">=3.8"
     major, minor = version.split(".")[:2]
     return f">={major}.{minor},<{major}.{int(minor) + 1}"
@@ -1537,14 +1563,15 @@ def _flagos_sibling_requires() -> list:
     reqs = []
     vendor = _PLATFORM_TO_VENDOR.get(FLAGOS_ACCELERATOR, FLAGOS_ACCELERATOR)
     flagtree = pins.get(f"FLAGTREE_VERSION_{vendor}")
+    triton = pins.get(f"TRITON_VERSION_{vendor}")
     if flagtree:
         # FlagTree *is* Triton -- it installs a `triton` distribution -- so
         # pinning it is what keeps a stock NVIDIA triton wheel out of the
         # environment on every platform that has a FlagTree build.
         reqs.append(f"flagtree=={flagtree}")
+    elif triton:
+        reqs.append(f"triton=={triton}")
     else:
-        # No FlagTree build is published for this platform, so Triton has to
-        # come from somewhere else. tsingmicro and bpu are the two.
         reqs.append("triton>=3.5.1")
     flag_gems = pins.get("FLAGGEMS_VERSION_DEFAULT")
     if not flag_gems:

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <ATen/ATen.h>
 #include <acl/acl.h>
+#include <dlfcn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <runtime/runtime/rt.h>
@@ -16,6 +17,13 @@ namespace py = pybind11;
 
 namespace flagos::native_host::backend {
 namespace {
+
+void FlushAclnnSubmissions() {
+  using Flush = void (*)();
+  static const auto flush = reinterpret_cast<Flush>(
+      dlsym(RTLD_DEFAULT, "FlagosAscendDrainHostSubmissions"));
+  if (flush) flush();
+}
 
 void Check(rtError_t status) {
   if (status != RT_ERROR_NONE)
@@ -54,6 +62,8 @@ class AscendKernel final : public Kernel {
   }
 
   void Enqueue(const Launch& launch) const override {
+    // ACLNN and FlagGems submit work to the same stream.
+    FlushAclnnSubmissions();
     const auto count = CheckedProduct(CheckedProduct(launch.grid[0], launch.grid[1]), launch.grid[2]);
     if (count > UINT32_MAX) throw std::overflow_error("Ascend block count exceeds uint32");
     auto workspace = Workspace(CheckedProduct(workspace_, count));

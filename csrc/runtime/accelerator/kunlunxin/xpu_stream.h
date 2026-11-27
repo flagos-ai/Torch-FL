@@ -51,6 +51,8 @@ inline XPUStream GetCurrentXpuStream() {
 // -fvisibility=hidden.
 FLAGOS_EXPORT void DrainDefaultXpuStreams();
 
+Error_t SynchronizeXpuDevice(int device);
+
 } // namespace at::native::flagos::kunlunxin
 
 #endif // USE_KUNLUNXIN

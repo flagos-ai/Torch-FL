@@ -22,6 +22,9 @@
 #ifdef USE_MUSA
 
 #include "runtime/accelerator/mthreads/musa_stream.h"
+#if defined(FLAGOS_NATIVE_HOSTS)
+#include "runtime/allocator/caching_device_allocator.h"
+#endif
 
 #include <ATen/ATen.h>
 #include <ATen/Context.h>
@@ -34,6 +37,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace at::native::flagos::musa_ops {
@@ -121,6 +125,28 @@ inline bool MudnnSupportsArithmeticDtype(at::ScalarType type) {
 // MusaRaiseUnsupportedMatmulDtype -- rather than computing it on the host.
 inline bool MudnnSupportsMatmulDtype(at::ScalarType type) {
   return type != at::kDouble && MudnnSupportsArithmeticDtype(type);
+}
+
+template <class Matmul>
+void MudnnSetMatmulDeterminism(Matmul& op, const char* name) {
+  if (!at::globalContext().deterministicAlgorithms()) return;
+  const auto status = op.SetDeterministic(true);
+  TORCH_CHECK(status == mudnn::Status::SUCCESS, name,
+              ": muDNN could not select a deterministic algorithm: ",
+              MudnnStatusName(status));
+}
+
+inline std::pair<at::Tensor, bool> MudnnMatmulInput(const at::Tensor& tensor) {
+  if (tensor.is_contiguous()) {
+    return {tensor, false};
+  }
+  if (tensor.dim() >= 2 && tensor.stride(-2) == 1) {
+    auto storage_order = tensor.transpose(-2, -1);
+    if (storage_order.is_contiguous()) {
+      return {std::move(storage_order), true};
+    }
+  }
+  return {tensor.contiguous(), false};
 }
 
 // A dtype the predicate above rejects has no accelerator path: mudnn's matmul
@@ -356,10 +382,20 @@ inline std::vector<int> ToMudnnDims(at::IntArrayRef dims, int64_t ndim) {
 // dispatch into).
 void MudnnCopy(const at::Tensor& src, at::Tensor& dst);
 
+inline void FinishMudnn(mudnn::Handle& handle, const char* tag) {
+#if defined(FLAGOS_NATIVE_HOSTS)
+  // muDNN and FlagGems use the same current stream. Scratch tensors are
+  // allocated from that stream's pool and can be reused there in queue order.
+  if (c10::flagos::CachingDeviceAllocator::is_enabled()) return;
+#endif
+  const auto status = musaStreamSynchronize(handle.GetStream());
+  TORCH_CHECK(status == musaSuccess, tag, " stream sync failed: ",
+              musaGetErrorString(status));
+}
+
 } // namespace at::native::flagos::musa_ops
 
-// Issue a mudnn op on the selected stream of `guard_tensor`'s device and
-// preserve the synchronous contract. Triton uses the same current stream.
+// Issue a mudnn op on the selected stream of `guard_tensor`'s device.
 //
 // `op_expr` is the full call, e.g. `op.Run(_mudnn_h, t_out.get(), t_in.get())`,
 // with `_mudnn_h` naming the cached handle. Spelling it out (rather than taking
@@ -375,10 +411,7 @@ void MudnnCopy(const at::Tensor& src, at::Tensor& dst);
         _mudnn_status == ::musa::dnn::Status::SUCCESS,                        \
         tag, " failed: ",                                                     \
         at::native::flagos::musa_ops::MudnnStatusName(_mudnn_status));        \
-    musaError_t _musa_sync = musaStreamSynchronize(_mudnn_h.GetStream());     \
-    TORCH_CHECK(                                                              \
-        _musa_sync == musaSuccess,                                           \
-        tag, " stream sync failed: ", musaGetErrorString(_musa_sync));        \
+    at::native::flagos::musa_ops::FinishMudnn(_mudnn_h, tag);                  \
   } while (0)
 
 #endif // USE_MUSA

@@ -9,6 +9,8 @@
 #ifdef USE_ASCEND
 
 #include <acl/acl_rt.h>
+#include <memory>
+#include <aclnn/acl_meta.h>
 
 #include <macros.h>
 #include <string>
@@ -44,6 +46,23 @@ FLAGOS_EXPORT aclrtStream GetDefaultAclStreamForDevice(int device_index);
 // all of them are drained; only devices that actually ran an op have a stream
 // here, which in practice is the one or two devices in use.
 FLAGOS_EXPORT void DrainDefaultAclStreams();
+
+// An ACLNN task carries the arguments for one eager operator. The caller
+// prepares descriptors and workspace before queuing the SDK execute call.
+FLAGOS_EXPORT bool AscendEagerQueueEnabled();
+struct AscendAclnnCall {
+  int device = -1;
+  const char* api = nullptr;
+  int (*execute)(void*, uint64_t, aclOpExecutor*, aclrtStream) = nullptr;
+  void* workspace = nullptr;
+  uint64_t workspace_size = 0;
+  aclOpExecutor* executor = nullptr;
+  aclrtStream stream = nullptr;
+  std::shared_ptr<void> descriptors;
+};
+FLAGOS_EXPORT void SubmitAscendEager(AscendAclnnCall call);
+FLAGOS_EXPORT void FlushAscendEager();
+FLAGOS_EXPORT void WaitForAscendEagerSubmissions();
 
 // Return the stream selected for the calling thread and device. If no
 // auxiliary stream has been selected, this returns the shared default stream.

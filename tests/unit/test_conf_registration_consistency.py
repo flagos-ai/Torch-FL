@@ -253,6 +253,9 @@ def _platform_registered(platform: str) -> set[str]:
     for kind in ("base", "vendor", "flaggems"):
         if kind in fragments:
             ops |= _registered_ops(ATEN_DIR / fragments[kind])
+    if platform == "mthreads":
+        for name in ("musa_kernels.cc", "musa_foreach.cc"):
+            ops |= _registered_ops(BACKENDS_DIR / "mthreads/generated" / name)
     return ops
 
 
@@ -454,6 +457,11 @@ def test_metax_tileops_experiment_registration_matches_its_conf():
         ("enflame", {"FLAGOS_BUILD_VENDOR": "OFF"}, ["flaggems"]),
         ("mthreads", {"FLAGOS_BUILD_VENDOR": "OFF"}, ["flaggems"]),
         ("mthreads", {}, ["vendor", "flaggems"]),
+        ("nvidia", {}, ["flaggems"]),
+        ("nvidia", {"FLAGOS_NATIVE_HOSTS": "ON"}, ["flaggems", "native_host"]),
+        ("hygon", {"FLAGOS_NATIVE_HOSTS": "ON"}, ["flaggems", "native_host"]),
+        ("thead", {}, ["flaggems"]),
+        ("thead", {"FLAGOS_NATIVE_HOSTS": "ON"}, ["flaggems", "native_host"]),
         ("metax", {"FLAGOS_NATIVE_HOSTS": "ON"}, ["flaggems", "native_host"]),
         ("metax", {"FLAGOS_BUILD_TILEOPS": "ON"}, ["tileops"]),
     ],
@@ -651,6 +659,21 @@ def test_flaggems_conformance_counts_match_committed_confs(monkeypatch):
     assert measured == caps.EXPECTED_FLAGGEMS_ROUTES
 
 
+@pytest.mark.parametrize(
+    "dtype,expected",
+    [(None, "none"), ("Float", "flaggems"), ("BFloat16", "flaggems"), ("Long", "none")],
+)
+def test_device_capabilities_include_configured_dtype_routes(
+    tmp_path, monkeypatch, dtype, expected
+):
+    from tests.integration.flaggems import flaggems_caps
+
+    conf = tmp_path / "backend.conf"
+    conf.write_text("sum.dim_IntList = none; Float, BFloat16:flaggems # typed route\n")
+    monkeypatch.setattr(flaggems_caps, "conf_path", lambda: conf)
+    assert flaggems_caps.load_routes(dtype) == {"sum.dim_IntList": expected}
+
+
 @pytest.mark.anyplatform
 def test_conf_route_counts_are_stable():
     """Snapshot of the route counts per conf.  A change here means an op
@@ -666,12 +689,12 @@ def test_conf_route_counts_are_stable():
         # Complex storage, spectral decomposition, seeded sampling and shift
         # aliases now have measured Ascend implementations. Five aliases extend
         # the global op universe and remain none on unrelated vendor builds.
-        "ascend": {"ascend": 205, "flaggems": 217, "none": 1620},
+        "ascend": {"ascend": 205, "flaggems": 217, "none": 1621},
         # The BPU is native: 34 ops route to the generated kernel layer, the
         # rest to `none`. Those kernels submit .hbm artifacts from
         # FLAGOS_BPU_OPLIB; without it each takes its own CPU round-trip, which
         # a routing table cannot express.
-        "drobotics": {"none": 2008, "drobotics": 34},
+        "drobotics": {"none": 2009, "drobotics": 34},
         # Measured on H100 after rebasing onto the main that carries #340.
         # #340 added three exception groups (cuda_route_exceptions for
         # contract/compile defects -- since renamed flaggems_route_exceptions,
@@ -693,13 +716,13 @@ def test_conf_route_counts_are_stable():
         # The wheel's behaviour is unchanged: register_flaggems_nvidia.inc, the
         # only registration a boxing-off build includes, claims the 549 FlagGems
         # routes and none of these, so they already reached cpu_fallback.
-        "nvidia": {"flaggems": 550, "none": 1484},
+        "nvidia": {"flaggems": 557, "none": 1477},
         # dcu/metax/ppu are CUDA-ABI platforms with no vendor kernel of their
         # own on this tree, and a default conf never routes boxing (AGENTS.md,
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each
         # platform's measured triton gaps -- is `none` (cpu_fallback). The
         # boxing routes live in backends_<platform>_boxing.conf.
-        "hygon": {"none": 1577, "flaggems": 465},
+        "hygon": {"none": 1575, "flaggems": 468},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
@@ -714,7 +737,7 @@ def test_conf_route_counts_are_stable():
         # instead. See NATIVE_TRITON_GAPS["enflame"].
         # Native argmax/default+out close two CPU routes. Isolated precision
         # checks restore SiLU to FlagGems and retain the vendor mean.dim path.
-        "enflame": {"none": 1603, "enflame": 186, "flaggems": 253},
+        "enflame": {"none": 1593, "enflame": 197, "flaggems": 253},
         # kunlunxin is a native vendor backend: every op routes to the vendor
         # XPU SDK (``kunlunxin``), to FlagGems, or is left at ``none`` -- there
         # is no ``cuda`` route.  The ``kunlunxin`` count is exactly what
@@ -733,7 +756,8 @@ def test_conf_route_counts_are_stable():
         # only by the second screen.  `acos`, `_log_softmax` and `mean.dim` are
         # the three this lane itself rejected on the first attempt, and they are
         # why the screen was tightened.  See KUNLUNXIN_FLAGGEMS_MEASURED.
-        "kunlunxin": {"none": 1727, "kunlunxin": 57, "flaggems": 258},
+        # The native SDK serves six additional eager foreach overloads.
+        "kunlunxin": {"none": 1702, "kunlunxin": 82, "flaggems": 259},
         # metax: _softmax/embedding moved off flaggems_cpp to flaggems (#501).
         # 8 ops moved flaggems -> boxing (594 -> 586 / 1433 -> 1441) because
         # route_boxing now consults codegen_ops.py's FlagGems holds. These were
@@ -756,10 +780,10 @@ def test_conf_route_counts_are_stable():
         # matrix claim needs the key registered, and a default conf may not route
         # boxing. The day-0 variant keeps `boxing`. Measured on a C550; see
         # METAX_FLAGGEMS_MEASURED in gen_vendor_confs.py.
-        "metax": {"flaggems": 588, "none": 1440, "flaggems_cpp": 14},
-        # cat moved to flaggems via the tensorlist_dim codegen category (#498).
-        "mthreads": {"none": 1523, "flaggems": 466, "mthreads": 53},
-        "thead": {"none": 1450, "flaggems": 592},
+        "metax": {"flaggems": 588, "none": 1441, "flaggems_cpp": 14},
+        # muDNN supplies the eager class-index loss and in-place scalar mul.
+        "mthreads": {"none": 1517, "flaggems": 468, "mthreads": 58},
+        "thead": {"none": 1447, "flaggems": 596},
         # Iluvatar adds a native, non-boxing vendor slot on top of FlagGems
         # (scripts/codegen/codegen_iluvatar.py). Its counts are DERIVED, not
         # pinned: the native cohort is a moving measurement -- the first landing
@@ -804,7 +828,7 @@ def test_conf_route_counts_are_stable():
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "apple": {"none": 1932, "apple": 110},
+        "apple": {"none": 1927, "apple": 116},
         # Twelve ops that cpu_fallbacked in the Qwen-Image-2.1 census moved to
         # flaggems (all.dim, clamp_min, div.Tensor, gelu, gt.Scalar, gt.Tensor,
         # index_select, isneginf, nonzero, tanh, tril, zero_); 51 -> 63, then

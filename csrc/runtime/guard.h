@@ -11,6 +11,10 @@
 
 #include <flagos.h>
 
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+#include "runtime/functions.h"
+#endif
+
 // The platform's own USE_* macro (FLAGOS_PLATFORM_USE_MACRO in the platform
 // table). Only the runtime library target is given it on the command line; this
 // header also compiles as part of csrc/, where nothing defines it, so on the
@@ -79,6 +83,10 @@
 #endif
 
 namespace c10::flagos {
+
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+FLAGOS_EXPORT void SetCudaGuardDevice(int device) noexcept;
+#endif
 
 #if defined(USE_DCU)
 // Two entry points this interface needs on DCU are declared here rather than
@@ -203,11 +211,16 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
 
   void setDevice(c10::Device d) const override {
     TORCH_INTERNAL_ASSERT(d.is_privateuseone());
-    ::SetDevice(d.index());
+    uncheckedSetDevice(d);
   }
 
   void uncheckedSetDevice(c10::Device d) const noexcept override {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+    // Guard destruction also restores the device when it never changed.
+    SetCudaGuardDevice(d.index());
+#else
     ::SetDevice(d.index());
+#endif
   }
 
   c10::Stream getStream(c10::Device d) const noexcept override {
@@ -484,9 +497,13 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   c10::DeviceIndex deviceCount() const noexcept override {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+    return c10::flagos::DeviceCount();
+#else
     int count = 0;
     ::GetDeviceCount(&count);
     return static_cast<c10::DeviceIndex>(count);
+#endif
   }
 
   c10::DeviceCapability getDeviceCapability(c10::Device d) const override {

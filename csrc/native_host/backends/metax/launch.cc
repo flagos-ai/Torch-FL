@@ -8,6 +8,7 @@
 #include <mcr/mc_runtime.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <torch/library.h>
 
 namespace py = pybind11;
 
@@ -16,6 +17,21 @@ namespace {
 
 void Check(mcError_t status) {
   if (status != mcSuccess) throw std::runtime_error(mcGetErrorString(status));
+}
+
+int64_t DeviceAttribute(mcDeviceAttribute_t attribute) {
+  int device;
+  Check(mcGetDevice(&device));
+  int value;
+  Check(mcDeviceGetAttribute(&value, attribute, device));
+  return value;
+}
+
+TORCH_LIBRARY_FRAGMENT(flagos_source_native, m) {
+  m.def("get_sm_count() -> int",
+        [] { return DeviceAttribute(mcDeviceAttributeMultiProcessorCount); });
+  m.def("get_l2_cache_size() -> int",
+        [] { return DeviceAttribute(mcDeviceAttributeL2CacheSize); });
 }
 
 unsigned Dimension(uint64_t value) {

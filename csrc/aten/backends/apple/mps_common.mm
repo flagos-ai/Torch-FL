@@ -11,6 +11,8 @@
 
 #ifdef USE_MPS
 
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -68,56 +70,26 @@ at::Tensor MpsIndexOnHost(
 bool MpsGatherIndex(
     const at::Tensor& out,
     const at::Tensor& source,
-    const at::Tensor& addresses,
-    at::IntArrayRef source_storage_shape) {
-  MPSDataType source_dtype;
-  if (!MpsDataTypeOf(source.scalar_type(), &source_dtype) ||
-      source.layout() != at::kStrided ||
-      addresses.scalar_type() != at::kInt ||
-      source.numel() == 0 || addresses.numel() == 0 ||
-      addresses.numel() != out.numel() ||
-      source_storage_shape.size() < 2 ||
-      source_storage_shape[source_storage_shape.size() - 1] <= 0) {
-    return false;
-  }
-  const std::vector<int64_t> logical_source_shape = out.sizes().vec();
-  const std::vector<int64_t> address_sizes = addresses.sizes().vec();
-  std::vector<int64_t> storage_shape(
-      source_storage_shape.begin(), source_storage_shape.end());
-  int64_t leading = 1;
-  for (size_t d = 0; d + 2 < storage_shape.size(); ++d) {
-    leading *= storage_shape[d];
-  }
-  storage_shape[storage_shape.size() - 2] = source.numel() / leading;
-  return MpsRunGraphExtra(
-      "index.Tensor", {addresses.contiguous()}, source.contiguous(), at::Tensor(),
-      out,
+    const at::Tensor& addresses) {
+  const std::vector<int64_t> storage_shape{source.numel(), 1};
+  const std::vector<int64_t> out_shape = out.sizes().vec();
+  return MpsRunGraph(
+      "index.Tensor", {source.contiguous(), addresses}, out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-        if (args.count != 2) {
-          return nil;
-        }
-        MPSGraphTensor* table =
-            MpsReshape(graph, args[1], storage_shape);
+        MPSGraphTensor* table = MpsReshape(graph, args[0], storage_shape);
         if (table == nil) {
-          return nil;
-        }
-        MPSGraphTensor* indices =
-            MpsReshape(graph, args[0], address_sizes);
-        if (indices == nil) {
           return nil;
         }
         MPSGraphTensor* values =
             [graph gatherWithUpdatesTensor:table
-                             indicesTensor:indices
+                             indicesTensor:args[1]
                                       axis:0
                            batchDimensions:0
                                       name:nil];
         if (values == nil) {
           return nil;
         }
-        return [graph reshapeTensor:values
-                          withShape:MpsShapeOf(logical_source_shape)
-                               name:nil];
+        return MpsReshape(graph, values, out_shape);
       });
 }
 
@@ -1921,6 +1893,18 @@ bool MpsBufferOf(const at::Tensor& t, id<MTLBuffer>* buffer, size_t* byteOffset)
   return true;
 }
 
+bool MpsInitializeFloatScalar(const at::Tensor& scalar, float value) {
+  TORCH_INTERNAL_ASSERT(scalar.scalar_type() == at::kFloat && scalar.numel() == 1);
+  id<MTLBuffer> buffer = nil;
+  size_t offset = 0;
+  if (!MpsBufferOf(scalar, &buffer, &offset) ||
+      buffer.storageMode != MTLStorageModeShared || buffer.contents == nullptr) {
+    return false;
+  }
+  std::memcpy(static_cast<char*>(buffer.contents) + offset, &value, sizeof(value));
+  return true;
+}
+
 // The current stream, which is the queue MpsCurrentQueue() hands back. Internal:
 // flagos.h's Stream_t is a runtime type the header does not name.
 static Stream_t MpsCurrentStream() {
@@ -2476,14 +2460,15 @@ bool RunGraphImpl(
     for (const NSUInteger operand : plan->input_order) {
       [array addObject:operand_data[operand]];
     }
-    // Asynchronous on purpose: see the contract in mps_common.h. Measured on an
-    // M5, the same one-node executable costs ~18 us scheduled this way against
-    // ~370 us when awaited inline, because the wait is a round trip to the GPU
-    // per op rather than the work itself.
-    [plan->executable runAsyncWithMTLCommandQueue:queue
-                                      inputsArray:array
-                                     resultsArray:result_data
-                              executionDescriptor:plan->descriptor];
+    MPSCommandBuffer* command = [MPSCommandBuffer commandBufferFromCommandQueue:queue];
+    TORCH_CHECK(command != nil, "mps: could not allocate a graph command buffer");
+    [plan->executable encodeToCommandBuffer:command
+                                inputsArray:array
+                               resultsArray:result_data
+                        executionDescriptor:plan->descriptor];
+    // MPS may commit and continue during encoding. The current root orders
+    // all earlier commands from this graph on the same queue.
+    ::FlagosMPSCommitCommandBuffer(stream, command.rootCommandBuffer);
     ran = true;
     for (MPSGraphTensorData* data : result_data) {
       MpsRelease(data);
@@ -2493,16 +2478,11 @@ bool RunGraphImpl(
     }
   }
   if (ran) {
-    // Puts the graph's work behind a buffer the stream layer can see, without
-    // waiting for it: a later StreamQuery, StreamSynchronize or DeviceSynchronize
-    // -- what allocator block reuse and a host read ask -- now covers this op.
-    ::FlagosMPSStreamSentinel(stream);
     ::flagos::native_host::EnqueueTrace::record(
         reinterpret_cast<uintptr_t>(stream), true);
 
-    // The sentinel above makes the *stream* report the work, but that is not
-    // enough on its own, because the caching allocator's block-reuse check
-    // (find_free_block) compares stream pointers and never queries the stream.
+    // The committed buffer makes the stream report the work. The allocator's
+    // block-reuse check compares stream pointers and never queries the stream.
     // A block returns to its pool the moment the tensor over it is dropped
     // (free_block, event_count == 0), and the next allocation of the same size
     // on the same stream picks it straight back up -- while this queued graph is

@@ -246,16 +246,6 @@ ESCAPE_NATIVE = {
 CUDA_ABI_PLATFORMS = {
     "metax": "backends_metax.conf",
     "hygon": "backends_hygon.conf",
-    # PPU's triton gap set is the mm/bmm family. PPU's triton build rejects the
-    # `num_ldmatrixes` kwarg that FlagGems' _hygon mm/bmm kernel passes to
-    # triton's mm_kernel: mm raises KeyError at triton/runtime/jit.py:_pack_args,
-    # and bmm reaches the same kernel and stalls inside triton compilation.
-    # Measured on the PPU runner, routing mm to flaggems turned a 2.87s
-    # test_factory_ops.py into 1801s (28 minutes inside test_mm alone) and left
-    # the process exiting on SIGSEGV. PPU previously had no conf of its own and
-    # read backends_nvidia.conf, so it silently inherited every CUDA FlagGems
-    # route; a separate conf is what lets the two platforms disagree about
-    # mm/bmm. Filed upstream as FlagGems issue #6225.
     "thead": "backends_thead.conf",
 }
 
@@ -462,9 +452,9 @@ CUDA_ABI_GAP_NOTES = {
         "second copy from a stale literal (issue #459).",
     ),
     "thead": (
-        "49 of the 482 FlagGems-covered ops are pinned to cuda; the other 433",
-        "route to flaggems. mm/bmm are the first four (FlagGems issue #6225:",
-        "PPU rejects the _hygon kernel's num_ldmatrixes kwarg) and 33 are the",
+        "The pinned FlagGems 5.4.0 and FlagTree 0.7.0+ppu3.6 serve functional",
+        "mm/bmm through the generic providers. Their out variants retain",
+        "the CPU fallback. Other holds include the 33",
         "2026-09-15 overload survey's measured route-dependent failures. Four",
         "more are reflection-padding routes that survey cannot reach: it derives",
         "`padding` from the rank, so every profile fails ATen's arity check",
@@ -489,15 +479,8 @@ CUDA_ABI_GAP_NOTES = {
 # then the file's `cuda` entries are the exceptions and the diff would return
 # just them, which is exactly right the first time and self-erasing the second.
 #
-# PPU: FlagGems-first is the intent (most of its 478 covered ops run the Python
-# path), so its gaps are a measured exception list rather than a residue. The
-# first four are the mm/bmm family from FlagGems issue #6225: PPU's triton
-# rejects the `num_ldmatrixes` kwarg FlagGems' _hygon mm/bmm kernel passes to
-# triton's mm_kernel -- mm raises KeyError at triton/runtime/jit.py:_pack_args
-# and bmm reaches the same kernel and stalls inside triton compilation (measured:
-# routing mm to flaggems turned a 2.87s test_factory_ops.py into 1801s, 28
-# minutes inside test_mm alone, then SIGSEGV). `mm.out`/`bmm.out` are the out=
-# spellings of the same kernel.
+# T-Head uses the generic FlagGems mm/bmm providers in the pinned cohort.
+# The earlier Hygon provider hit FlagGems issue #6225 on the PPU compiler.
 #
 # Add an op here when a run reports it failing on the flaggems route, with the
 # failure recorded next to it. The rest of the PPU set is the 2026-09-15 overload
@@ -510,10 +493,8 @@ CUDA_ABI_GAP_NOTES = {
 # survey measured, in the same profile the route is reached with.
 CUDA_ABI_TRITON_GAPS = {
     "thead": {
-        # -- mm/bmm family, FlagGems issue #6225 (see above) --
-        "bmm",
+        # Out variants are required to honor caller-provided layout and shape.
         "bmm.out",
-        "mm",
         "mm.out",
         # -- FlagGems' addmm autotune selects a BLOCK_SIZE_K < 16 config on
         # small-K shapes, and FlagTree's ppu triton rejects that in tl.dot:
@@ -1696,6 +1677,9 @@ NATIVE_TRITON_GAPS = {
         "new_ones",
         "ones",
         "ones_like",
+        # FlagTree rejects the 64-bit scan used by Qwen3's position ids.
+        "cumsum",
+        "cumsum.out",
         "scalar_tensor",
         "sum",
         "zero_",
@@ -2478,6 +2462,18 @@ NATIVE_TRITON_GAPS = {
 # lands ahead of the measurement instead of pre-empting it.
 NATIVE_KERNEL_PREFERRED = {"iluvatar", "cambricon", "kunlunxin"}
 
+# FlagTree's XPU comparison lowering rejects int64 tensor comparisons.
+# Other input dtypes keep the measured FlagGems routes.
+KUNLUNXIN_LONG_COMPARISONS = frozenset({"eq.Tensor", "le.Tensor", "ne.Tensor"})
+KUNLUNXIN_DTYPE_ROUTES = {
+    **{op: "Long:kunlunxin" for op in KUNLUNXIN_LONG_COMPARISONS},
+    "add_.Tensor": "BFloat16:kunlunxin",
+    "embedding_dense_backward": "BFloat16:kunlunxin",
+    "cumsum": "Bool,Long:kunlunxin",
+    "pow.Tensor_Scalar": "Float:kunlunxin",
+    "silu_backward": "BFloat16:kunlunxin",
+}
+
 # Platforms whose build can compile the TileOPs slot (Backend::kTileOps). The
 # shims are Triton kernels needing an SM90 device plus the `tileops` package, and
 # setup.py force-sets FLAGOS_BUILD_TILEOPS=OFF for every FLAGOS_ACCELERATOR != "cuda" -- so on
@@ -2659,13 +2655,51 @@ NATIVE_HOST_FLAGGEMS_OPS = {
             "bmm",
             "bmm.out",
             "cat",
+            "embedding_dense_backward",
             "mean.dim",
             "mul.Tensor",
+            "mul.out",
             "mul_.Tensor",
             "slice.Tensor",
         }
     ),
 }
+
+# On Ascend910C, these ACLNN routes keep paired eager Qwen3-0.6B BF16
+# logits and training samples aligned and avoid slower or unlowered host calls.
+# This routing policy is staged only in the Native Host wheel.
+ASCEND_NATIVE_HOST_ACLNN = frozenset(
+    {
+        "_log_softmax",
+        "_log_softmax_backward_data",
+        "_softmax_backward_data",
+        "add.Tensor",
+        "add_.Tensor",
+        "bitwise_and.Tensor",
+        "bitwise_not",
+        "bitwise_or.Tensor",
+        "cat",
+        "constant_pad_nd",
+        "cos",
+        "div.Scalar",
+        "div.Tensor",
+        "embedding",
+        "full",
+        "full_like",
+        "masked_fill.Scalar",
+        "masked_fill.Tensor",
+        "max.dim",
+        "mean.dim",
+        "rsqrt",
+        "scalar_tensor",
+        "silu",
+        "silu_backward",
+        "sin",
+        "slice_backward",
+        "zero_",
+        "zeros",
+    }
+)
 
 # The hand-registered composite (EXTRA_ROUTED), on the platform that measured
 # it. Unlike METAX_FLAGGEMS_MEASURED these ops are not held from the shared
@@ -2891,6 +2925,7 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "div_.Scalar_mode",
     "div_.Tensor",
     "div_.Tensor_mode",
+    "embedding_dense_backward",
     "eq.Scalar",
     "eq.Tensor",
     "eq_.Scalar",
@@ -2919,7 +2954,6 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "fmod_.Tensor",
     "frac",
     "frac_",
-    "full",
     "ge.Scalar",
     "ge.Tensor",
     "gelu",
@@ -2996,6 +3030,7 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "mish",
     "mish_",
     "mse_loss",
+    "mul.out",
     "ne.Scalar",
     "ne.Tensor",
     "neg_",
@@ -3088,7 +3123,9 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
 
 NATIVE_FLAGGEMS_MEASURED = {
     "ascend": {"argmin"},
+    "cambricon": {"le.Tensor"},
     "kunlunxin": KUNLUNXIN_FLAGGEMS_MEASURED,
+    "mthreads": {"embedding_dense_backward", "mul.out"},
 }
 
 # FlagGems coverage that arrived from a discovery widening rather than from a
@@ -3262,8 +3299,16 @@ def flaggems_python_ops_for(platform: str) -> set:
     same.
     """
     if platform in _CEILING_GRADUATED:
-        return set(FLAGGEMS_PYTHON_OPS)
-    return set(FLAGGEMS_PYTHON_OPS_FROZEN)
+        ops = set(FLAGGEMS_PYTHON_OPS)
+        if platform == "iluvatar":
+            ops.update(("add.out", "embedding_dense_backward", "mean.out", "mul.out"))
+        return ops
+    ops = set(FLAGGEMS_PYTHON_OPS_FROZEN)
+    if platform == "mthreads":
+        ops |= NATIVE_FLAGGEMS_MEASURED["mthreads"]
+    if platform == "kunlunxin":
+        ops.update(("embedding_dense_backward", "mul.out"))
+    return ops
 
 
 def flaggems_cpp_ops(conf_dir: Path = None) -> set:
@@ -3317,7 +3362,12 @@ def vendor_native_ops(vendor: str) -> set:
     the ops that generator actually emits an `m.impl` for.
     """
     native_inc, _ = VENDORS[vendor]
-    return registered_impls(CSRC_DIR / native_inc) | EXTRA_NATIVE.get(vendor, set())
+    ops = registered_impls(CSRC_DIR / native_inc) | EXTRA_NATIVE.get(vendor, set())
+    if vendor == "mthreads":
+        # Composite kernels register both eager dispatch keys in the generated TU.
+        for name in ("musa_kernels.cc", "musa_foreach.cc"):
+            ops |= registered_impls(CSRC_DIR / "backends/mthreads/generated" / name)
+    return ops
 
 
 def vendor_registered_ops(vendor: str) -> set:
@@ -3328,11 +3378,11 @@ def vendor_registered_ops(vendor: str) -> set:
     are registered without being native kernels. Anything outside this set is
     unregistered and therefore genuinely reaches cpu_fallback.
     """
-    native_inc, extra_incs = VENDORS[vendor]
-    ops = registered_impls(CSRC_DIR / native_inc)
+    _, extra_incs = VENDORS[vendor]
+    ops = vendor_native_ops(vendor)
     for inc in extra_incs:
         ops |= registered_impls(CSRC_DIR / inc)
-    return ops | EXTRA_NATIVE.get(vendor, set())
+    return ops
 
 
 def _platform_from_conf(filename: str) -> str:
@@ -3428,13 +3478,16 @@ def cuda_abi_cpp_ops(conf_dir: Path, filename: str, fg_cpp: set) -> set:
 # routes are independent of the temporary day-0 configuration.
 HYGON_HOST_FLAGGEMS_MEASURED = {
     "add.Tensor",
+    "sub.Tensor",
     "mul.Tensor",
     "mean.dim",
     "cat",
     "add.out",
+    "sub.out",
     "mul.out",
     "mean.out",
     "cat.out",
+    "embedding_dense_backward",
 }
 
 
@@ -3459,7 +3512,13 @@ def cuda_abi_measured_python_ops(filename: str) -> set:
         return METAX_FLAGGEMS_MEASURED | METAX_COMPOSITE_FLAGGEMS
     if filename == "backends_hygon.conf":
         platform = _platform_from_conf(filename)
-        return DCU_COMPOSITE_FLAGGEMS | SOFT_LOWP_FLAGGEMS_MEASURED.get(platform, set())
+        return (
+            DCU_COMPOSITE_FLAGGEMS
+            | SOFT_LOWP_FLAGGEMS_MEASURED.get(platform, set())
+            | HYGON_HOST_FLAGGEMS_MEASURED
+        )
+    if filename == "backends_thead.conf":
+        return {"mul.out", "embedding_dense_backward"}
     return set()
 
 
@@ -3873,14 +3932,55 @@ def build_all(conf_dir: Path) -> dict:
         # directly (COMPOSITE_NATIVE): `route()` cannot see it, because the op
         # is in neither the native nor the FlagGems `.inc`.
         routes.update({op: vendor for op in COMPOSITE_NATIVE.get(vendor, set())})
+        dtype_routes = {}
         if vendor == "ascend":
             from native_host_policy import configured_dtype_routes
 
-            for op, clause in configured_dtype_routes(vendor).items():
-                base, comment, annotation = routes[op].partition("#")
-                if base.strip() == "flaggems":
-                    suffix = "  #" + annotation if comment else ""
-                    routes[op] = base.strip() + "; " + clause + suffix
+            dtype_routes = configured_dtype_routes(vendor)
+        elif vendor == "enflame":
+            # Keep the BF16 saved activation on the same rounding path as
+            # vendor Torch before the device-side SiLU backward.
+            dtype_routes = {"_log_softmax": "Float:enflame", "silu": "BFloat16:enflame"}
+        elif vendor == "mthreads":
+            # Measured against stock MUSA Torch with BF16 eager training and
+            # decode. Keep the published FlagGems route for other input dtypes.
+            dtype_routes = {
+                name: f"{dtypes}:mthreads"
+                for dtypes, ops in (
+                    (
+                        "Float",
+                        (
+                            "_log_softmax",
+                            "_log_softmax_backward_data",
+                            "_softmax",
+                            "_softmax_backward_data",
+                            "mean.dim",
+                            "pow.Tensor_Scalar",
+                            "rsqrt",
+                        ),
+                    ),
+                    (
+                        "BFloat16",
+                        ("mm", "mm.out", "bmm", "bmm.out", "silu", "silu_backward"),
+                    ),
+                    ("Float,BFloat16", ("sum.dim_IntList",)),
+                )
+                for name in ops
+                if name in natives[vendor]
+            }
+        elif vendor == "cambricon" and "le.Tensor" in natives[vendor]:
+            dtype_routes = {"le.Tensor": "Long:cambricon"}
+        elif vendor == "kunlunxin":
+            dtype_routes = {
+                op: clause
+                for op, clause in KUNLUNXIN_DTYPE_ROUTES.items()
+                if op in natives[vendor]
+            }
+        for op, clause in dtype_routes.items():
+            base, comment, annotation = routes[op].partition("#")
+            if base.strip() == "flaggems":
+                suffix = "  #" + annotation if comment else ""
+                routes[op] = base.strip() + "; " + clause + suffix
         out[vendor] = (
             render(
                 vendor,
@@ -3928,8 +4028,6 @@ def build_all(conf_dir: Path) -> dict:
         # platform measured a triton gap. It has to come off `gaps` as well as
         # onto `py_here` -- route() takes the gap set outside the coverage sets.
         measured = cuda_abi_measured_python_ops(sparse_conf)
-        if platform == "hygon":
-            measured |= HYGON_HOST_FLAGGEMS_MEASURED
         gaps -= measured
         # Same gate as the native vendors: a platform whose FlagGems Python
         # routes are not measured yet is not in FLAGGEMS_PYTHON_PLATFORMS, so
@@ -4026,17 +4124,43 @@ def native_host_routes(platform: str, base: dict) -> dict:
     # lowering. Qwen's eager attention uses its explicit ops.
     if platform == "metax":
         routes.update({op: "none" for op in METAX_COMPOSITE_FLAGGEMS})
-    operators = NATIVE_HOST_FLAGGEMS_OPS[platform]
-    missing = operators - routes.keys()
+    elif platform == "ascend":
+        missing = ASCEND_NATIVE_HOST_ACLNN - (
+            routes.keys() & vendor_native_ops(platform)
+        )
+        if missing:
+            raise SystemExit(
+                f"Ascend native host routes have no ACLNN kernel: {sorted(missing)}"
+            )
+        routes.update({op: platform for op in ASCEND_NATIVE_HOST_ACLNN})
+    operators = NATIVE_HOST_FLAGGEMS_OPS.get(platform, frozenset())
+    # A sparse ordinary config can omit operations backed by common wrappers.
+    missing = operators - routes.keys() - python_ops
     if missing:
         raise SystemExit(f"native host routes have no wrapper: {sorted(missing)}")
     routes.update({op: "flaggems" for op in operators})
     return routes
 
 
-def render_native_host_config(platform: str, base: dict) -> str:
+def render_native_host_config(
+    platform: str,
+    base: dict,
+    *,
+    vendor_kernels: bool = True,
+) -> str:
     """Render the configuration staged as backends_<platform>.conf in a wheel."""
     routes = native_host_routes(platform, base)
+    if vendor_kernels and platform == "metax":
+        routes["cat"] = "metax"
+    if vendor_kernels and platform == "cambricon":
+        routes["add.Scalar"] = "flaggems; Float,Half,BFloat16,Int:cambricon"
+        # FlagGems handles broadcast additions in eager decode on Native Host.
+        routes["add.Tensor"] = "flaggems"
+        routes["le.Tensor"] = "flaggems; Long:cambricon"
+    if vendor_kernels and platform in ("iluvatar", "metax"):
+        generated = CSRC_DIR / f"backends/{platform}/generated"
+        for op in registered_impls(generated / "foreach_host.cc"):
+            routes[op] = platform
     _reject_boxing_routes(f"backends_{platform}.conf", routes)
     text = render(platform, "", routes, include_gap_notes=False)
     if platform == "metax":
@@ -4052,6 +4176,21 @@ def render_native_host_config(platform: str, base: dict) -> str:
                 *precision_policy(platform)["operators"],
             ]
         }
+        text = render_config_routes(text, platform, policy=policy)
+    elif platform == "thead" and vendor_kernels:
+        from native_host_policy import NATIVE_SDK_PRECISION, render_config_routes
+
+        text = render_config_routes(
+            text, platform, policy=NATIVE_SDK_PRECISION[platform]
+        )
+    elif platform == "ascend":
+        from native_host_policy import precision_policy, render_config_routes
+
+        # The published FP32 argmax took 4.8 ms per Qwen decode step on
+        # Ascend910C. ACLNN used 19 us on the same vocabulary reduction.
+        policy = precision_policy(platform)
+        if "argmax" in vendor_native_ops(platform):
+            policy["operators"].append({"op": "argmax", "dtypes": ["Float"]})
         text = render_config_routes(text, platform, policy=policy)
     return text.replace(
         "# Full-coverage config:",

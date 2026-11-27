@@ -31,7 +31,7 @@ def published(tmp_path):
         f"__version__ = {policy['vendor_torch']!r}\n"
         f"git_version = {policy['torch_git_version']!r}\ncuda = '11.6'\n"
     )
-    for name in cohort.METAX_LIBRARIES:
+    for name in cohort.CUDA_DEVICE_LIBRARIES:
         (library / name).write_bytes(name.encode())
     for relative in policy["host_headers"]:
         header = library.parent / "include" / relative
