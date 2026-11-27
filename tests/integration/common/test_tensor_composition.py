@@ -93,9 +93,24 @@ def test_index_selection_and_advanced_indexing_without_cpu_fallback():
     torch.testing.assert_close(source.cpu(), host)
 
 
+@pytest.mark.anyplatform
+def test_index_copy_preserves_output_layout():
+    host = torch.arange(24, dtype=torch.float32).reshape(4, 6).t()
+    device = host.to("flagos:0")
+    index = torch.tensor([2, 0])
+    updates = torch.arange(-12, 0, dtype=host.dtype).reshape(2, 6).t()
+    out = torch.empty((4, 6), device=device.device, dtype=host.dtype).t()
+    actual = torch.index_copy(
+        device, -1, index.to(device.device), updates.to(device.device), out=out
+    )
+    assert actual is out
+    assert out.stride() == host.stride()
+    torch.testing.assert_close(out.cpu(), host.index_copy(-1, index, updates))
+
+
 @pytest.mark.nvidia
 @pytest.mark.flaggems_python
-def test_index_copy_preserves_output_layout_and_last_write():
+def test_index_copy_preserves_last_write_without_cpu_fallback():
     host = torch.arange(24, dtype=torch.bfloat16).reshape(4, 6).t()
     device = host.to("flagos:0")
     index = torch.tensor([2, 0, 2], device=device.device)
