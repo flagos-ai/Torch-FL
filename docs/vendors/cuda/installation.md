@@ -74,7 +74,14 @@ record — see [Testing](../../development/testing.md).
 
 The NVIDIA Native Host wheel builds against CPU PyTorch. Native hosts run
 published FlagGems kernels and use the NVIDIA SDK for device operations such as
-linear solves. The optional FlashAttention 3 package supplies the CUDA forward
+matrix products and linear solves through cuBLAS and cuSOLVER. The NVIDIA
+cuDNN frontend package enables the BF16 Conv3D route. Builds that find
+`CUTLASS_INCLUDE_DIR` and cuRAND headers enable the CUDA reference's
+memory-efficient attention algorithm for aligned wide BF16 heads. The kernel
+is instantiated at build time from the published CUTLASS headers and the CPU
+PyTorch wheel's attention template.
+
+The optional FlashAttention 3 package supplies the CUDA forward
 operator and its CUDA PyTorch runtime dependencies.
 The CUDA PyTorch used with such a wheel must share the build's PyTorch release,
 source revision, and C++ ABI.

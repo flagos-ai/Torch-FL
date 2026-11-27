@@ -57,6 +57,10 @@
 #include "backends/iluvatar/fused_attention.h"
 #endif
 
+#if defined(FLAGOS_HAVE_NVIDIA_CUTLASS)
+#include "native_host/backends/nvidia/cutlass_attention.h"
+#endif
+
 // Cambricon and Iluvatar are in the compiled set despite being FlagGems-primary:
 // each has a fused attention of its own (cnnlFlashAttentionForward_v2 on
 // Cambricon, libixattnbkd on Iluvatar), and without an override on this
@@ -462,6 +466,12 @@ at::Tensor WrapperScaledDotProductAttention(
     return at::native::scaled_dot_product_attention(
         query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   }
+#if defined(FLAGOS_HAVE_NVIDIA_CUTLASS)
+  if (!attn_mask && dropout_p == 0 && !is_causal && !enable_gqa) {
+    auto output = ::flagos::nvidia::TryCutlassAttention(query, key, value, scale);
+    if (output.defined()) return output;
+  }
+#endif
 #if defined(USE_ILUVATAR) && defined(FLAGOS_ILUVATAR_KERNEL)
   // The vendor's fused forward (libixattnbkd), when the conf asks for it and
   // the call is inside the class it was measured on. It is ahead of the

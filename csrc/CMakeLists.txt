@@ -617,6 +617,20 @@ if(_flagos_is_cuda)
     # compatibility driver can load these without compiling newer-toolkit PTX.
     set_property(TARGET ${LIBRARY_NAME} APPEND PROPERTY CUDA_ARCHITECTURES 80-real 90-real)
     list(APPEND _torch_fl_link_libs ${CMAKE_DL_LIBS})
+    find_path(FLAGOS_NVIDIA_CUTLASS_INCLUDE_DIR cutlass/cutlass.h
+      HINTS ENV CUTLASS_INCLUDE_DIR ENV CUTLASS_PATH PATH_SUFFIXES include)
+    find_path(FLAGOS_NVIDIA_CURAND_INCLUDE_DIR curand_kernel.h
+      HINTS ENV CURAND_INCLUDE_DIR ${CUDAToolkit_INCLUDE_DIRS} PATH_SUFFIXES include)
+    if(FLAGOS_NVIDIA_CUTLASS_INCLUDE_DIR AND FLAGOS_NVIDIA_CURAND_INCLUDE_DIR)
+      target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HAVE_NVIDIA_CUTLASS=1)
+      target_include_directories(${LIBRARY_NAME} PRIVATE
+        ${FLAGOS_NVIDIA_CUTLASS_INCLUDE_DIR} ${FLAGOS_NVIDIA_CURAND_INCLUDE_DIR})
+      target_sources(${LIBRARY_NAME} PRIVATE
+        native_host/backends/nvidia/cutlass_attention.cc
+        native_host/backends/nvidia/cutlass_attention_kernel.cu)
+      set_source_files_properties(native_host/backends/nvidia/cutlass_attention_kernel.cu
+        PROPERTIES COMPILE_OPTIONS "--expt-relaxed-constexpr")
+    endif()
   endif()
 endif()
 if(FLAGOS_BUILD_FLAGGEMS_CPP)
