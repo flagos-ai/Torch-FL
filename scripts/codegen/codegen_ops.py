@@ -1382,6 +1382,14 @@ def gen_flaggems_python_kernel(
                 '  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
                 "#endif\n"
             )
+        elif op == "constant_pad_nd":
+            # The published kernel specializes source at runtime for each rank.
+            # ATen's shape/fill/copy composition keeps the data on-device.
+            body = (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  return at::native::constant_pad_nd(self, pad, value);\n"
+                f"#else\n{body}\n#endif"
+            )
         elif op in ("scatter_add", "scatter_add_"):
             # The FlagGems 2-D kernel reads indices linearly, even when strided.
             prelude += (
@@ -1739,6 +1747,7 @@ FLAGGEMS_OUT_ADAPTERS = {
     "mean.out": "mean.dim",
     "cat.out": "cat",
 }
+NVIDIA_OUT_ADAPTERS = {"mul.out"}
 # Reuse the existing ATen metadata primitives. These allocate no device data
 # and introduce no numerical implementation or vendor dispatch.
 FLAGGEMS_HCU_METADATA_ADAPTERS = {
@@ -1759,7 +1768,7 @@ _OUT_ADAPTER_MARKER = "// BEGIN GENERATED FLAGGEMS OUT ADAPTERS"
 def gen_flaggems_out_adapters(funcs):
     lines = [
         _OUT_ADAPTER_MARKER,
-        "#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_DCU)",
+        "#if defined(FLAGOS_FLAGGEMS_PYTHON)",
         "#include <ATen/MemoryOverlap.h>",
         "#include <ATen/native/Resize.h>",
         "namespace at::native::flagos {",
@@ -1786,7 +1795,11 @@ def gen_flaggems_out_adapters(funcs):
         fn_type, dispatcher = schema_to_cpp_name(op)
         _, source_dispatcher = schema_to_cpp_name(functional)
         kernel = fn_type[:-2] + "Adapter"
+        guard = "defined(USE_DCU)"
+        if op in NVIDIA_OUT_ADAPTERS:
+            guard += " || defined(FLAGOS_ACCEL_CUDA)"
         lines += [
+            f"#if {guard}",
             f"{result_type} {kernel}({args_decl(args)}) {{",
             f"  at::assert_no_internal_overlap({out_name});",
         ]
@@ -1814,6 +1827,7 @@ def gen_flaggems_out_adapters(funcs):
             f"  return {out_name};",
             "}",
             f"REGISTER_IMPL_TO_DISPATCHER({fn_type}, {dispatcher}, Backend::kFlagGems, {kernel})",
+            "#endif",
         ]
     lines += [
         "} // namespace at::native::flagos",
@@ -1840,12 +1854,14 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         "#include <ATen/ExpandUtils.h>",
         "#include <ATen/native/CPUFallback.h>",
         "#include <ATen/native/ReduceOpsUtils.h>",
+        "#include <ATen/ops/constant_pad_nd_native.h>",
         '#include "../fallback.h"',
     ):
         if header not in refreshed:
             refreshed = refreshed.replace(include, include + "\n" + header, 1)
     for op, category, keywords in (
         ("add.Tensor", "functional_pure", {"alpha"}),
+        ("constant_pad_nd", "functional_pure", set()),
         ("mean.dim", "functional_pure", {"dtype"}),
         ("linalg_vector_norm", "functional_pure", {"dtype"}),
         ("mm.out", "out_variant_gemskwout", {"out"}),
@@ -1876,6 +1892,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
             "flag_gems."
             + {
                 "add.Tensor": "add",
+                "constant_pad_nd": "constant_pad_nd",
                 "mean.dim": "mean_dim",
                 "linalg_vector_norm": "vector_norm",
                 "mm.out": "mm_out",
@@ -2672,6 +2689,7 @@ def main():
         "",
         '#include "ops.h"',
         "#include <ATen/ExpandUtils.h>",
+        "#include <ATen/ops/constant_pad_nd_native.h>",
         '#include "../device_boxing.h"',
         '#include "../backends/flagos/python_op_caller.h"',
         '#include "../backends/flagos/typed_source_host.h"',
@@ -3062,6 +3080,8 @@ def main():
         for op in sorted(config_ops):
             if op == "scaled_dot_product_attention":
                 backend = fallback_key
+            elif op in NVIDIA_OUT_ADAPTERS:
+                backend = "flaggems"
             elif op in metadata_route_overrides:
                 backend = fallback_key
                 if op in flaggems_py:

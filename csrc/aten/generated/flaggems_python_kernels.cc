@@ -6,6 +6,7 @@
 #include "ops.h"
 #include "../strided_ops.h"
 #include <ATen/native/BinaryOps.h>
+#include <ATen/ops/constant_pad_nd_native.h>
 #include <ATen/ExpandUtils.h>
 #include "../fallback.h"
 #include <ATen/native/CPUFallback.h>
@@ -1378,9 +1379,13 @@ at::Tensor & ConjPhysicalInplaceKernelPython(at::Tensor & self) {
 
 static TypedSourceSlot ConstantPadNdFnSource("aten::constant_pad_nd", "flag_gems.constant_pad_nd", "621273739f8d32d92137d480e27294bdf0e23734eeee4993cb8aaf1270fd19f2", "{\"abi\": \"621273739f8d32d92137d480e27294bdf0e23734eeee4993cb8aaf1270fd19f2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.constant_pad_nd\", \"op\": \"aten::constant_pad_nd\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ConstantPadNdKernelPython(const at::Tensor & self, at::IntArrayRef pad, const at::Scalar & value) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  return at::native::constant_pad_nd(self, pad, value);
+#else
   auto result = ConstantPadNdFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.constant_pad_nd", {self, pad, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(pad), static_cast<const at::Scalar&>(value));
   UnboxToFlagos(result);
   return result;
+#endif
 }
 
 static TypedSourceSlot ConvolutionOverrideableFnSource("aten::convolution_overrideable", "flag_gems.convolution_overrideable", "42b174b4f4653ff1481ef845341543f84533a70c90020cafe3f6c6e73c89c520", "{\"abi\": \"42b174b4f4653ff1481ef845341543f84533a70c90020cafe3f6c6e73c89c520\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.convolution_overrideable\", \"op\": \"aten::convolution_overrideable\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
@@ -5675,10 +5680,11 @@ REGISTER_IMPL_TO_DISPATCHER(ZerosLikeFn, zeros_like_dispatcher, Backend::kFlagGe
 #endif  // FLAGOS_FLAGGEMS_PYTHON
 
 // BEGIN GENERATED FLAGGEMS OUT ADAPTERS
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_DCU)
+#if defined(FLAGOS_FLAGGEMS_PYTHON)
 #include <ATen/MemoryOverlap.h>
 #include <ATen/native/Resize.h>
 namespace at::native::flagos {
+#if defined(USE_DCU)
 at::Tensor & AddOutAdapter(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha, at::Tensor & out) {
   at::assert_no_internal_overlap(out);
   at::assert_no_partial_overlap(out, self);
@@ -5691,6 +5697,8 @@ at::Tensor & AddOutAdapter(const at::Tensor & self, const at::Tensor & other, co
   return out;
 }
 REGISTER_IMPL_TO_DISPATCHER(AddOutFn, add_out_dispatcher, Backend::kFlagGems, AddOutAdapter)
+#endif
+#if defined(USE_DCU) || defined(FLAGOS_ACCEL_CUDA)
 at::Tensor & MulOutAdapter(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
   at::assert_no_internal_overlap(out);
   at::assert_no_partial_overlap(out, self);
@@ -5703,6 +5711,8 @@ at::Tensor & MulOutAdapter(const at::Tensor & self, const at::Tensor & other, at
   return out;
 }
 REGISTER_IMPL_TO_DISPATCHER(MulOutFn, mul_out_dispatcher, Backend::kFlagGems, MulOutAdapter)
+#endif
+#if defined(USE_DCU)
 at::Tensor & MeanOutAdapter(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
   at::assert_no_internal_overlap(out);
   at::assert_no_partial_overlap(out, self);
@@ -5715,6 +5725,8 @@ at::Tensor & MeanOutAdapter(const at::Tensor & self, at::OptionalIntArrayRef dim
   return out;
 }
 REGISTER_IMPL_TO_DISPATCHER(MeanOutFn, mean_out_dispatcher, Backend::kFlagGems, MeanOutAdapter)
+#endif
+#if defined(USE_DCU)
 at::Tensor & CatOutAdapter(const at::ITensorListRef & tensors, int64_t dim, at::Tensor & out) {
   at::assert_no_internal_overlap(out);
   for (const auto& input : tensors) at::assert_no_overlap(out, input);
@@ -5726,6 +5738,7 @@ at::Tensor & CatOutAdapter(const at::ITensorListRef & tensors, int64_t dim, at::
   return out;
 }
 REGISTER_IMPL_TO_DISPATCHER(CatOutFn, cat_out_dispatcher, Backend::kFlagGems, CatOutAdapter)
+#endif
 } // namespace at::native::flagos
 #endif
 // END GENERATED FLAGGEMS OUT ADAPTERS

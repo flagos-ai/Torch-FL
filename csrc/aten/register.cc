@@ -32,6 +32,7 @@
 #include "backends/soft_lowp/format.h"
 #include "backends/soft_lowp/ops.h"
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+#include <ATen/NamedTensorUtils.h>
 #include "backends/flagos/python_op_caller.h"
 #endif
 // TsingMicro's RNG kernels are claimed directly below rather than through a
@@ -318,6 +319,19 @@ void WrapperRecordStream(at::Tensor& self, at::Stream s) {
 }
 
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+bool WrapperEqual(const at::Tensor& self, const at::Tensor& other) {
+  if (!at::namedinference::are_names_equal(self.unsafeGetTensorImpl(),
+                                         other.unsafeGetTensorImpl())) {
+    return false;
+  }
+  TORCH_CHECK(self.device() == other.device(), "Cannot compare tensors on different devices: ",
+              self.device(), " and ", other.device());
+  if (!self.sizes().equals(other.sizes())) return false;
+  if (self.numel() == 0) return true;
+  at::NoNamesGuard guard;
+  return at::eq(self, other).all().item<bool>();
+}
+
 std::optional<float> NvidiaScalarReciprocal(const at::Tensor& self,
                                              const at::Scalar& divisor,
                                              const char* op) {
@@ -868,6 +882,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     defined(FLAGOS_ACCEL_PPU)
   m.impl("convolution_backward_overrideable",
       FlagosWrapperConvolutionBackwardOverrideable);
+#endif
+#if defined(FLAGOS_ACCEL_CUDA)
+  m.impl("equal", WrapperEqual);
 #endif
 
 #if defined(USE_TSINGMICRO)
