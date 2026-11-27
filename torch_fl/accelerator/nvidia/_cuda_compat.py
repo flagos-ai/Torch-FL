@@ -216,6 +216,8 @@ _ATTR_L2_CACHE_SIZE = 38
 _ATTR_MAX_THREADS_PER_MP = 39
 _ATTR_WARP_SIZE = 10
 _ATTR_MAX_THREADS_PER_BLOCK = 1
+_ATTR_MAX_REGS_PER_MP = 82
+_ATTR_MAX_SHARED_MEM_PER_MP = 81
 
 
 @dataclass
@@ -247,6 +249,8 @@ class _CudaDeviceProperties:
     # CUDA's documented ceiling for one block of threads. Every device this shim
     # describes reports 1024, so the default and the queried value agree.
     max_threads_per_block: int = 1024
+    regs_per_multiprocessor: int | None = None
+    shared_memory_per_multiprocessor: int | None = None
     is_integrated: bool = False
     is_multi_gpu_board: bool = False
     gcnArchName: str = ""
@@ -376,6 +380,9 @@ def _query_device_properties(device_index: int) -> _CudaDeviceProperties:
     props.max_threads_per_block = attr(
         _ATTR_MAX_THREADS_PER_BLOCK, props.max_threads_per_block
     )
+    props.regs_per_multiprocessor = attr(_ATTR_MAX_REGS_PER_MP, None)
+    props.shared_memory_per_multiprocessor = attr(_ATTR_MAX_SHARED_MEM_PER_MP, None)
+    props.gcnArchName = props.name
 
     total = ctypes.c_size_t(0)
     try:

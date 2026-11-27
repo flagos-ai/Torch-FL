@@ -781,8 +781,10 @@ def get_device_properties(device=None):
 
 @torch.compiler.assume_constant_result
 def _get_device_properties(index: int):
-    if build_info().vendor == "nvidia" and torch.version.cuda is not None:
-        return torch.cuda.get_device_properties(index)
+    if build_info().vendor == "nvidia":
+        from ..accelerator.nvidia._cuda_compat import _get_props
+
+        return _get_props(index)
     return _DeviceProperties(index)
 
 

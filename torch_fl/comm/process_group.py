@@ -661,12 +661,11 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         # _HostStagedGloo is a facade, not a Backend: what has to be registered
         # for the group identity to have somewhere to live is the gloo group it
         # wraps (see its c10d_backend property).
-        single_rank = isinstance(inner, _SingleRankCollectives)
         inner = getattr(inner, "c10d_backend", inner)
         try:
             index = (
                 torch.accelerator.current_device_index()
-                if single_rank
+                if _platform.build_info().uses_nvidia_sdk
                 else torch.cuda.current_device()
             )
             device = torch.device("privateuseone", max(index, 0))
@@ -686,10 +685,7 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         """
         vendor = os.environ.get("GEMS_VENDOR", _DEFAULT_VENDOR)
         prof = _get_profile(vendor)
-        build = _platform.build_info()
-        independent_nvidia = (
-            vendor == "nvidia" and build.native_hosts and "vendor" not in build.kernels
-        )
+        independent_nvidia = _platform.build_info().uses_nvidia_sdk
 
         if independent_nvidia and world_size == 1:
             self._inner = _SingleRankCollectives(store, timeout)

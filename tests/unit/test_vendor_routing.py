@@ -251,7 +251,7 @@ def test_native_used_when_flagcx_unavailable(monkeypatch):
 @pytest.mark.parametrize("world_size", (1, 2))
 def test_nvidia_native_host_skips_torch_nccl(monkeypatch, world_size):
     obj, calls, _ = _make(monkeypatch, "nvidia", flagcx_ok=False, native_ok=True)
-    build = pg._platform.BuildInfo(native_hosts=True)
+    build = pg._platform.BuildInfo(platform="cuda", native_hosts=True)
     monkeypatch.setattr(pg._platform, "build_info", lambda: build)
     if world_size == 1:
         local_group = object()
