@@ -471,13 +471,13 @@ class Event(torch.cuda.Event):
     def __new__(
         cls, enable_timing=False, blocking=False, interprocess=False, external=False
     ):
+        if (
+            _platform() in ("cuda", "musa")
+            and hasattr(_C, "_get_native_current_raw_stream")
+            and not (blocking or interprocess or external)
+        ):
+            return torch.Event(device="flagos", enable_timing=enable_timing)
         if not _has_cuda_runtime():
-            if (
-                _platform() == "musa"
-                and hasattr(_C, "_get_native_current_raw_stream")
-                and not (blocking or interprocess or external)
-            ):
-                return torch.Event(device="flagos", enable_timing=enable_timing)
             # One spelling of the host-clock fallback for the arms below, so they
             # differ only in which vendor class they try first.
             host_timed = dict(
