@@ -1672,6 +1672,10 @@ def gen_flaggems_python_kernel(
         elif op == "cat":
             if typed:
                 prelude += (
+                    "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                    "  if (auto result = TryGemsStridedCat(tensors, dim); result.defined())\n"
+                    "    return result;\n"
+                    "#endif\n"
                     "#if defined(FLAGOS_NATIVE_THEAD_VENDOR)\n"
                     "  if (auto kernel = cat_dispatcher.KernelFor(Backend::kThead);\n"
                     "      kernel && NativeSourceCanRun() && thead_vendor::Concatenation(tensors, dim))\n"
@@ -2538,11 +2542,11 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         refreshed = refreshed.replace(
             '#include "ops.h"', '#include "ops.h"\n' + include, 1
         )
-    metadata_include = '#include "../strided_ops.h"'
-    if metadata_include not in refreshed:
-        refreshed = refreshed.replace(
-            '#include "ops.h"', '#include "ops.h"\n' + metadata_include, 1
-        )
+    for header in ('#include "../strided_ops.h"', '#include "../copy_ops.h"'):
+        if header not in refreshed:
+            refreshed = refreshed.replace(
+                '#include "ops.h"', '#include "ops.h"\n' + header, 1
+            )
     old_nvidia_sdk_include = (
         "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
         '#include "native_host/backends/nvidia/linalg.h"\n'

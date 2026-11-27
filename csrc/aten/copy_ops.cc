@@ -246,6 +246,47 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
 #endif
 }
 
+at::Tensor TryGemsStridedCat(const at::ITensorListRef& tensors, int64_t dim) {
+#if defined(FLAGOS_GEMS_DEVICE_COPY) && defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (tensors.size() != 2) return {};
+  auto input = tensors.begin();
+  const auto& first = *input++;
+  const auto& second = *input;
+  const auto rank = first.dim();
+  if (rank == 0 || rank != second.dim() || dim < -rank || dim >= rank ||
+      !first.is_privateuseone() || first.device() != second.device() ||
+      first.scalar_type() != second.scalar_type() ||
+      !GemsCopyType(first.scalar_type()) ||
+      (first.is_contiguous() && second.is_contiguous())) {
+    return {};
+  }
+  for (const auto* tensor : {&first, &second}) {
+    if (tensor->layout() != at::kStrided || tensor->has_names() ||
+        tensor->is_conj() || tensor->is_neg() || tensor->_is_zerotensor() ||
+        tensor->numel() == 0 || tensor->numel() > INT32_MAX ||
+        tensor->suggest_memory_format() != at::MemoryFormat::Contiguous) {
+      return {};
+    }
+  }
+  if (first.numel() + second.numel() > INT32_MAX) return {};
+
+  if (dim < 0) dim += rank;
+  for (int64_t axis = 0; axis < rank; ++axis) {
+    if (axis != dim && first.size(axis) != second.size(axis)) return {};
+  }
+  auto shape = first.sizes().vec();
+  shape[dim] += second.size(dim);
+  auto output = at::empty(shape, first.options());
+  // Write the strided inputs straight into the final tensor using the
+  // published FlagGems copy, avoiding intermediate contiguous tensors.
+  if (TryGemsDeviceCopy(first, output.narrow(dim, 0, first.size(dim))) &&
+      TryGemsDeviceCopy(second, output.narrow(dim, first.size(dim), second.size(dim)))) {
+    return output;
+  }
+#endif
+  return {};
+}
+
 namespace {
 
 #if defined(FLAGOS_ASYNC_CONTIGUOUS_COPY)

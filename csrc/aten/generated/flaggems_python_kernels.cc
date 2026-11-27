@@ -4,6 +4,7 @@
 #ifdef FLAGOS_FLAGGEMS_PYTHON
 
 #include "ops.h"
+#include "../copy_ops.h"
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
 #include "native_host/backends/nvidia/linalg.h"
 #include "native_host/backends/nvidia/pointwise.h"
@@ -1315,6 +1316,10 @@ at::Tensor BucketizeTensorKernelPython(const at::Tensor & self, const at::Tensor
 
 static TypedSourceSlot CatFnSource("aten::cat", "flag_gems.cat", "eb699a46d1603857e5598ada5081877cc15a70ec4a7246c1ae68b54be9a85d0d", "{\"abi\": \"eb699a46d1603857e5598ada5081877cc15a70ec4a7246c1ae68b54be9a85d0d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::ITensorListRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.cat\", \"op\": \"aten::cat\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CatKernelPython(const at::ITensorListRef & tensors, int64_t dim) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = TryGemsStridedCat(tensors, dim); result.defined())
+    return result;
+#endif
 #if defined(FLAGOS_NATIVE_THEAD_VENDOR)
   if (auto kernel = cat_dispatcher.KernelFor(Backend::kThead);
       kernel && NativeSourceCanRun() && thead_vendor::Concatenation(tensors, dim))
