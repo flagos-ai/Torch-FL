@@ -68,7 +68,6 @@
 #include <aten/cuda_tensor_view.h>
 
 #include "dataparallel.h"
-#include "nvidia_fa3.h"
 
 #ifdef FLAGOS_METAL_BINDINGS
 int InitMetalBindings(PyObject* mod);
@@ -525,38 +524,6 @@ PyObject* _flagos_to_cuda_view(PyObject* self, PyObject* arg) {
   END_HANDLE_TH_ERRORS
 }
 
-#if defined(FLAGOS_NVIDIA_FA3_VENDOR)
-PyObject* _try_register_nvidia_fa3(PyObject*, PyObject*) {
-  HANDLE_TH_ERRORS
-  return PyBool_FromLong(flagos::bindings::TryRegisterNvidiaFlashAttention3());
-  END_HANDLE_TH_ERRORS
-}
-#endif
-
-#if defined(FLAGOS_NATIVE_NVIDIA_STREAM)
-PyObject* _record_flagos_cuda_borrows(PyObject*, PyObject* arg) {
-  HANDLE_TH_ERRORS
-  TORCH_CHECK(PyList_Check(arg) && PyList_GET_SIZE(arg) > 0,
-              "Expected a nonempty list of FlagOS tensors");
-  if (!c10::flagos::CachingDeviceAllocator::is_enabled()) Py_RETURN_FALSE;
-  auto* allocator = c10::flagos::GetCachingAllocator();
-  if (!allocator) Py_RETURN_FALSE;
-  const auto device = c10::flagos::CurrentDevice();
-  const auto stream = GetCurrentStreamForDevice(device);
-  bool safe = true;
-  for (Py_ssize_t i = 0; i < PyList_GET_SIZE(arg); ++i) {
-    auto* value = PyList_GET_ITEM(arg, i);
-    TORCH_CHECK(THPVariable_Check(value), "Expected a tensor argument");
-    const auto tensor = THPVariable_Unpack(value);
-    TORCH_CHECK(tensor.is_privateuseone() && tensor.device().index() == device,
-                "Expected FlagOS storage on the current device");
-    safe &= allocator->record_stream(tensor.storage().data_ptr(), stream);
-  }
-  return PyBool_FromLong(safe);
-  END_HANDLE_TH_ERRORS
-}
-#endif
-
 PyObject* _cuda_to_flagos_view(PyObject* self, PyObject* args) {
   HANDLE_TH_ERRORS
   PyObject* tensor_obj;
@@ -805,12 +772,6 @@ static PyMethodDef methods[] = {
     {"_get_device_count", _getDeviceCount, METH_NOARGS, nullptr},
     {"_synchronize", _synchronize, METH_NOARGS, nullptr},
     {"_flagos_to_cuda_view", _flagos_to_cuda_view, METH_O, nullptr},
-#if defined(FLAGOS_NVIDIA_FA3_VENDOR)
-    {"_try_register_nvidia_fa3", _try_register_nvidia_fa3, METH_NOARGS, nullptr},
-#endif
-#if defined(FLAGOS_NATIVE_NVIDIA_STREAM)
-    {"_record_flagos_cuda_borrows", _record_flagos_cuda_borrows, METH_O, nullptr},
-#endif
     {"_cuda_to_flagos_view", _cuda_to_flagos_view, METH_VARARGS, nullptr},
     {"_flagos_identity_view", _flagos_identity_view, METH_O, nullptr},
 #ifdef USE_BPU

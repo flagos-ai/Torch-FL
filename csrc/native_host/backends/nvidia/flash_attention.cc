@@ -1,8 +1,6 @@
 // Copyright 2026 FlagOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include "nvidia_fa3.h"
-
 #include <aten/cuda_tensor_view.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_strided.h>
@@ -16,10 +14,9 @@
 #include <runtime/allocator/caching_device_allocator.h>
 #include <torch/library.h>
 
-#include <memory>
 #include <optional>
 
-namespace flagos::bindings {
+namespace flagos::nvidia {
 namespace {
 
 using torch::jit::Stack;
@@ -46,10 +43,20 @@ bool MatchesVendorSchema(const c10::FunctionSchema& forward,
     if (name != vendor_args[i].name() || *args[i].type() != *vendor_args[i].type())
       return false;
   }
+  for (size_t i = 0; i < forward.returns().size(); ++i) {
+    if (*forward.returns()[i].type() != *raw.returns()[i].type())
+      return false;
+  }
   return true;
 }
 
-void Forward(const c10::OperatorHandle&, Stack* stack) {
+void Forward(const c10::OperatorHandle& forward, Stack* stack) {
+  static const auto raw = [&] {
+    const auto op = c10::Dispatcher::singleton().findSchema({raw_forward_name, ""});
+    TORCH_CHECK(op && MatchesVendorSchema(forward.schema(), op->schema()),
+                "FlashAttention 3 on FlagOS requires matching registered forward and CUDA operator schemas");
+    return *op;
+  }();
   const auto& query = (*stack)[0].toTensor();
   const auto device = query.device();
   TORCH_CHECK(device.is_privateuseone(), "FlashAttention 3 expects a FlagOS query");
@@ -59,7 +66,6 @@ void Forward(const c10::OperatorHandle&, Stack* stack) {
               "FlashAttention 3 on FlagOS supports read-only forward without an "
               "output buffer, KV-cache updates, or external scheduler metadata");
 
-  static const auto raw = c10::Dispatcher::singleton().findSchemaOrThrow(raw_forward_name, "");
   static const auto device_count = [] {
     const auto count = c10::cuda::device_count();
     c10::cuda::CUDACachingAllocator::init(count);
@@ -139,21 +145,11 @@ void Forward(const c10::OperatorHandle&, Stack* stack) {
 
 } // namespace
 
-bool TryRegisterNvidiaFlashAttention3() {
-  auto& dispatcher = c10::Dispatcher::singleton();
-  const auto forward = dispatcher.findSchema({forward_name, ""});
-  const auto raw = dispatcher.findSchema({raw_forward_name, ""});
-  if (!forward || !raw || !MatchesVendorSchema(forward->schema(), raw->schema())) {
-    return false;
+TORCH_LIBRARY_IMPL(flash_attn_3, PrivateUse1, m) {
+  const auto forward = c10::Dispatcher::singleton().findSchema({forward_name, ""});
+  if (!forward || !forward->hasKernelForDispatchKey(c10::DispatchKey::PrivateUse1)) {
+    m.impl("_flash_attn_forward", torch::CppFunction::makeFromBoxedFunction<&Forward>());
   }
-  static const auto owner = [] {
-    auto library = std::make_unique<torch::Library>(
-        torch::Library::IMPL, "flash_attn_3", c10::DispatchKey::PrivateUse1,
-        __FILE__, __LINE__);
-    library->impl("_flash_attn_forward", torch::CppFunction::makeFromBoxedFunction<&Forward>());
-    return library;
-  }();
-  return static_cast<bool>(owner);
 }
 
-} // namespace flagos::bindings
+} // namespace flagos::nvidia

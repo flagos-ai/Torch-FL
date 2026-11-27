@@ -23,6 +23,13 @@ class Backend(BackendInterface):
         shared_headers=("launch_params.h",),
     )
 
+    def initialize_runtime(self) -> None:
+        import torch
+
+        activate = getattr(torch.ops.flagos, "_activate_native_nvidia", None)
+        if activate is not None:
+            activate()
+
     def extension_options(self, driver: Path, source_dir: Path) -> BuildOptions:
         cuda = Path(
             os.environ.get("CUDA_HOME")

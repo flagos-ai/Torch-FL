@@ -299,24 +299,6 @@ at::Tensor& UpsampleExactOut(const at::Tensor& input, at::IntArrayRef size,
   return out.copy_(kernel.output);
 }
 
-void AssertAsync(const at::Tensor& input) {
-  VendorScope scope(input);
-  at::native::_assert_async_cuda(input);
-}
-
-void AssertAsyncMessage(const at::Tensor& input, c10::string_view message) {
-  VendorScope scope(input);
-  at::native::_assert_async_msg_cuda(input, message);
-}
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> LayerNorm(
-    const at::Tensor& input, at::IntArrayRef shape,
-    const std::optional<at::Tensor>& weight,
-    const std::optional<at::Tensor>& bias, double eps) {
-  VendorScope scope(input);
-  return at::native::layer_norm_cuda(input, shape, weight, bias, eps);
-}
-
 at::Tensor& ProdIntOut(const at::Tensor& self, int64_t dim, bool keepdim,
                       std::optional<at::ScalarType> dtype, at::Tensor& out) {
   TORCH_CHECK(out.device() == self.device(), "prod(): output device must match the input");
@@ -341,21 +323,6 @@ at::Tensor& ProdIntOut(const at::Tensor& self, int64_t dim, bool keepdim,
 
 }  // namespace
 
-TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-  m.impl("mul.out", MulOut);
-  m.impl("equal", Equal);
-  m.impl("_assert_async", AssertAsync);
-  m.impl("_assert_async.msg", AssertAsyncMessage);
-  m.impl("_linalg_check_errors", at::native::_linalg_check_errors);
-  m.impl("_linalg_solve_ex.result", SolveExOut);
-  m.impl("_upsample_nearest_exact2d.out", UpsampleExactOut);
-  m.impl("addmm.out", AddmmOut);
-  m.impl("index.Tensor_out", IndexOut);
-  m.impl("index_copy.out", IndexCopyOut);
-  m.impl("index_select", IndexSelect);
-  m.impl("native_layer_norm", LayerNorm);
-  m.impl("pow.Tensor_Tensor_out", PowTensorOut);
-  m.impl("prod.int_out", ProdIntOut);
-}
+#include "aten_registration.inc"
 
 }  // namespace at::native::flagos::vendor

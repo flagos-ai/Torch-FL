@@ -506,9 +506,16 @@ endif()
 # for the torch in the build environment rather than for a directory the
 # conditions below might fall back to.
 set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA OFF)
-if(_flagos_is_cuda AND PYTORCH_INSTALL_DIR
-   AND EXISTS "${PYTORCH_INSTALL_DIR}/lib/libtorch_cuda.so")
-  set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA ON)
+get_target_property(_flagos_torch_links torch_cpu_library INTERFACE_LINK_LIBRARIES)
+if("torch" IN_LIST _flagos_torch_links AND TARGET torch_cuda)
+  get_target_property(_flagos_torch_cuda torch_cuda IMPORTED_LOCATION_RELEASE)
+  if(NOT _flagos_torch_cuda)
+    get_target_property(_flagos_torch_cuda torch_cuda IMPORTED_LOCATION)
+  endif()
+  get_filename_component(_flagos_torch_cuda_name "${_flagos_torch_cuda}" NAME)
+  if(_flagos_torch_cuda_name STREQUAL "libtorch_cuda.so" AND EXISTS "${_flagos_torch_cuda}")
+    set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA ON)
+  endif()
 endif()
 message(STATUS "torch_fl: torch links libtorch_cuda.so: ${FLAGOS_TORCH_LINKS_LIBTORCH_CUDA}")
 if(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA)
@@ -516,7 +523,11 @@ if(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA)
 endif()
 
 set(_torch_fl_link_libs torch_cpu_library torch_python_library flagos ${CUDA_RUNTIME_LIB})
-if(_flagos_is_cuda AND FLAGOS_BUILD_VENDOR AND FLAGOS_BUILD_FLAGGEMS
+if(_flagos_is_cuda AND FLAGOS_TORCH_LINKS_LIBTORCH_CUDA AND TARGET c10_cuda)
+  target_sources(${LIBRARY_NAME} PRIVATE native_host/backends/nvidia/flash_attention.cc)
+  list(APPEND _torch_fl_link_libs c10_cuda)
+endif()
+if(_flagos_is_cuda AND FLAGOS_NATIVE_HOSTS AND FLAGOS_BUILD_VENDOR AND FLAGOS_BUILD_FLAGGEMS
    AND FLAGOS_TORCH_LINKS_LIBTORCH_CUDA
    AND Torch_VERSION VERSION_GREATER_EQUAL "2.10"
    AND Torch_VERSION VERSION_LESS "2.11")

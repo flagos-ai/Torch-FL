@@ -38,6 +38,57 @@ NVIDIA_HOST_FUNCTIONS = {
     "pow.Scalar": ("pointwise", "at::native::structured_pow_Scalar_out", "PowScalar"),
     "sub.Tensor": ("pointwise", "at::native::add_stub", "Sub"),
 }
+NVIDIA_ATEN_WRAPPERS = {
+    "_assert_async": ("AssertAsync", "at::native::_assert_async_cuda"),
+    "_assert_async.msg": ("AssertAsyncMessage", "at::native::_assert_async_msg_cuda"),
+    "native_layer_norm": ("LayerNorm", "at::native::layer_norm_cuda"),
+}
+NVIDIA_ATEN_REGISTRATIONS = {
+    "_linalg_check_errors": "at::native::_linalg_check_errors",
+    "_linalg_solve_ex.result": "SolveExOut",
+    "_upsample_nearest_exact2d.out": "UpsampleExactOut",
+    "addmm.out": "AddmmOut",
+    "equal": "Equal",
+    "index.Tensor_out": "IndexOut",
+    "index_copy.out": "IndexCopyOut",
+    "index_select": "IndexSelect",
+    "mul.out": "MulOut",
+    "pow.Tensor_Tensor_out": "PowTensorOut",
+    "prod.int_out": "ProdIntOut",
+}
+
+
+def render_nvidia_aten(natives):
+    """Claim supplemental ATen schemas used by the optional CUDA vendor module."""
+    wrappers = []
+    registrations = dict(NVIDIA_ATEN_REGISTRATIONS)
+    for name, (wrapper, kernel) in NVIDIA_ATEN_WRAPPERS.items():
+        native = natives[name]
+        with native_function_manager(native):
+            _, result, args = unified_sig(native)
+        if not args or args[0][0] != "const at::Tensor &":
+            raise ValueError(f"unsupported CUDA vendor input: {name}")
+        arguments = ", ".join(f"{kind} {arg}" for kind, arg in args)
+        operands = ", ".join(arg for _, arg in args)
+        wrappers.append(
+            f"{result} {wrapper}({arguments}) {{\n"
+            f"  VendorScope scope({args[0][1]});\n"
+            f"  return {kernel}({operands});\n"
+            "}\n"
+        )
+        registrations[name] = wrapper
+    claims = []
+    for name, kernel in sorted(registrations.items()):
+        if name not in natives:
+            raise ValueError(f"unknown CUDA vendor schema: {name}")
+        claims.append(f'  m.impl("{name}", {kernel});')
+    return (
+        BANNER
+        + "\n".join(wrappers)
+        + "\nTORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {\n"
+        + "\n".join(claims)
+        + "\n}\n"
+    )
 
 
 def validate_policy(policy):
@@ -271,10 +322,15 @@ def render(policy):
     if policy["vendor"] == "hygon":
         entry_path = ENTRY_PATH.with_name("native_vendor_hygon_entries.inc")
         source = "#define FLAGOS_NATIVE_HYGON 1\n" + source
-    return {
+    outputs = {
         entry_path: BANNER + "\n".join(entries) + "\n",
         source_path: source,
-    }, catalog
+    }
+    if nvidia:
+        outputs[source_path.with_name("aten_registration.inc")] = render_nvidia_aten(
+            natives
+        )
+    return outputs, catalog
 
 
 def main():
