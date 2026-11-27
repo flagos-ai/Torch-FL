@@ -14,6 +14,7 @@ enum class PointwiseOp { PowScalar, Reciprocal, Rsqrt, Silu };
 at::Tensor TryPointwise(PointwiseOp op, const at::Tensor& input,
                        float scalar = 0);
 at::Tensor TryDivide(const at::Tensor& left, const at::Tensor& right);
+at::Tensor TryMeanLastDim(const at::Tensor& input, bool keepdim);
 
 struct DivisionLayout {
   static constexpr int max_dimensions = 8;

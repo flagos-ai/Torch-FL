@@ -3287,6 +3287,14 @@ at::Tensor MeanKernelPython(const at::Tensor & self, ::std::optional<at::ScalarT
 
 static TypedSourceSlot MeanDimFnSource("aten::mean.dim", "flag_gems.mean_dim", "0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c", "{\"abi\": \"0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.mean_dim\", \"op\": \"aten::mean.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (dim.has_value() && dim->size() == 1 &&
+      (dim->front() == -1 || dim->front() == self.dim() - 1) &&
+      (!dtype.has_value() || *dtype == at::kFloat)) {
+    if (auto result = ::flagos::nvidia::TryMeanLastDim(self, keepdim); result.defined())
+      return result;
+  }
+#endif
   const auto dim_mask = at::native::make_dim_mask(dim, self.dim());
   if (self.numel() == 0) {
     const auto output_dtype = dtype.value_or(self.scalar_type());

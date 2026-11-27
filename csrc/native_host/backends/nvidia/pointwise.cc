@@ -4,10 +4,13 @@
 #include "pointwise.h"
 
 #include <ATen/TensorIterator.h>
+#include <ATen/ops/empty.h>
 #include <ATen/ops/empty_like.h>
 #include <c10/core/DeviceGuard.h>
 #include <cuda_runtime_api.h>
 #include <flagos.h>
+
+#include <limits>
 
 namespace flagos::nvidia {
 
@@ -15,6 +18,8 @@ cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* 
                             const int64_t size, float scalar, cudaStream_t stream);
 cudaError_t LaunchDivide(const float* left, const float* right, float* out,
                          int64_t size, DivisionLayout layout, cudaStream_t stream);
+cudaError_t LaunchMeanLastDim(const float* input, float* output, int rows, int width,
+                              float scale, cudaStream_t stream);
 
 at::Tensor TryPointwise(PointwiseOp op, const at::Tensor& input, float scalar) {
   const auto dtype = input.scalar_type();
@@ -63,6 +68,32 @@ at::Tensor TryDivide(const at::Tensor& left, const at::Tensor& right) {
   TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK divide launch failed: ",
               cudaGetErrorString(status));
   return iter.output();
+}
+
+at::Tensor TryMeanLastDim(const at::Tensor& input, bool keepdim) {
+  if (input.scalar_type() != at::kFloat || !input.device().is_privateuseone() ||
+      input.dim() < 2 || !input.is_contiguous() || input.is_neg() || input.has_names())
+    return {};
+  const auto width = input.size(-1);
+  if (width < 128 || width > 8160 || width % 4 ||
+      reinterpret_cast<uintptr_t>(input.const_data_ptr()) % 16)
+    return {};
+  const auto rows = input.numel() / width;
+  if (rows < 16 || rows > std::numeric_limits<int>::max() - 15) return {};
+  auto shape = input.sizes().vec();
+  if (keepdim)
+    shape.back() = 1;
+  else
+    shape.pop_back();
+  const c10::OptionalDeviceGuard guard(input.device());
+  auto result = at::empty(shape, input.options());
+  const auto queue = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(input.device().index()));
+  const auto scale = static_cast<float>(rows) / static_cast<float>(input.numel());
+  const auto status = LaunchMeanLastDim(input.const_data_ptr<float>(), result.mutable_data_ptr<float>(),
+                                       rows, width, scale, queue);
+  TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK mean launch failed: ",
+              cudaGetErrorString(status));
+  return result;
 }
 
 }  // namespace flagos::nvidia

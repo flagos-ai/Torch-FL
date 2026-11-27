@@ -39,15 +39,18 @@ def _plan(cudnn, handle, input_meta, weight_meta, output_meta, params, determini
         image, filter_, padding=padding, stride=stride, dilation=dilation
     )
     output.set_output(True).set_data_type(dtype).set_stride(output_meta[1])
-    graph.validate()
-    graph.build_operation_graph()
+    try:
+        graph.validate()
+        graph.build_operation_graph()
+    except cudnn.cudnnGraphNotSupportedError:
+        return None
     notes = [cudnn.numerical_note.DOWN_CONVERT_INPUTS]
     if deterministic:
         notes.append(cudnn.numerical_note.NONDETERMINISTIC)
     for mode in (cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK):
-        graph.create_execution_plans([mode])
-        graph.deselect_numeric_notes(notes)
         try:
+            graph.create_execution_plans([mode])
+            graph.deselect_numeric_notes(notes)
             graph.check_support()
             graph.build_plans()
         except cudnn.cudnnGraphNotSupportedError:

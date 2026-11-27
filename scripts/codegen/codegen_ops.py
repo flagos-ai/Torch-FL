@@ -1449,6 +1449,14 @@ def gen_flaggems_python_kernel(
             # Use reduction metadata for empty inputs. If the result has
             # elements, each corresponds to a reduction over an empty slice.
             prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (dim.has_value() && dim->size() == 1 &&\n"
+                "      (dim->front() == -1 || dim->front() == self.dim() - 1) &&\n"
+                "      (!dtype.has_value() || *dtype == at::kFloat)) {\n"
+                "    if (auto result = ::flagos::nvidia::TryMeanLastDim(self, keepdim); result.defined())\n"
+                "      return result;\n"
+                "  }\n"
+                "#endif\n"
                 "  const auto dim_mask = at::native::make_dim_mask(dim, self.dim());\n"
                 "  if (self.numel() == 0) {\n"
                 "    const auto output_dtype = dtype.value_or(self.scalar_type());\n"

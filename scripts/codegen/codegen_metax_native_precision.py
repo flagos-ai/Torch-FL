@@ -31,12 +31,16 @@ NVIDIA_CUDA_POINTWISE = """\
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 
 #include <algorithm>
 #include <cstdint>
 
 namespace flagos::nvidia {
 namespace {
+
+namespace cg = cooperative_groups;
 
 template <PointwiseOp Op>
 __device__ float Evaluate(float value, float scalar) {
@@ -78,6 +82,25 @@ __global__ void Divide(const float* left, const float* right, float* result,
   }
 }
 
+__global__ void MeanLastDim(const float4* input, float* output, int rows, int vectors,
+                            float scale) {
+  const auto group = cg::tiled_partition<32>(cg::this_thread_block());
+  const int row = blockIdx.x * blockDim.y + threadIdx.y;
+  if (row >= rows) return;
+  const auto* data = input + int64_t(row) * vectors;
+  float a = 0, b = 0, c = 0, d = 0;
+  for (int i = group.thread_rank(); i < vectors; i += group.size()) {
+    const auto item = data[i];
+    a += item.x;
+    b += item.y;
+    c += item.z;
+    d += item.w;
+  }
+  // Keep the per-component accumulation order before the vendor warp sum.
+  const auto sum = cg::reduce(group, ((a + b) + c) + d, cg::plus<float>());
+  if (group.thread_rank() == 0) output[row] = sum * scale;
+}
+
 }  // namespace
 
 cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* output,
@@ -103,6 +126,14 @@ cudaError_t LaunchDivide(const float* left, const float* right, float* out,
   } else {
     Divide<false><<<blocks, threads, 0, stream>>>(left, right, out, size, layout);
   }
+  return cudaGetLastError();
+}
+
+cudaError_t LaunchMeanLastDim(const float* input, float* output, int rows, int width,
+                              float scale, cudaStream_t stream) {
+  constexpr int rows_per_block = 16;
+  MeanLastDim<<<(rows + rows_per_block - 1) / rows_per_block, dim3(32, rows_per_block), 0, stream>>>(
+      reinterpret_cast<const float4*>(input), output, rows, width / 4, scale);
   return cudaGetLastError();
 }
 
