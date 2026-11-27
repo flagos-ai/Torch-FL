@@ -10,9 +10,12 @@
 #include "empty.h"
 
 #include <ATen/native/Resize.h>
+#include <ATen/EmptyTensor.h>
 #include <ATen/MemoryOverlap.h>
+#include <ATen/TensorIterator.h>
 #include <ATen/ops/_pin_memory.h>
 #include <ATen/ops/_to_copy.h>
+#include <ATen/ops/view_as_real_native.h>
 #include <ATen/ops/_to_copy_ops.h>
 #include <ATen/ops/copy_native.h>
 #include <c10/core/DeviceGuard.h>
@@ -93,6 +96,10 @@
 #include "generated/flaggems_source_bridges.h"
 #endif
 
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+#include "native_host/backends/nvidia/linalg.h"
+#endif
+
 namespace at::native::flagos {
 
 #if defined(FLAGOS_GEMS_DEVICE_COPY)
@@ -100,6 +107,35 @@ static bool GemsCopyType(at::ScalarType type) {
   return type == at::kFloat || type == at::kHalf || type == at::kBFloat16 ||
          type == at::kLong || type == at::kInt || type == at::kBool || type == at::kByte;
 }
+
+static bool GemsCopyTypes(at::ScalarType src, at::ScalarType dst) {
+#if defined(FLAGOS_ACCEL_CUDA)
+  // FlagGems radix sort uses unsigned prefix offsets on the GPU.
+  if (src == at::kUInt32 || dst == at::kUInt32) {
+    const auto other = src == at::kUInt32 ? dst : src;
+    return other == at::kUInt32 || other == at::kInt || other == at::kLong;
+  }
+#endif
+  return GemsCopyType(src) && GemsCopyType(dst);
+}
+
+static bool MayOverlapForGemsCopy(const at::Tensor& src, const at::Tensor& dst) {
+  if (!src.is_alias_of(dst)) return false;
+#if defined(FLAGOS_ACCEL_CUDA)
+  // Overlapping byte ranges still need a separate copy path. Disjoint views
+  // of the same storage can use the GPU kernel even when both are strided.
+  const auto src_begin = static_cast<size_t>(src.storage_offset()) * src.element_size();
+  const auto dst_begin = static_cast<size_t>(dst.storage_offset()) * dst.element_size();
+  const auto src_end = at::detail::computeStorageNbytes(
+      src.sizes(), src.strides(), src.element_size(), src.storage_offset());
+  const auto dst_end = at::detail::computeStorageNbytes(
+      dst.sizes(), dst.strides(), dst.element_size(), dst.storage_offset());
+  return src_begin < dst_end && dst_begin < src_end;
+#else
+  return true;
+#endif
+}
+
 #if defined(USE_TSINGMICRO)
 static bool TsingMicroGemsCast(at::ScalarType source, at::ScalarType target) {
   return source == at::kLong && target == at::kFloat;
@@ -112,11 +148,19 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
   static thread_local bool active = false;
   if (active || !src.device().is_privateuseone() || src.device() != dst.device() ||
       src.is_conj() || src.is_neg() || dst.is_conj() || dst.is_neg() ||
-      src.is_complex() || dst.is_complex() || src.numel() > INT32_MAX ||
-      dst.numel() > INT32_MAX || src.numel() == 0 || dst.numel() == 0 ||
-      src.is_alias_of(dst)) return false;
+      src.numel() > INT32_MAX || dst.numel() > INT32_MAX ||
+      src.numel() == 0 || dst.numel() == 0 ||
+      MayOverlapForGemsCopy(src, dst)) return false;
   const auto src_type = src.scalar_type();
   const auto dst_type = dst.scalar_type();
+  if (src.is_complex() || dst.is_complex()) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+    if (src_type == dst_type) {
+      return TryGemsDeviceCopy(at::native::view_as_real(src), at::native::view_as_real(dst));
+    }
+#endif
+    return false;
+  }
 #if defined(USE_TSINGMICRO)
   if (!TsingMicroGemsCast(src_type, dst_type) || !src.is_contiguous() ||
       !dst.is_contiguous() || !src.sizes().equals(dst.sizes())) {
@@ -130,22 +174,29 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
   if (src_type == dst_type) {
     // A same-dtype copy can use a supported view of identical-width storage.
     if (src_type == at::kChar) storage_type = at::kByte;
-#if defined(USE_DCU) && defined(FLAGOS_NATIVE_HOSTS)
+#if (defined(USE_DCU) || defined(FLAGOS_ACCEL_CUDA)) && defined(FLAGOS_NATIVE_HOSTS)
     if (src_type == at::kDouble) storage_type = at::kLong;
 #endif
   }
-  if (storage_type == src_type &&
-      (!GemsCopyType(src_type) || !GemsCopyType(dst_type))) return false;
+  if (storage_type == src_type && !GemsCopyTypes(src_type, dst_type)) return false;
   at::assert_no_internal_overlap(dst);
   struct Scope {
     bool& active;
     explicit Scope(bool& value) : active(value) { active = true; }
     ~Scope() { active = false; }
   } scope(active);
+  auto source = src;
+  auto destination = dst;
   if (storage_type != src_type) {
-    CopyInplaceSourceHost(
-        dst.view(storage_type), src.view(storage_type), /*non_blocking=*/false);
-    return true;
+    source = src.view(storage_type);
+    destination = dst.view(storage_type);
+  }
+  if (source.is_alias_of(destination)) {
+    // The published FlagGems copy declines shared storage even for disjoint
+    // views. A temporary tensor keeps both launches on the device.
+    auto buffer = at::empty(source.sizes(), source.options());
+    CopyInplaceSourceHost(buffer, source, /*non_blocking=*/false);
+    source = std::move(buffer);
   }
 #if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
   // The published MACA compiler lowers Bool -> BF16 to uitofp with an i16
@@ -157,11 +208,83 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
     return true;
   }
 #endif
-  CopyInplaceSourceHost(dst, src, /*non_blocking=*/false);
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (::flagos::nvidia::TryCastDense(source, destination)) return true;
+  // The copy visits TensorIterator's physical dimensions. Collapsing adjacent
+  // strides lets the native FlagGems host launch its lower-rank copy kernel.
+  if (destination.dim() > 1 && !source.has_names() && !destination.has_names()) {
+    if (source.is_contiguous() && destination.is_contiguous() &&
+        source.sizes().equals(destination.sizes())) {
+      CopyInplaceSourceHost(destination.as_strided({destination.numel()}, {1}),
+                            source.as_strided({source.numel()}, {1}),
+                            /*non_blocking=*/false);
+      return true;
+    }
+    const auto iterator = at::TensorIteratorConfig()
+        .set_check_mem_overlap(false)
+        .resize_outputs(false)
+        .check_all_same_dtype(false)
+        .add_output(destination)
+        .add_const_input(source)
+        .build();
+    if (iterator.ndim() > 0 && iterator.ndim() < destination.dim()) {
+      c10::SmallVector<int64_t, 5> sizes, src_strides, dst_strides;
+      for (int dim = iterator.ndim() - 1; dim >= 0; --dim) {
+        sizes.push_back(iterator.shape()[dim]);
+        src_strides.push_back(iterator.strides(1)[dim] / source.element_size());
+        dst_strides.push_back(iterator.strides(0)[dim] / destination.element_size());
+      }
+      source = source.as_strided(sizes, src_strides);
+      destination = destination.as_strided(sizes, dst_strides);
+    }
+  }
+#endif
+  CopyInplaceSourceHost(destination, source, /*non_blocking=*/false);
   return true;
 #else
   return false;
 #endif
+}
+
+at::Tensor TryGemsStridedCat(const at::ITensorListRef& tensors, int64_t dim) {
+#if defined(FLAGOS_GEMS_DEVICE_COPY) && defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (tensors.size() != 2) return {};
+  auto input = tensors.begin();
+  const auto& first = *input++;
+  const auto& second = *input;
+  const auto rank = first.dim();
+  if (rank == 0 || rank != second.dim() || dim < -rank || dim >= rank ||
+      !first.is_privateuseone() || first.device() != second.device() ||
+      first.scalar_type() != second.scalar_type() ||
+      !GemsCopyType(first.scalar_type()) ||
+      (first.is_contiguous() && second.is_contiguous())) {
+    return {};
+  }
+  for (const auto* tensor : {&first, &second}) {
+    if (tensor->layout() != at::kStrided || tensor->has_names() ||
+        tensor->is_conj() || tensor->is_neg() || tensor->_is_zerotensor() ||
+        tensor->numel() == 0 || tensor->numel() > INT32_MAX ||
+        tensor->suggest_memory_format() != at::MemoryFormat::Contiguous) {
+      return {};
+    }
+  }
+  if (first.numel() + second.numel() > INT32_MAX) return {};
+
+  if (dim < 0) dim += rank;
+  for (int64_t axis = 0; axis < rank; ++axis) {
+    if (axis != dim && first.size(axis) != second.size(axis)) return {};
+  }
+  auto shape = first.sizes().vec();
+  shape[dim] += second.size(dim);
+  auto output = at::empty(shape, first.options());
+  // Write the strided inputs straight into the final tensor using the
+  // published FlagGems copy, avoiding intermediate contiguous tensors.
+  if (TryGemsDeviceCopy(first, output.narrow(dim, 0, first.size(dim))) &&
+      TryGemsDeviceCopy(second, output.narrow(dim, first.size(dim), second.size(dim)))) {
+    return output;
+  }
+#endif
+  return {};
 }
 
 namespace {
@@ -927,6 +1050,10 @@ at::Tensor _to_copy(
     device = c10::Device(device.type(), device_index);
   }
 
+  if (self.numel() == 0 && self.is_privateuseone() && device.is_privateuseone()) {
+    return empty_for_copy(self, self.options().device(device).dtype(dtype), memory_format);
+  }
+
 #if defined(FLAGOS_GEMS_DEVICE_COPY) && (defined(USE_DCU) || defined(USE_TSINGMICRO) || \
     (defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)))
 #if defined(USE_TSINGMICRO)
@@ -941,7 +1068,7 @@ at::Tensor _to_copy(
       self.is_privateuseone() && device == self.device() && dtype != self.scalar_type() &&
       !self.is_conj() && !self.is_neg() && !self.has_names() &&
       self.numel() > 0 && self.numel() <= INT32_MAX &&
-      GemsCopyType(self.scalar_type()) && GemsCopyType(dtype)) {
+      GemsCopyTypes(self.scalar_type(), dtype)) {
     // Match empty_like's dense Preserve case directly. Let empty_like infer
     // the strides of gapped views and validate explicit formats.
     auto converted = memory_format == c10::MemoryFormat::Preserve &&

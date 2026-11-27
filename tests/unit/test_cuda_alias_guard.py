@@ -89,6 +89,62 @@ def test_the_helper_answers_from_the_captured_probe(monkeypatch):
     assert cuda.has_real_cuda() is True
 
 
+@pytest.mark.parametrize(
+    ("cuda_allocator", "cuda_alias", "transfer_alias", "expect_alias"),
+    [
+        (False, "1", "0", True),
+        (True, "1", "0", False),
+        (True, "1", "1", True),
+        (True, "0", "1", False),
+    ],
+)
+def test_tensor_cuda_transfer_alias(
+    monkeypatch, cuda_allocator, cuda_alias, transfer_alias, expect_alias
+):
+    original = torch.Tensor.cuda
+    original_device = torch.device
+    original_stream = torch.cuda.current_stream
+
+    def driver_probe():
+        return True
+
+    monkeypatch.setattr(torch.cuda, "is_available", driver_probe)
+    monkeypatch.setattr(torch.Tensor, "cuda", original)
+    monkeypatch.setattr(cuda, "_cuda_probe", cuda._cuda_probe)
+    monkeypatch.setenv("FLAGOS_ALIAS_CUDA", cuda_alias)
+    monkeypatch.setenv("FLAGOS_ALIAS_CUDA_TRANSFERS", transfer_alias)
+
+    def dispatch_has_kernel(operator, key):
+        assert (operator, key) == ("aten::empty.memory_format", "CUDA")
+        return cuda_allocator
+
+    monkeypatch.setattr(
+        torch._C, "_dispatch_has_kernel_for_dispatch_key", dispatch_has_kernel
+    )
+    cuda.install_alias(torch.flagos)
+
+    assert torch.cuda.is_available is driver_probe
+    assert torch.cuda.current_stream is original_stream
+    assert torch.device is original_device
+    if not expect_alias:
+        assert torch.Tensor.cuda is original
+        return
+
+    class TensorTransfer:
+        def to(self, device, *, non_blocking, memory_format):
+            return str(device), non_blocking, memory_format
+
+    transfer = TensorTransfer()
+    assert torch.Tensor.cuda(transfer) == ("flagos", False, torch.preserve_format)
+    assert torch.Tensor.cuda(transfer, 2, True, memory_format=torch.channels_last) == (
+        "flagos:2",
+        True,
+        torch.channels_last,
+    )
+    with pytest.raises(RuntimeError, match="Expected a CUDA device"):
+        torch.Tensor.cuda(transfer, "cpu")
+
+
 def test_the_probe_is_captured_after_vendor_compat_and_before_the_alias():
     """The capture point is what makes the answer mean "CUDA is reachable".
 

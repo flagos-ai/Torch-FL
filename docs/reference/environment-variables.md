@@ -63,6 +63,7 @@ consults, so a stale export cannot make a wheel describe itself wrongly.
 | `FLAGOS_BUILD_VENDOR` | Build | `ON`, `OFF` on `metax` | Compile the accelerator vendor's native kernels (a no-op where the vendor ships none: `cuda`, `dcu`, `ppu`, `bpu`). TsingMicro builds its host-draw RNG kernels here and pins the switch `ON`: `register.cc` claims those symbols unconditionally. MetaX defaults `OFF` because its native path is retired — that platform's accelerated ops are its FlagGems routes, with the rest on `cpu_fallback` |
 | `FLAGOS_BUILD_FLAGGEMS` | Build | `ON`, `OFF` on `bpu` | Compile the FlagGems Python kernel wrappers (calls into Python, no C++ linking). Set `OFF` for a runtime-only build with no FlagGems routes (`bpu`) |
 | `FLAGOS_BUILD_NATIVE_HOST` | Build | `OFF` | Generate and compile FlagGems host source into a supported CPU-Torch wheel. Requires published FlagGems and compiler wheels, Cython and the platform SDK at build time. FlagGems C++ and TileOPs must be disabled. The wheel records this choice as `NATIVE_HOSTS` |
+| `FLAGOS_NVIDIA_FA3_SOURCE` | Build | Unset | Source checkout of the published NVIDIA FlashAttention 3 v1.0.3 provider and its CUTLASS submodule for a Hopper Native Host wheel |
 | `FLAGOS_NATIVE_HOST_DEVICE_BUNDLE` | Build | Unset | A directory of precompiled device binaries and launch metadata to stage into the Native Host wheel |
 | `FLAGOS_BUILD_BOXING` | Build | `OFF` | Retired. Enabling this setting raises a build error. Use the platform's ordinary wheel |
 | `FLAGOS_BUILD_FLAGGEMS_CPP` | Build | `ON` on `cuda`, off elsewhere | Compile the FlagGems C++ wrapper, which links `liboperators.so`. Defaults `OFF` outside `cuda` because that library has to be built for the vendor's own toolkit and pointed at with `FLAGGEMS_DIR`; a build with one may turn this `ON` explicitly (MetaX's MACA build is the case). Pinned `OFF` for `dcu`, `musa` and `bpu`, where no such library exists at all; `tsingmicro` defaults `OFF` for the same reason and does not pin it |
@@ -135,6 +136,7 @@ caller does *not* ask for it by name. See
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
 | `FLAGOS_DIST_REDIRECT_GLOO` | Runtime | `1` (on) | Answer a plain `init_process_group(backend="gloo")` or `new_group` request with the flagos backend when the process accelerator is the flagos device. `torch.distributed` routes any device type it does not recognise to gloo, and a `ProcessGroupGloo` rejects flagos tensors with `unsupported device type flagos` ([#263](https://github.com/flagos-ai/Torch-FL/issues/263)). Set `0` to keep the requested backend |
+| `FLAGOS_DIST_REDIRECT_NCCL` | Runtime | `0` (off) | Serve plain NCCL requests through the FlagOS process group on an active FlagOS device. Explicit CUDA device requests keep native NCCL |
 | `FLAGOS_DIST_STAGED_GLOO` | Runtime | `1` (on) | Allow the host-staged gloo inner backend: the last fallback tier of the `"flagos"` backend when no vendor communicator (FlagCX/NCCL/HCCL/MCCL) is available. It needs no vendor library at all but copies every flagos operand device->host->device per collective. Set `0` to fail loudly instead of staging. One warning is emitted the first time a group is built on this tier |
 
 ### Vendor compatibility
@@ -145,6 +147,7 @@ None is needed on a stock CUDA box; each platform guide states which apply.
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
 | `FLAGOS_ALIAS_CUDA` | Runtime | `1` (on) | Alias the `cuda` device string to `flagos` for drop-in compatibility. Set `0` to opt out |
+| `FLAGOS_ALIAS_CUDA_TRANSFERS` | Runtime | `0` (off) | Redirect `Tensor.cuda()` and `Module.cuda()` to FlagOS on stacks with native CUDA allocation. Requires `FLAGOS_ALIAS_CUDA=1`. Explicit `to("cuda")`, CUDA factories, and `torch.cuda` APIs retain their native behavior. |
 | `FLAGOS_DISABLE_CUDA_SHIM` | Runtime | `0` (off) | Skip registering the `torch.cuda` compatibility shim for generic GPU operations |
 | `FLAGOS_METAX_CUDART_SHIM` | Runtime | `0` (off) | Preload the libcudart version-tag shim before `import torch`. Required for MetaX with generic PyTorch wheels |
 | `FLAGOS_METAX_COMPAT` | Runtime | `0` (off) | Patch FlagGems `torch.cuda` device queries for MetaX compatibility |
@@ -232,6 +235,7 @@ import time.
 | `FLAGOS_DISABLE_CUDA_ASSETS` | Runtime | `0` (off) | Skip preloading the bundled `libtorch_cuda.so` and CUDA libraries, for builds that use system libtorch |
 | `FLAGOS_VENDOR_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to the vendor torch's `lib` directory, used when no bundled `lib_metax`/`lib_hygon`/`lib_thead` is present. Only the active accelerator's build reads it |
 | `FLAGOS_USE_CACHING_ALLOCATOR` | Runtime | `1` (on) | Caching device allocator. Set `0` to hand every allocation straight to the vendor runtime |
+| `FLAGOS_DISABLE_CPU_FALLBACK` | Runtime | `0` (off) | Raise when a FlagOS operator would compute on the CPU. Explicit CPU tensor operations and device transfers are allowed. |
 
 ### Compiler and feature backends
 

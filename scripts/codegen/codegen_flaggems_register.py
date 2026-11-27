@@ -244,6 +244,15 @@ def render(platform, wrappers, kernel_ops):
         lines.append(EXCLUDED_HEADER)
         lines.extend(f"//   - {op}\n" for op in no_kernel)
     lines.append("\n")
+    if platform == "nvidia":
+        wrappers = {
+            **wrappers,
+            "convolution_overrideable": "FlagosNvidiaConvolutionOverrideable",
+            "div.Scalar": "FlagosNvidiaDivScalar",
+            "div.Tensor": "FlagosNvidiaDivTensor",
+            "div_.Scalar": "FlagosNvidiaDivInplaceScalar",
+            "div_.Tensor": "FlagosNvidiaDivInplaceTensor",
+        }
     lines.extend(f'  m.impl("{op}", {wrappers[op]});\n' for op in ops)
     if paired:
         lines.append(

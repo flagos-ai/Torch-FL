@@ -56,3 +56,19 @@ def test_properties_accept_device_object_and_index():
     by_device = torch_fl.flagos.get_device_properties(torch.device(DEVICE))
     assert by_index.name == by_device.name
     assert by_index.total_memory == by_device.total_memory
+
+
+@pytest.mark.anyplatform
+def test_device_queries_inside_fullgraph_compile():
+    def add_device_capability(tensor):
+        backend = torch.get_device_module(tensor.device)
+        if backend.is_available():
+            explicit = backend.get_device_properties(tensor.device)
+            current = backend.get_device_properties()
+            return tensor + explicit.major * 10 + current.minor
+        return tensor
+
+    with torch_fl.flagos.device(DEVICE):
+        tensor = torch.zeros(1, device=DEVICE)
+        compiled = torch.compile(add_device_capability, backend="eager", fullgraph=True)
+        torch.testing.assert_close(compiled(tensor), add_device_capability(tensor))

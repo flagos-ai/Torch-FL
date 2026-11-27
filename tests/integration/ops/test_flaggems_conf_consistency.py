@@ -316,8 +316,8 @@ class TestFlagGemsConfConsistency:
         raised ``TypeError: dynamic_func() missing 1 required positional
         argument: 'BLOCK_N'`` on MetaX hardware).
 
-        Torch-FL supplies three indexed reduction adapters. Their qualified
-        names select the same implementations on all FlagGems platforms.
+        Torch-FL supplies portable indexed reduction adapters and a cuDNN
+        convolution adapter for NVIDIA Native Host builds.
         """
         paths = re.findall(
             r'CallPythonOp_\w+\("([^"]+)"',
@@ -328,6 +328,7 @@ class TestFlagGemsConfConsistency:
             f"torch_fl.compat.flaggems.reductions.{name}"
             for name in ("argmin", "max_dim", "min_dim")
         }
+        adapters.add("torch_fl.accelerator.nvidia._cudnn.convolution")
         assert adapters.issubset(paths), sorted(adapters.difference(paths))
         noncanonical = sorted(
             path

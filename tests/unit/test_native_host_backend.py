@@ -3,7 +3,9 @@
 
 """Backend contracts are inspectable without importing Torch or any SDK."""
 
+from base64 import urlsafe_b64encode
 from functools import cache
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -55,6 +57,52 @@ def test_backend_record_and_compiled_extension_agree(contract):
         for path in (backend._ROOT / "csrc").rglob("*")
         if path.is_file()
     }
+
+
+def test_nvidia_manifest_records_the_imported_upstream_triton(tmp_path, monkeypatch):
+    adapter = backend.get_backend("nvidia")
+    triton_root = tmp_path / "triton"
+    records = []
+    for path in backend.driver_sources(adapter, triton_root).values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"published CUDA driver")
+        digest = urlsafe_b64encode(hashlib.sha256(path.read_bytes()).digest())
+        records.append(
+            f"{path.relative_to(tmp_path)},sha256={digest.decode().rstrip('=')},"
+        )
+    dist = tmp_path / "triton-3.6.0.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text("Name: triton\nVersion: 3.6.0\n")
+    (dist / "RECORD").write_text("\n".join(records))
+    monkeypatch.syspath_prepend(str(tmp_path))
+    record = backend.build_record(adapter, triton_root, native_dir=NATIVE_SOURCE)
+    assert record["compiler_distribution"] == {"name": "triton", "version": "3.6.0"}
+    backend.validate_record(record, adapter, triton_root, native_dir=NATIVE_SOURCE)
+
+
+def test_cpu_built_nvidia_hosts_accept_a_matching_cuda_torch_release():
+    loader = import_native_host("load")
+    manifest = {
+        "backend": {"vendor": "nvidia"},
+        "torch": "2.10.0+cpu",
+        "torch_git_version": "same-source",
+        "torch_cxx11_abi": True,
+    }
+    torch = SimpleNamespace(
+        __version__="2.10.0+cu130",
+        version=SimpleNamespace(cuda="13.0", git_version="same-source"),
+        _C=SimpleNamespace(_has_cuda=True),
+        compiled_with_cxx11_abi=lambda: True,
+    )
+    assert loader._same_torch_cohort(manifest, torch)
+    assert not loader._same_torch_cohort({**manifest, "torch": "2.10.1+cpu"}, torch)
+    assert not loader._same_torch_cohort(
+        {**manifest, "torch_git_version": "different-source"}, torch
+    )
+    assert not loader._same_torch_cohort({**manifest, "torch_cxx11_abi": False}, torch)
+    assert not loader._same_torch_cohort({**manifest, "backend": {}}, torch)
+    torch._C._has_cuda = False
+    assert not loader._same_torch_cohort(manifest, torch)
 
 
 @pytest.mark.parametrize("vendor", ["unregistered", "gcu", "cuda", "../nvidia"])

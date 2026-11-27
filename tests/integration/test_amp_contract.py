@@ -37,16 +37,15 @@ pytestmark = pytest.mark.amp
 def test_autocast_device_registration():
     """The flagos backend advertises the standard AMP entry points."""
     assert torch.amp.is_autocast_available("flagos")
-    assert torch.flagos.get_amp_supported_dtype() == list(AMP_DTYPES)
+    assert torch.flagos.get_amp_supported_dtype() == [*AMP_DTYPES, torch.float32]
     assert torch.get_autocast_dtype("flagos") == torch.float16
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_autocast_rejects_unsupported_target_dtype(dtype):
-    """Only float16 and bfloat16 are valid autocast targets."""
+def test_autocast_rejects_unsupported_target_dtype():
+    """Float64 autocast is unavailable."""
     with pytest.warns(UserWarning, match="target dtype is not supported"):
-        with torch.autocast("flagos", dtype=dtype):
+        with torch.autocast("flagos", dtype=torch.float64):
             assert not torch.is_autocast_enabled("flagos")
 
 
@@ -112,6 +111,21 @@ def test_autocast_lower_precision_policy(dtype, amp_capabilities, amp_device):
     with torch.autocast("flagos", dtype=dtype):
         assert torch.mm(a, b).dtype == dtype
         assert F.linear(a, b).dtype == dtype
+
+
+@pytest.mark.anyplatform
+def test_autocast_float32_linear_with_bfloat16_weights():
+    inputs = torch.arange(24, dtype=torch.float32).reshape(3, 8) / 32
+    weights = (torch.arange(32, dtype=torch.float32).reshape(4, 8) / 64).bfloat16()
+    expected = F.linear(inputs, weights.float())
+    inputs, weights = inputs.to("flagos"), weights.to("flagos")
+
+    with torch.autocast("flagos", dtype=torch.float32):
+        assert torch.is_autocast_enabled("flagos")
+        actual = F.linear(inputs, weights)
+
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.amp_device

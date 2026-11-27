@@ -8,6 +8,7 @@ on demand when building or activating a native-host wheel.
 """
 
 from abc import ABC, abstractmethod
+from base64 import urlsafe_b64encode
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
@@ -303,6 +304,30 @@ def _hashes(paths):
     }
 
 
+def _compiler_distribution(config, triton_root, driver_hashes):
+    name = config.compiler_distribution
+    if config.vendor == "nvidia":
+        try:
+            upstream = importlib.metadata.distribution("triton")
+        except importlib.metadata.PackageNotFoundError:
+            upstream = None
+        if upstream is not None and (
+            Path(upstream.locate_file("triton")).resolve() == triton_root.resolve()
+        ):
+            recorded = {entry.as_posix(): entry.hash for entry in upstream.files or ()}
+            for path, checksum in driver_hashes.items():
+                file_hash = recorded.get("triton/" + path)
+                digest = urlsafe_b64encode(bytes.fromhex(checksum)).decode().rstrip("=")
+                if file_hash is None or (file_hash.mode, file_hash.value) != (
+                    "sha256",
+                    digest,
+                ):
+                    break
+            else:
+                return {"name": "triton", "version": upstream.version}
+    return {"name": name, "version": importlib.metadata.version(name)}
+
+
 def build_record(adapter: BackendInterface, triton_root: Path, *, native_dir=None):
     """Fingerprint the selected adapter and the published backend loader ABI."""
     if native_dir is None:
@@ -319,6 +344,7 @@ def build_record(adapter: BackendInterface, triton_root: Path, *, native_dir=Non
         "slot_alignment": 128,
     }
     native_sources = _hashes(sources)
+    driver_hashes = _hashes(driver_sources(adapter, triton_root))
     contract["native_source_sha256"] = hashlib.sha256(
         json.dumps(
             {"contract": contract, "sources": native_sources}, sort_keys=True
@@ -327,12 +353,11 @@ def build_record(adapter: BackendInterface, triton_root: Path, *, native_dir=Non
     return {
         "schema_version": 1,
         **contract,
-        "compiler_distribution": {
-            "name": config.compiler_distribution,
-            "version": importlib.metadata.version(config.compiler_distribution),
-        },
+        "compiler_distribution": _compiler_distribution(
+            config, triton_root, driver_hashes
+        ),
         "utility_modules": [config.utility_module],
-        "driver_sources": _hashes(driver_sources(adapter, triton_root)),
+        "driver_sources": driver_hashes,
         "adapter_sources": _hashes(
             {
                 name: _ROOT / name

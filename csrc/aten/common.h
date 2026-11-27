@@ -186,6 +186,9 @@ bool TryEmptyMatmul(const at::Tensor& lhs, const at::Tensor& rhs,
 bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
                                   at::Tensor& result);
 
+// Scalar pointwise operators retain the dense stride order of the input.
+at::Tensor RestorePointwiseLayout(const at::Tensor& input, at::Tensor result);
+
 // Shared by ATen fallback and explicit numerical host escapes.
 void SetStrictHostRoutes(bool enabled);
 bool CpuFallbackAllowed();

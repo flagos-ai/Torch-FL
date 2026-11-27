@@ -85,7 +85,8 @@ class device:
         return False
 
 
-def is_available():
+@torch.compiler.assume_constant_result
+def is_available() -> bool:
     return _C._get_device_count() > 0
 
 
@@ -93,7 +94,10 @@ def device_count() -> int:
     return _C._get_device_count()
 
 
-def current_device():
+def current_device() -> int:
+    if torch.compiler.is_dynamo_compiling():
+        # Dynamo guards this public query on the selected accelerator index.
+        return torch.accelerator.current_device_index()
     return _C._get_device()
 
 
@@ -458,7 +462,7 @@ class _HostTimedEvent:
 
 
 class Event(torch.cuda.Event):
-    """Flagos event: a real CUDA event where there is a CUDA runtime.
+    """A FlagOS event backed by the device runtime when available.
 
     Other runtimes use the device's event when available and the host clock as
     a fallback.
@@ -467,12 +471,14 @@ class Event(torch.cuda.Event):
     def __new__(
         cls, enable_timing=False, blocking=False, interprocess=False, external=False
     ):
+        platform = _platform()
+        native_event = hasattr(_C, "_get_native_current_raw_stream") and not (
+            blocking or interprocess or external
+        )
+        if platform == "cuda" and native_event:
+            return torch.Event(device="flagos", enable_timing=enable_timing)
         if not _has_cuda_runtime():
-            if (
-                _platform() == "musa"
-                and hasattr(_C, "_get_native_current_raw_stream")
-                and not (blocking or interprocess or external)
-            ):
+            if platform == "musa" and native_event:
                 return torch.Event(device="flagos", enable_timing=enable_timing)
             # One spelling of the host-clock fallback for the arms below, so they
             # differ only in which vendor class they try first.
@@ -585,11 +591,12 @@ def stream(s):
 
 
 def get_amp_supported_dtype():
-    """Return list of supported dtypes for AMP (Automatic Mixed Precision).
+    """Return the supported autocast targets for the FlagOS device.
 
-    Required by torch.autocast for custom device backends.
+    Applications can explicitly select float32 for compute that combines
+    lower-precision model weights with float32 inputs.
     """
-    return [torch.float16, torch.bfloat16]
+    return [torch.float16, torch.bfloat16, torch.float32]
 
 
 class _DeviceProperties:
@@ -769,7 +776,16 @@ def get_device_properties(device=None):
         device: device index, `torch.device`, `"<type>[:<index>]"` string, or
             None for the current device. Matches `torch.cuda.get_device_properties`.
     """
-    return _DeviceProperties(_device_index(device))
+    return _get_device_properties(_device_index(device))
+
+
+@torch.compiler.assume_constant_result
+def _get_device_properties(index: int):
+    if build_info().vendor == "nvidia":
+        from ..accelerator.nvidia._cuda_compat import _get_props
+
+        return _get_props(index)
+    return _DeviceProperties(index)
 
 
 def _utils_get_device_index(device, optional=False, allow_cpu=False):

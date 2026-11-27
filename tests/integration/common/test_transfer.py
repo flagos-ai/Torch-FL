@@ -20,6 +20,8 @@ import pytest
 import torch
 
 import torch_fl  # noqa: F401 -- importing claims the flagos device
+from torch_fl import _env
+from torch_fl.compat import cuda
 
 DEVICE = "flagos:0"
 
@@ -35,6 +37,29 @@ def test_host_to_device_round_trip():
     device = cpu.to(DEVICE)
     assert device.device.type == "flagos"
     torch.testing.assert_close(device.cpu(), cpu)
+
+
+@pytest.mark.anyplatform
+def test_tensor_cuda_round_trip():
+    cpu = torch.arange(120, dtype=torch.float32).reshape(2, 3, 4, 5)
+    native_cuda = (
+        cuda.has_real_cuda()
+        and torch._C._dispatch_has_kernel_for_dispatch_key(
+            "aten::empty.memory_format", "CUDA"
+        )
+    )
+    device = cpu.cuda(memory_format=torch.channels_last)
+    transfer_alias = _env.flag("FLAGOS_ALIAS_CUDA_TRANSFERS", False)
+    expected = "cuda" if native_cuda and not transfer_alias else "flagos"
+    assert device.device.type == expected
+    assert device.is_contiguous(memory_format=torch.channels_last)
+    torch.testing.assert_close(device.cpu(), cpu, rtol=0, atol=0)
+    module = torch.nn.Linear(3, 2)
+    weight = module.weight.detach().clone()
+    assert module.cuda().weight.device.type == expected
+    torch.testing.assert_close(module.weight.cpu(), weight, rtol=0, atol=0)
+    if native_cuda:
+        assert cpu.to("cuda").device.type == "cuda"
 
 
 @pytest.mark.anyplatform

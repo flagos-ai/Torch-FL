@@ -230,6 +230,7 @@ def _make(monkeypatch, vendor, *, flagcx_ok, native_ok, view_present=True):
     if torch_fl_pkg is not None:
         monkeypatch.setattr(torch_fl_pkg, "_C", fake_c, raising=False)
     monkeypatch.setenv("GEMS_VENDOR", vendor)
+    monkeypatch.setattr(pg._platform, "build_info", pg._platform.BuildInfo)
     return obj, calls, sentinel_view
 
 
@@ -245,6 +246,24 @@ def test_native_used_when_flagcx_unavailable(monkeypatch):
     obj._build_inner(None, 0, 1, None)
     assert calls["flagcx"] and calls["native"]
     assert obj._inner is not None
+
+
+@pytest.mark.parametrize("world_size", (1, 2))
+def test_nvidia_native_host_skips_torch_nccl(monkeypatch, world_size):
+    obj, calls, _ = _make(monkeypatch, "nvidia", flagcx_ok=False, native_ok=True)
+    build = pg._platform.BuildInfo(platform="cuda", native_hosts=True)
+    monkeypatch.setattr(pg._platform, "build_info", lambda: build)
+    if world_size == 1:
+        local_group = object()
+        monkeypatch.setattr(pg, "_SingleRankCollectives", lambda *_: local_group)
+        assert obj._build_inner(None, 0, world_size, None) is None
+        assert obj._inner is local_group
+        assert not calls["flagcx"]
+    else:
+        with pytest.raises(RuntimeError, match="require FlagCX"):
+            obj._build_inner(None, 0, world_size, None)
+        assert calls["flagcx"]
+    assert not calls["native"]
 
 
 def test_no_backend_raises(monkeypatch):

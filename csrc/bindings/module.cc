@@ -14,6 +14,7 @@
 
 #include <ATen/Context.h>
 #include <ATen/ops/from_blob.h>
+#include <algorithm>
 #include <vector>
 #include <ATen/core/TensorBase.h>
 #include <c10/core/Storage.h>
@@ -24,6 +25,7 @@
 #include <torch/csrc/autograd/generated/variable_factories.h>
 
 #include <memory>
+#include <mutex>
 #include <flagos.h>
 
 #ifdef USE_MUSA
@@ -64,6 +66,7 @@
 #include <runtime/allocator/caching_device_allocator.h>
 
 #include <aten/route.h>
+#include <aten/cuda_tensor_view.h>
 
 #include "dataparallel.h"
 
@@ -72,65 +75,6 @@ int InitMetalBindings(PyObject* mod);
 #endif
 
 namespace {
-
-// Forward declarations
-at::Tensor flagos_to_cuda_view_impl(const at::Tensor& self);
-at::Tensor cuda_to_flagos_view_impl(const at::Tensor& self, int device_index);
-
-
-// Zero-copy view conversion: flagos -> CUDA
-// This version keeps a reference to the original flagos tensor to prevent memory from being freed
-at::Tensor flagos_to_cuda_view_impl(const at::Tensor& self) {
-  TORCH_CHECK(self.is_privateuseone(), "Expected flagos tensor, got ", self.device());
-
-  int device_index = self.device().index();
-  if (device_index < 0) device_index = 0;
-
-  // Get storage info from the original tensor directly (no contiguous call to avoid recursion)
-  auto storage_impl = self.storage().unsafeGetStorageImpl();
-  auto data_ptr = storage_impl->data_ptr().get();
-  auto nbytes = storage_impl->nbytes();
-
-  // Keep a copy of the original tensor to prevent its storage from being freed
-  auto flagos_tensor_holder = std::make_shared<at::Tensor>(self);
-
-  // Create CUDA storage sharing the same data pointer
-  // The deleter captures the shared_ptr to keep the flagos tensor alive
-  auto storage = c10::Storage(
-      c10::Storage::use_byte_size_t(),
-      nbytes,
-      c10::DataPtr(
-          data_ptr,
-          new std::shared_ptr<at::Tensor>(flagos_tensor_holder),
-          [](void* ctx) {
-            // Release the reference to the flagos tensor
-            delete static_cast<std::shared_ptr<at::Tensor>*>(ctx);
-          },
-          c10::Device(c10::kCUDA, device_index)
-      ),
-      nullptr,
-      false
-  );
-
-  // Get the correct TypeMeta from the source tensor
-  auto dtype = self.scalar_type();
-  auto meta = c10::scalarTypeToTypeMeta(dtype);
-
-  // Use at::detail::make_tensor_base to create a tensor directly with storage
-  // This avoids the set_() call which has issues on flagos device
-  auto cuda_tensor = at::detail::make_tensor_base<c10::TensorImpl>(
-      std::move(storage),
-      c10::DispatchKeySet(c10::DispatchKey::CUDA),
-      meta
-  );
-
-  // Set the correct offset, sizes and strides
-  cuda_tensor.unsafeGetTensorImpl()->set_storage_offset(self.storage_offset());
-  cuda_tensor.unsafeGetTensorImpl()->set_sizes_and_strides(
-      self.sizes().vec(), self.strides().vec());
-
-  return cuda_tensor;
-}
 
 // Zero-copy view conversion: CUDA -> flagos
 // This version keeps a reference to the original CUDA tensor to prevent memory from being freed
@@ -243,7 +187,8 @@ static PyObject* _reserveRngSeed(PyObject* self, PyObject* args) {
   HANDLE_TH_ERRORS
   int device_index;
   PyObject* generator_obj = Py_None;
-  if (!PyArg_ParseTuple(args, "i|O", &device_index, &generator_obj)) {
+  int allow_cpu_generator = 0;
+  if (!PyArg_ParseTuple(args, "i|Op", &device_index, &generator_obj, &allow_cpu_generator)) {
     return nullptr;
   }
 
@@ -254,6 +199,10 @@ static PyObject* _reserveRngSeed(PyObject* self, PyObject* args) {
         "_reserve_rng_seed expects a torch.Generator or None, but got ",
         THPUtils_typename(generator_obj));
     generator = THPGenerator_Unwrap(generator_obj);
+  }
+  if (allow_cpu_generator && generator && generator->device().is_cpu()) {
+    std::lock_guard<std::mutex> lock(generator->mutex());
+    return PyLong_FromUnsignedLongLong(generator->get<at::CPUGeneratorImpl>()->random64());
   }
   auto seed = c10::flagos::ReserveSeed(generator, device_index);
   return PyLong_FromUnsignedLongLong(seed);
@@ -579,7 +528,7 @@ PyObject* _flagos_to_cuda_view(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
   TORCH_CHECK(THPVariable_Check(arg), "Expected a tensor argument");
   auto tensor = THPVariable_Unpack(arg);
-  auto result = flagos_to_cuda_view_impl(tensor);
+  auto result = at::native::flagos::FlagosToCudaView(tensor);
   return THPVariable_Wrap(result);
   END_HANDLE_TH_ERRORS
 }

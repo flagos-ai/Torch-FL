@@ -216,6 +216,8 @@ _ATTR_L2_CACHE_SIZE = 38
 _ATTR_MAX_THREADS_PER_MP = 39
 _ATTR_WARP_SIZE = 10
 _ATTR_MAX_THREADS_PER_BLOCK = 1
+_ATTR_MAX_REGS_PER_MP = 82
+_ATTR_MAX_SHARED_MEM_PER_MP = 81
 
 
 @dataclass
@@ -247,6 +249,8 @@ class _CudaDeviceProperties:
     # CUDA's documented ceiling for one block of threads. Every device this shim
     # describes reports 1024, so the default and the queried value agree.
     max_threads_per_block: int = 1024
+    regs_per_multiprocessor: int | None = None
+    shared_memory_per_multiprocessor: int | None = None
     is_integrated: bool = False
     is_multi_gpu_board: bool = False
     gcnArchName: str = ""
@@ -376,6 +380,9 @@ def _query_device_properties(device_index: int) -> _CudaDeviceProperties:
     props.max_threads_per_block = attr(
         _ATTR_MAX_THREADS_PER_BLOCK, props.max_threads_per_block
     )
+    props.regs_per_multiprocessor = attr(_ATTR_MAX_REGS_PER_MP, None)
+    props.shared_memory_per_multiprocessor = attr(_ATTR_MAX_SHARED_MEM_PER_MP, None)
+    props.gcnArchName = props.name
 
     total = ctypes.c_size_t(0)
     try:
@@ -395,19 +402,32 @@ def _get_props(device=None) -> _CudaDeviceProperties:
 
 
 def _load_cudart():
-    """Load libcudart.so for cudaDeviceSynchronize, cached."""
+    """Load the CUDA runtime from the loader or the toolkit, cached."""
     global _cudart
     if _cudart is not None:
         return _cudart
-    try:
-        _cudart = ctypes.CDLL("libcudart.so")
-    except OSError:
-        cuda_home = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+    cuda_home = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+    for path in (
+        "libcudart.so.13",
+        "libcudart.so.12",
+        "libcudart.so",
+        f"{cuda_home}/lib64/libcudart.so",
+    ):
         try:
-            _cudart = ctypes.CDLL(f"{cuda_home}/lib64/libcudart.so")
+            _cudart = ctypes.CDLL(path)
         except OSError:
-            _cudart = None
+            continue
+        break
     return _cudart
+
+
+def cuda_runtime_version() -> str | None:
+    """Return the CUDA Toolkit runtime version available to the NVIDIA shim."""
+    runtime = _load_cudart()
+    version = ctypes.c_int()
+    if runtime is None or runtime.cudaRuntimeGetVersion(ctypes.byref(version)) != 0:
+        return None
+    return f"{version.value // 1000}.{version.value % 1000 // 10}"
 
 
 def _real_stream(device_index=0):

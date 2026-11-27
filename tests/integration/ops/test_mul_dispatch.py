@@ -129,6 +129,32 @@ class TestMulPythonNumberOperand:
         two = torch.tensor(2.0, device=DEVICE)
         torch.testing.assert_close((a * two).cpu(), (a * 2.0).cpu(), rtol=0, atol=0)
 
+    @pytest.mark.nvidia
+    @pytest.mark.flaggems_python
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+    @pytest.mark.parametrize("layout", ["dense", "transpose"])
+    @pytest.mark.parametrize("scalar_dtype", [None, torch.float32, torch.float64])
+    def test_host_scalar_preserves_precision(self, dtype, layout, scalar_dtype):
+        values = torch.linspace(-5, 5, 63, dtype=dtype).reshape(7, 9)
+        device_values = values.to(DEVICE)
+        if layout == "transpose":
+            values = values.t()
+            device_values = device_values.t()
+        scale = 1.01
+        if scalar_dtype is not None:
+            scale = torch.tensor(scale, dtype=scalar_dtype)
+        expected = values * scale
+        was_allowed = torch.ops.flagos.cpu_fallback_allowed()
+        torch.ops.flagos.strict_host_routes(True)
+        try:
+            products = (device_values * scale, scale * device_values)
+        finally:
+            torch.ops.flagos.strict_host_routes(not was_allowed)
+        for actual in products:
+            assert actual.device == device_values.device
+            assert actual.stride() == expected.stride()
+            torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
     @pytest.mark.ascend
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
     @pytest.mark.parametrize("layout", ["dense", "transpose", "empty"])

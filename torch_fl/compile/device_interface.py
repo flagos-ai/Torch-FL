@@ -205,12 +205,10 @@ def _vendor_device(device: Any = None) -> Any:
 def _hardware_module():
     """Return the module that answers *hardware* queries for this build.
 
-    CUDA-like builds share the physical GPU with torch.cuda, which reports real
-    properties, capability and raw streams. Ascend has no CUDA runtime, so
-    torch.flagos is the only source -- routing there would call into a shim that
-    is itself backed by flagos, or raise outright.
+    NVIDIA Native Host and native accelerator builds query the device through
+    FlagOS. Other CUDA-like builds share the device queries from torch.cuda.
     """
-    if platform_profile().is_cuda_like:
+    if platform_profile().is_cuda_like and not _platform.build_info().uses_nvidia_sdk:
         return torch.cuda
     return torch.flagos
 
@@ -222,7 +220,7 @@ def _exchange_device(device_idx: int) -> int:
     # FlagGems-primary wheel), where the call raises "PyTorch was compiled
     # without CUDA support" -- so gate on the torch, not the platform, and go
     # through the flagos runtime otherwise.
-    if platform_profile().is_cuda_like and _torch_has_cuda_kernels():
+    if _hardware_module() is torch.cuda and _torch_has_cuda_kernels():
         return torch.cuda._exchange_device(device_idx)
     if device_idx < 0:
         return -1
@@ -313,6 +311,11 @@ class FlagOSDeviceInterface(DeviceInterface):
 
     @staticmethod
     def is_bf16_supported(including_emulation: bool = True) -> bool:
+        if _platform.build_info().uses_nvidia_sdk:
+            return (
+                including_emulation
+                or FlagOSDeviceInterface.get_compute_capability() >= 80
+            )
         if platform_profile().is_cuda_like:
             return torch.cuda.is_bf16_supported()
         # Native runtimes advertise their supported autocast dtypes through
@@ -328,6 +331,9 @@ class FlagOSDeviceInterface(DeviceInterface):
             # its compiler requires the device's string instruction-set name.
             arch = torch.cuda.get_device_properties(_device_index(device)).gcnArchName
             return str(arch).split(":", 1)[0]
+        if _platform.build_info().uses_nvidia_sdk:
+            props = torch.flagos.get_device_properties(_vendor_device(device))
+            return props.major * 10 + props.minor
         if profile.is_cuda_like and _torch_has_cuda_kernels():
             major, minor = torch.cuda.get_device_capability(_device_index(device))
             return major * 10 + minor
@@ -382,7 +388,7 @@ class FlagOSDeviceInterface(DeviceInterface):
             # No CUDA compute-capability floor applies: the vendor Triton
             # backend decides whether it supports the target device.
             return True
-        return torch.cuda.get_device_properties(_device_index(device)).major >= 7
+        return FlagOSDeviceInterface.get_device_properties(device).major >= 7
 
     @staticmethod
     def raise_if_triton_unavailable(device: Any = None) -> None:
@@ -537,10 +543,11 @@ def _patch_device_properties() -> None:
     profile = platform_profile()
     cuda_like = profile.is_cuda_like
     vendor = profile.vendor
+    sdk = _platform.build_info().uses_nvidia_sdk
 
     def create(device: Any) -> Any:
         is_flagos = device is not None and getattr(device, "type", None) == DEVICE_TYPE
-        if is_flagos and cuda_like and not _torch_has_cuda_kernels():
+        if is_flagos and cuda_like and (sdk or not _torch_has_cuda_kernels()):
             # A CUDA-like platform can still link the CPU-only pip torch -- the
             # default FlagGems-primary wheel does. `torch.cuda` answers nothing
             # there while still looking available (torch_fl aliases the probe to

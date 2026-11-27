@@ -41,6 +41,14 @@
 #include "index_bounds.h"
 #include "backends/soft_lowp/format.h"
 #include "backends/soft_lowp/ops.h"
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+#include <ATen/MemoryOverlap.h>
+#include <ATen/NamedTensorUtils.h>
+#include <ATen/native/IndexingUtils.h>
+#include <ATen/native/Resize.h>
+#include <ATen/native/UpSample.h>
+#include "backends/flagos/python_op_caller.h"
+#endif
 // TsingMicro's RNG kernels are claimed directly below rather than through a
 // generated list, so their declarations have to be visible here.
 #if defined(USE_TSINGMICRO)
@@ -53,6 +61,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 
@@ -66,13 +75,9 @@
 // for every platform (csrc/CMakeLists.txt), so it needs no other build state.
 //
 // The per-platform reasoning, all measured on the CUDA-ABI lanes:
-//   * cuda, dcu  -- their backends_<platform>.conf routes conv to `cuda`, and a
-//     FlagGems-primary build compiles no boxed kernels, so the route resolves
-//     to nothing and `convolution_overrideable` falls to ATen's raising
-//     CompositeExplicitAutograd stub. FlagGems has no conv kernel to route to on
-//     either platform (register_flaggems_nvidia.inc / _dcu.inc name none).
-//   * metax, ppu -- the conf routes conv to FlagGems, so the conf-derived list
-//     does claim `convolution_overrideable` and only the forward is served.
+//   * dcu -- the generated FlagGems list claims neither convolution direction.
+//   * cuda -- the conf-derived list claims a guarded FlagGems forward.
+//   * metax, ppu -- the conf-derived list claims the FlagGems forward.
 //     Nothing claims `convolution_backward_overrideable` that way, so the
 //     backward still needs the crossing (the same shape as the Iluvatar
 //     exception).
@@ -268,11 +273,22 @@ at::Tensor WrapperToCopy(
       self, dtype, layout, device, pin_memory, non_blocking, memory_format);
 }
 
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+at::Tensor& DeviceAdvancedIndexPut(
+    at::Tensor& self, const c10::List<std::optional<at::Tensor>>& indices,
+    const at::Tensor& values, bool accumulate);
+#endif
+
 at::Tensor& WrapperIndexPut_(
     at::Tensor& self,
     const c10::List<::std::optional<at::Tensor>>& indices,
     const at::Tensor& values,
     bool accumulate) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+  if (!at::native::flagos::CpuFallbackAllowed()) {
+    return DeviceAdvancedIndexPut(self, indices, values, accumulate);
+  }
+#endif
   TORCH_CHECK(at::native::flagos::CpuFallbackAllowed(),
               "native FlagGems hosts do not permit CPU fallback: aten::index_put_");
   at::Tensor self_cpu = self.cpu();
@@ -296,7 +312,8 @@ at::Tensor& WrapperIndexPutImpl_(
     const c10::List<::std::optional<at::Tensor>>& indices,
     const at::Tensor& values,
     bool accumulate,
-    bool /*unsafe*/) {
+    bool unsafe) {
+  (void)unsafe;
   return WrapperIndexPut_(self, indices, values, accumulate);
 }
 
@@ -318,6 +335,333 @@ void WrapperRecordStream(at::Tensor& self, at::Stream s) {
 #endif
   alloc->record_stream(self.storage().data_ptr(), stream);
 }
+
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+bool WrapperEqual(const at::Tensor& self, const at::Tensor& other) {
+  if (!at::namedinference::are_names_equal(self.unsafeGetTensorImpl(),
+                                         other.unsafeGetTensorImpl())) {
+    return false;
+  }
+  TORCH_CHECK(self.device() == other.device(),
+              "Cannot compare tensors on different devices: ", self.device(),
+              " and ", other.device());
+  if (!self.sizes().equals(other.sizes())) return false;
+  if (self.numel() == 0) return true;
+  at::NoNamesGuard guard;
+  return at::eq(self, other).all().item<bool>();
+}
+
+at::Tensor& DeviceProdDimOut(const at::Tensor& self, int64_t dim, bool keepdim,
+                            std::optional<at::ScalarType> dtype, at::Tensor& out) {
+  TORCH_CHECK(self.device() == out.device(),
+              "prod(): output device must match the input");
+  TORCH_CHECK(!dtype || *dtype == out.scalar_type(),
+              "prod(): dtype must match the output tensor");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  dim = at::maybe_wrap_dim(dim, self.dim());
+  if (self.dim() == 0) {
+    at::native::resize_output(out, {});
+    return out.copy_(self);
+  }
+  auto shape = self.sizes().vec();
+  if (keepdim) shape[dim] = 1;
+  else shape.erase(shape.begin() + dim);
+  at::native::resize_output(out, shape);
+  if (out.numel() == 0) return out;
+  if (self.size(dim) == 0) return out.fill_(1);
+
+  // Reduce through FlagGems multiplication and keep the output's integer
+  // precision. The published reduction converts all inputs to float32.
+  auto dtype_out = out.scalar_type();
+  auto accumulation = dtype_out == at::kHalf || dtype_out == at::kBFloat16
+      ? at::kFloat : dtype_out;
+  auto values = self.to(accumulation);
+  while (values.size(dim) > 1) {
+    auto size = values.size(dim);
+    auto half = size / 2;
+    auto next = at::mul(values.narrow(dim, 0, half), values.narrow(dim, half, half));
+    if (size % 2) {
+      auto first = next.narrow(dim, 0, 1);
+      first.copy_(at::mul(first, values.narrow(dim, size - 1, 1)));
+    }
+    values = std::move(next);
+  }
+  return out.copy_(keepdim ? values : values.squeeze(dim));
+}
+
+at::Tensor NormalizeDeviceIndex(const at::Tensor& index, int64_t extent,
+                                bool allow_negative) {
+  auto positions = index.to(at::kLong).contiguous();
+  if (!positions.numel()) return positions;
+  const auto [minimum, maximum] = at::aminmax(positions);
+  auto lower = minimum.item<int64_t>();
+  TORCH_CHECK_INDEX(lower >= (allow_negative ? -extent : 0) &&
+                    maximum.item<int64_t>() < extent,
+                    "index out of range for dimension of size ", extent);
+  return lower < 0
+      ? at::where(positions.lt(0), positions.add(extent), positions)
+      : positions;
+}
+
+at::Tensor SelectDevicePositions(const at::Tensor& self, int64_t dim,
+                                 const at::Tensor& positions) {
+  auto shape = self.sizes().vec();
+  shape[dim] = positions.numel();
+  if (std::find(shape.begin(), shape.end(), 0) != shape.end()) {
+    return at::empty(shape, self.options());
+  }
+  auto result = at::native::flagos::CallPythonOp_Generic(
+      "flag_gems.index_select", {self, dim, positions.contiguous()});
+  TORCH_CHECK(result.device() == self.device(),
+              "index_select(): FlagGems changed the device");
+  return result;
+}
+
+at::Tensor DeviceIndexSelect(const at::Tensor& self, int64_t dim,
+                             const at::Tensor& index) {
+  TORCH_CHECK(index.device() == self.device(),
+              "index_select(): index device must match input");
+  const auto index_type = index.scalar_type();
+  TORCH_CHECK_INDEX(
+      index.dim() <= 1 && (index_type == at::kInt || index_type == at::kLong),
+      "index_select(): expected a vector of int32 or int64 indices");
+  dim = at::maybe_wrap_dim(dim, self.dim());
+  if (self.dim() == 0) {
+    TORCH_CHECK_INDEX(index.numel() == 1,
+                      "index_select(): scalar input requires one index");
+    NormalizeDeviceIndex(index, 1, false);
+    return self.clone();
+  }
+  return SelectDevicePositions(
+      self, dim, NormalizeDeviceIndex(index, self.size(dim), false));
+}
+
+struct IndexedAxes {
+  at::Tensor input;
+  at::Tensor flattened;
+  at::Tensor positions;
+  int64_t axis;
+  std::vector<int64_t> output_shape;
+};
+
+IndexedAxes PrepareDeviceIndices(
+    const at::Tensor& self, const c10::List<std::optional<at::Tensor>>& raw,
+    const at::Tensor& destination) {
+  auto indices_ref = at::IOptTensorListRef(raw);
+  at::native::checkIndexTensorTypes(indices_ref, /*allow_int=*/true);
+  for (const auto& index : indices_ref) {
+    if (!index || !index->defined()) continue;
+    TORCH_CHECK_INDEX(index->is_cpu() || index->device() == self.device(),
+                      "index(): indices must be on the CPU or input device");
+    at::assert_no_overlap(destination, *index);
+  }
+  auto indices = at::native::expandTensors(
+      self, indices_ref, /*ensure_same_device=*/true);
+  TORCH_CHECK_INDEX(static_cast<int64_t>(indices.size()) <= self.dim(),
+                    "too many indices for tensor of dimension ", self.dim());
+  indices = at::expand_outplace(indices);
+  indices.resize(self.dim());
+  auto input = self;
+  if (!at::native::hasContiguousSubspace(indices)) {
+    std::tie(input, indices) = at::native::transposeToFront(self, indices);
+  }
+  auto first = std::find_if(indices.begin(), indices.end(),
+                            [](const auto& tensor) { return tensor.defined(); });
+  if (first == indices.end()) {
+    return {input, input, {}, 0, input.sizes().vec()};
+  }
+  auto before = std::distance(indices.begin(), first);
+  auto end = before;
+  at::Tensor linear;
+  while (end < input.dim() && indices[end].defined()) {
+    auto extent = input.size(end);
+    auto current = NormalizeDeviceIndex(indices[end], extent, true);
+    linear = linear.defined() ? linear.mul(extent).add(current) : current;
+    ++end;
+  }
+  // One gather along the flattened indexed axes also covers indices with
+  // different broadcast shapes and separates them from untouched axes.
+  auto flattened = input.flatten(before, end - 1);
+  auto shape = input.sizes().slice(0, before).vec();
+  shape.insert(shape.end(), linear.sizes().begin(), linear.sizes().end());
+  shape.insert(shape.end(), input.sizes().begin() + end, input.sizes().end());
+  return {std::move(input), std::move(flattened), linear.flatten(), before,
+          std::move(shape)};
+}
+
+at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
+                                   const c10::List<std::optional<at::Tensor>>& raw,
+                                   at::Tensor& out) {
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == self.scalar_type(),
+              "index(): output must match input device and dtype");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  auto plan = PrepareDeviceIndices(self, raw, out);
+  at::native::resize_output(out, plan.output_shape);
+  if (!plan.positions.defined()) return out.copy_(plan.input);
+  auto selected = SelectDevicePositions(plan.flattened, plan.axis, plan.positions);
+  return out.copy_(selected.reshape(plan.output_shape));
+}
+
+at::Tensor ReplaceDevicePositions(const at::Tensor& input, int64_t dim,
+                                  const at::Tensor& positions, const at::Tensor& updates) {
+  // Pick the last value for repeated positions using an integer max. The
+  // remaining operations only gather or copy the original value bits.
+  auto extent = input.size(dim);
+  auto ordinals = at::arange(positions.numel(), positions.options());
+  auto missing = at::full({extent}, -1, positions.options());
+  auto mapping = at::scatter_reduce(missing, 0, positions, ordinals, "amax");
+  auto selected = SelectDevicePositions(updates, dim, mapping.clamp_min(0));
+  std::vector<int64_t> broadcast_shape(input.dim(), 1);
+  broadcast_shape[dim] = extent;
+  return at::where(mapping.ge(0).reshape(broadcast_shape), selected, input);
+}
+
+at::Tensor& DeviceIndexCopyOut(const at::Tensor& self, int64_t dim,
+                               const at::Tensor& index, const at::Tensor& source,
+                               at::Tensor& out) {
+  TORCH_CHECK(out.device() == self.device() && source.device() == self.device() &&
+              index.device() == self.device(), "index_copy(): tensors must share a device");
+  TORCH_CHECK(out.scalar_type() == self.scalar_type() &&
+              source.scalar_type() == self.scalar_type(),
+              "index_copy(): input, source and output must have the same dtype");
+  TORCH_CHECK_INDEX(index.dim() <= 1 && index.scalar_type() == at::kLong,
+                    "index_copy(): expected a scalar or vector of int64 indices");
+  dim = at::maybe_wrap_dim(dim, self.dim());
+  auto input = self.dim() == 0 ? self.unsqueeze(0) : self;
+  auto updates = source.dim() == 0 ? source.unsqueeze(0) : source;
+  auto expected = input.sizes().vec();
+  expected[dim] = index.numel();
+  TORCH_CHECK_INDEX(updates.sizes().equals(expected),
+                    "index_copy(): source must match the indexed slice shape");
+  at::native::resize_output(out, self.sizes());
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, index);
+  at::assert_no_overlap(out, source);
+  at::assert_no_partial_overlap(out, self);
+  auto positions = NormalizeDeviceIndex(index.reshape({-1}), input.size(dim), false);
+  if (updates.numel() == 0) return out.copy_(self);
+  auto result = ReplaceDevicePositions(input, dim, positions, updates);
+  return out.copy_(result.reshape(self.sizes()));
+}
+
+at::Tensor& DeviceAdvancedIndexPut(
+    at::Tensor& self, const c10::List<std::optional<at::Tensor>>& raw,
+    const at::Tensor& values, bool accumulate) {
+  TORCH_CHECK(values.scalar_type() == self.scalar_type(),
+              "index_put(): input and assigned values must have the same dtype");
+  TORCH_CHECK(values.device() == self.device() ||
+              (values.is_cpu() && values.dim() == 0),
+              "index_put(): values must be on the input device or a CPU scalar");
+  at::assert_no_internal_overlap(self);
+  at::assert_no_overlap(self, values);
+  auto plan = PrepareDeviceIndices(self, raw, self);
+  auto expanded = values.to(self.device()).expand(plan.output_shape);
+  if (!plan.positions.defined()) {
+    return accumulate ? self.add_(expanded) : self.copy_(expanded);
+  }
+  auto update_shape = plan.flattened.sizes().vec();
+  update_shape[plan.axis] = plan.positions.numel();
+  auto updates = expanded.reshape(update_shape);
+  if (!updates.numel()) return self;
+
+  at::Tensor result;
+  if (accumulate) {
+    std::vector<int64_t> index_shape(plan.flattened.dim(), 1);
+    index_shape[plan.axis] = plan.positions.numel();
+    auto scatter_indices = plan.positions.reshape(index_shape).expand(update_shape);
+    result = at::native::flagos::CallPythonOp_Generic(
+        "flag_gems.scatter_reduce",
+        {plan.flattened, plan.axis, scatter_indices.contiguous(), updates, "sum"});
+  } else {
+    result = ReplaceDevicePositions(plan.flattened, plan.axis, plan.positions, updates);
+  }
+  plan.input.copy_(result.reshape(plan.input.sizes()));
+  return self;
+}
+
+at::Tensor& DeviceUpsampleNearestExact2dOut(
+    const at::Tensor& self, at::IntArrayRef size,
+    std::optional<double> scale_h, std::optional<double> scale_w, at::Tensor& out) {
+  const auto shape = at::native::upsample_2d_common_check(self.sizes(), size);
+  TORCH_CHECK(self.size(1) > 0,
+              "nearest-exact: input must have a nonempty channel dimension");
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == self.scalar_type(),
+              "nearest-exact: output must match input device and dtype");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  auto result = self;
+  const auto resize_axis = [&](int64_t axis, std::optional<double> scale) {
+    if (shape[axis] == self.size(axis)) return;
+    const auto ratio = at::native::compute_scales_value<float>(
+        scale, self.size(axis), shape[axis]);
+    auto positions = at::arange(shape[axis], self.options().dtype(at::kFloat));
+    positions = positions.add(0.5f).mul(ratio).floor().to(at::kLong);
+    positions.clamp_max_(self.size(axis) - 1);
+    result = SelectDevicePositions(result, axis, positions);
+  };
+  resize_axis(2, scale_h);
+  resize_axis(3, scale_w);
+  at::native::resize_output(out, shape);
+  return out.copy_(result);
+}
+
+std::optional<float> NvidiaScalarReciprocal(const at::Tensor& self,
+                                             const at::Scalar& divisor,
+                                             const char* op) {
+  if (self.scalar_type() != at::kFloat || self.layout() != at::kStrided ||
+      divisor.isComplex() || at::native::flagos::GetBackendForOp(op) !=
+          at::native::flagos::Backend::kFlagGems) {
+    return std::nullopt;
+  }
+  const auto value = divisor.toDouble();
+  if (value == 0.0 || !std::isfinite(value)) return std::nullopt;
+  // Match NVIDIA true division by a host scalar. CUDA computes its reciprocal
+  // in double precision and rounds it to the FP32 multiplication type.
+  const auto reciprocal = static_cast<float>(1.0 / value);
+  return std::isnormal(reciprocal) ? std::optional(reciprocal) : std::nullopt;
+}
+
+std::optional<float> NvidiaScalarReciprocal(const at::Tensor& self,
+                                             const at::Tensor& divisor,
+                                             const char* op) {
+  if (self.scalar_type() != at::kFloat || !divisor.device().is_cpu() ||
+      divisor.dim() != 0 || divisor.is_complex() ||
+      at::result_type(self, divisor) != at::kFloat) {
+    return std::nullopt;
+  }
+  return NvidiaScalarReciprocal(self, divisor.item(), op);
+}
+
+at::Tensor FlagosNvidiaDivScalar(const at::Tensor& self, const at::Scalar& divisor) {
+  if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div.Scalar")) {
+    return at::mul(self, at::Scalar(*reciprocal));
+  }
+  return at::native::flagos::div_scalar_dispatcher(self, divisor);
+}
+
+at::Tensor FlagosNvidiaDivTensor(const at::Tensor& self, const at::Tensor& divisor) {
+  if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div.Tensor")) {
+    return at::mul(self, at::Scalar(*reciprocal));
+  }
+  return at::native::flagos::div_tensor_dispatcher(self, divisor);
+}
+
+at::Tensor& FlagosNvidiaDivInplaceScalar(at::Tensor& self, const at::Scalar& divisor) {
+  if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div_.Scalar")) {
+    return self.copy_(at::mul(self, at::Scalar(*reciprocal)));
+  }
+  return at::native::flagos::div_inplace_scalar_dispatcher(self, divisor);
+}
+
+at::Tensor& FlagosNvidiaDivInplaceTensor(at::Tensor& self, const at::Tensor& divisor) {
+  if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div_.Tensor")) {
+    return self.copy_(at::mul(self, at::Scalar(*reciprocal)));
+  }
+  return at::native::flagos::div_inplace_tensor_dispatcher(self, divisor);
+}
+#endif
 
 // _fused_sdp_choice: tells PyTorch's scaled_dot_product_attention which fused
 // backend to use for PrivateUse1 tensors. Returning efficient_attention (2)
@@ -365,9 +709,9 @@ int64_t WrapperFusedSdpChoice(
 // The CUDA-ABI platforms reach this through FLAGOS_ACCEL_*, not a USE_* macro:
 // their USE_* macro is empty (they re-tag a vendor CUDA build rather than own
 // one), and since CUDA boxing became opt-in (#520) their default wheel is
-// FlagGems-primary, which compiles the conf-derived FlagGems list. On cuda and
-// dcu that list names no conv, so the forward needs this wrapper too; metax and
-// ppu do route conv to FlagGems and only need it when that route is absent.
+// FlagGems-primary, which compiles the conf-derived FlagGems list. On dcu that
+// list names no conv, so the forward needs this wrapper too. NVIDIA uses it
+// for inputs outside the FlagGems forward contract.
 // FLAGOS_CONV_NEEDS_CPU_CROSSING below is the single place that decides.
 #if defined(USE_BPU) || defined(USE_KUNLUNXIN) || defined(USE_TSINGMICRO) || \
     defined(USE_ILUVATAR) || defined(FLAGOS_CONV_NEEDS_CPU_CROSSING)
@@ -397,6 +741,36 @@ at::Tensor FlagosWrapperConvolutionOverrideable(
       groups);
   return out.to(input.device());
 }
+
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+at::Tensor FlagosNvidiaConvolutionOverrideable(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef dilation,
+    bool transposed,
+    c10::SymIntArrayRef output_padding,
+    c10::SymInt groups) {
+  const auto dtype = input.scalar_type();
+  const bool supported_dtype =
+      dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+  const bool compatible_bias = !bias || !bias->defined() ||
+      (bias->device() == input.device() && bias->scalar_type() == dtype);
+  if (!transposed && supported_dtype && compatible_bias && input.dim() >= 3 &&
+      input.dim() <= 5 && input.dim() == weight.dim() && input.numel() && weight.numel() &&
+      input.layout() == at::kStrided && weight.layout() == at::kStrided &&
+      input.device() == weight.device() && dtype == weight.scalar_type()) {
+    return at::native::flagos::convolution_overrideable_dispatcher(
+        input, weight, bias, C10_AS_INTARRAYREF_SLOW(stride),
+        C10_AS_INTARRAYREF_SLOW(padding), C10_AS_INTARRAYREF_SLOW(dilation),
+        transposed, C10_AS_INTARRAYREF_SLOW(output_padding), groups.expect_int());
+  }
+  return FlagosWrapperConvolutionOverrideable(
+      input, weight, bias, stride, padding, dilation, transposed, output_padding, groups);
+}
+#endif
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor>
 FlagosWrapperConvolutionBackwardOverrideable(
@@ -773,17 +1147,26 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("_scaled_grouped_mm_v2", WrapperPrivScaledGroupedMmV2);
 #endif
 
-  // These FlagGems-primary builds have no forward or backward kernel for
-  // convolution_overrideable. MetaX and PPU already claim the forward in
-  // their generated list, so they only need the backward CPU crossing.
-#if defined(FLAGOS_ACCEL_TSINGMICRO) || defined(FLAGOS_ACCEL_CUDA) || \
-    defined(FLAGOS_ACCEL_DCU)
+  // Keep the generated forward on NVIDIA, MetaX and PPU. Registering the CPU
+  // crossing again would shadow that GPU kernel.
+#if defined(FLAGOS_ACCEL_TSINGMICRO) || defined(FLAGOS_ACCEL_DCU)
   m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
   m.impl("convolution_backward_overrideable",
       FlagosWrapperConvolutionBackwardOverrideable);
-#elif defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_PPU)
+#elif defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_METAX) || \
+    defined(FLAGOS_ACCEL_PPU)
   m.impl("convolution_backward_overrideable",
       FlagosWrapperConvolutionBackwardOverrideable);
+#endif
+#if defined(FLAGOS_ACCEL_CUDA)
+  m.impl("_upsample_nearest_exact2d.out", DeviceUpsampleNearestExact2dOut);
+  m.impl("equal", WrapperEqual);
+  m.impl("index.Tensor_out", DeviceAdvancedIndexOut);
+#if defined(FLAGOS_FLAGGEMS_PYTHON)
+  m.impl("index_copy.out", DeviceIndexCopyOut);
+#endif
+  m.impl("index_select", DeviceIndexSelect);
+  m.impl("prod.int_out", DeviceProdDimOut);
 #endif
 
 #if defined(USE_TSINGMICRO)

@@ -70,6 +70,70 @@ wheel records its kernel sets in `torch_fl/_build_config.py`, and the
 integration conftest collects those tests exactly when `flaggems_cpp` is in that
 record — see [Testing](../../development/testing.md).
 
+### FlashAttention 3 inference
+
+The NVIDIA Native Host wheel builds against CPU PyTorch. Native hosts run
+published FlagGems kernels and use cuBLAS and cuBLASLt for matrix products,
+including BF16 linear layers with bias, and cuSOLVER for linear solves. The NVIDIA
+cuDNN frontend package enables BF16 convolutions and fused attention for
+supported dense inputs with multiple query positions. Builds with the cuDNN C++
+frontend and runtime libraries can also run fused attention for single-query
+decoding. Use the same CUDA runtime major version throughout the process.
+`CUDNN_FRONTEND_INCLUDE_DIR`, `CUDNN_INCLUDE_DIR`, and `CUDNN_LIBRARY_DIR`
+can point the build to those SDK components.
+
+Builds that find `CUTLASS_INCLUDE_DIR` and cuRAND headers enable the CUDA reference's
+memory-efficient attention algorithm for aligned wide BF16 heads. The kernel
+is instantiated at build time from the published CUTLASS headers and the CPU
+PyTorch wheel's attention template.
+
+The generated NVIDIA configuration selects `scaled_dot_product_attention = nvidia`.
+The fused SDK routes handle eligible BF16 inference. Other inputs use the SDPA
+composite on the original FlagOS tensors. `FLAGOS_OP_scaled_dot_product_attention=flaggems`
+selects the FlagGems SDPA implementation for its supported inputs. `FLAGOS_LOG=dispatch`
+reports the selected SDPA implementation.
+
+The Native Host build without vendor PyTorch kernels serves single-rank
+collectives on local device buffers. Multi-rank FlagOS groups in this build
+require FlagCX.
+
+An optional Hopper build compiles the published NVIDIA FlashAttention 3 v1.0.3
+forward kernels and their CUTLASS headers. The generated host calls those
+kernels with FlagOS tensor storage, its allocator and its current stream. The
+wheel uses CPU PyTorch and links the CUDA runtime. The supported scope is
+read-only FP16 and BF16 forward inference, including dense and packed
+variable-length attention.
+
+```bash
+git clone --depth 1 --branch v1.0.3 --recurse-submodules \
+  https://github.com/alihassanijr/flash_attn_3_nv.git
+FLAGOS_ACCELERATOR=nvidia FLAGOS_BUILD_NATIVE_HOST=1 \
+  FLAGOS_NVIDIA_FA3_SOURCE="$PWD/flash_attn_3_nv" \
+  python -m build --wheel --no-isolation
+```
+
+The wheel supplies the `flash_attn_3_nv` Python forward API when Torch-FL
+initializes under CPU PyTorch. Import PyTorch and Torch-FL before using that API
+with tensors on `flagos`. On a stock CUDA PyTorch installation, the original
+NVIDIA provider remains the CUDA reference.
+
+With the bundled provider enabled, Torch-FL exposes the SDK runtime version as
+`torch.version.cuda` for applications that use it as a capability probe. The
+CPU PyTorch build still reports false for `torch._C._has_cuda`.
+
+Generate a reference on Hopper in the CUDA PyTorch environment.
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python tests/manual/test_nvidia_flash_attention_3.py /tmp/fa3-cuda.pt
+```
+
+Run the comparisons in the CPU PyTorch environment with the Torch-FL wheel.
+
+```bash
+FLAGOS_DISABLE_CPU_FALLBACK=1 FLAGOS_FA3_CUDA_REFERENCE=/tmp/fa3-cuda.pt \
+  python -m pytest -q tests/manual/test_nvidia_flash_attention_3.py
+```
+
 ## Verification
 
 ### Basic Device Check

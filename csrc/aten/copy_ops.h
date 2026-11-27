@@ -15,6 +15,8 @@ namespace at::native::flagos {
 // before invoking the original FlagGems implementation.
 bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst);
 
+at::Tensor TryGemsStridedCat(const at::ITensorListRef& tensors, int64_t dim);
+
 at::Tensor _copy_from(
     const at::Tensor& self,
     const at::Tensor& dst,

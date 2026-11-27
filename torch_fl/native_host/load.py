@@ -126,6 +126,25 @@ _device_artifacts = None
 _inductor_autotuner = ContextVar("inductor_autotuner", default=None)
 
 
+def _same_torch_cohort(manifest, torch):
+    built_version = manifest["torch"]
+    if built_version == torch.__version__:
+        return True
+    # An optional CUDA extension can use the same release of PyTorch as a
+    # CPU-built NVIDIA wheel when both the source revision and C++ ABI match.
+    built_release, _, built_variant = built_version.partition("+")
+    revision = manifest.get("torch_git_version")
+    return (
+        manifest.get("backend", {}).get("vendor") == "nvidia"
+        and built_variant == "cpu"
+        and torch._C._has_cuda
+        and built_release == torch.__version__.partition("+")[0]
+        and bool(revision)
+        and revision == torch.version.git_version
+        and manifest.get("torch_cxx11_abi") is torch.compiled_with_cxx11_abi()
+    )
+
+
 @cache
 def _verified_singleton_tuner():
     for module, expected in _SINGLETON_TUNER_SOURCES.items():
@@ -331,7 +350,7 @@ class Hosts:
             if hasattr(flag_gems, name)
         }
         if (
-            self.manifest["torch"] != torch.__version__
+            not _same_torch_cohort(self.manifest, torch)
             or self.manifest["triton"] != triton.__version__
         ):
             raise RuntimeError(
@@ -760,10 +779,15 @@ class Hosts:
         import torch
         from torch_fl import _build_config
 
-        if torch.version.cuda is not None or "boxing" in _build_config.KERNELS:
-            raise RuntimeError(
-                "native host experiment requires the CPU-Torch vendor build"
-            )
+        matched_cpu_build = self.manifest["torch"].endswith(
+            "+cpu"
+        ) and _same_torch_cohort(self.manifest, torch)
+        if (
+            torch._C._has_cuda
+            and not matched_cpu_build
+            or "boxing" in _build_config.KERNELS
+        ):
+            raise RuntimeError("native hosts require the recorded CPU Torch cohort")
         if getattr(_build_config, "NATIVE_HOSTS", False):
             torch.ops.flagos.strict_host_routes(True)
         if _device_artifacts is not None and _device_artifacts.required:

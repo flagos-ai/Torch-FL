@@ -71,7 +71,7 @@ import torch
 import torch.distributed as dist
 from torch._C import _distributed_c10d as _c10d
 
-from torch_fl import _env
+from torch_fl import _env, _platform
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +302,117 @@ def _completed_work(result=None):
     future = torch.futures.Future()
     future.set_result(result)
     return _c10d._create_work_from_future(future)
+
+
+class _SingleRankCollectives:
+    """Single-rank collectives over the caller's tensors and device streams."""
+
+    def __init__(self, store, timeout):
+        # c10d uses this backend for the group name and store identity.
+        self.c10d_backend = (
+            dist.ProcessGroupGloo(store, 0, 1)
+            if timeout is None
+            else dist.ProcessGroupGloo(store, 0, 1, timeout=timeout)
+        )
+
+    @staticmethod
+    @torch.no_grad()
+    def _copy(outputs, inputs):
+        devices = set()
+        for output, source in zip(outputs, inputs, strict=True):
+            if (
+                output.device != source.device
+                or output.dtype != source.dtype
+                or output.numel() != source.numel()
+            ):
+                raise RuntimeError("single-rank collective requires matching buffers")
+            if output is not source:
+                output.copy_(source.reshape(output.shape))
+            if output.device.type in _HOST_STAGED_TYPES:
+                devices.add(output.device)
+        for device in devices:
+            torch.accelerator.synchronize(device)
+        return _completed_work(outputs)
+
+    @staticmethod
+    def _check_reduction(opts):
+        operation = getattr(opts.reduceOp, "op", opts.reduceOp)
+        if operation == dist.ReduceOp.PREMUL_SUM:
+            raise NotImplementedError("single-rank PREMUL_SUM is unsupported")
+
+    @staticmethod
+    def _check_root(opts):
+        if opts.rootRank != 0:
+            raise ValueError("single-rank collective requires root rank 0")
+
+    def allreduce(self, tensors, opts):
+        self._check_reduction(opts)
+        return self._copy(tensors, tensors)
+
+    allreduce_coalesced = allreduce
+
+    def reduce(self, tensors, opts):
+        self._check_root(opts)
+        return self.allreduce(tensors, opts)
+
+    def broadcast(self, tensors, opts):
+        self._check_root(opts)
+        if not 0 <= opts.rootTensor < len(tensors):
+            raise ValueError("invalid single-rank broadcast root tensor")
+        return self._copy(tensors, [tensors[opts.rootTensor]] * len(tensors))
+
+    def allgather(self, output_tensors, input_tensors, opts):
+        outputs = [self._one(group) for group in output_tensors]
+        return self._copy(outputs, input_tensors)
+
+    def allgather_coalesced(self, output_tensors, input_tensors, opts):
+        return self._copy(self._one(output_tensors), input_tensors)
+
+    def allgather_into_tensor_coalesced(self, output_tensors, input_tensors, opts):
+        return self._copy(output_tensors, input_tensors)
+
+    def _allgather_base(self, output, source, opts):
+        return self._copy([output], [source])
+
+    alltoall = allgather_into_tensor_coalesced
+
+    def gather(self, output_tensors, input_tensors, opts):
+        self._check_root(opts)
+        return self.allgather(output_tensors, input_tensors, opts)
+
+    def _reduce_scatter_base(self, output, source, opts):
+        self._check_reduction(opts)
+        return self._allgather_base(output, source, opts)
+
+    def reduce_scatter_tensor_coalesced(self, output_tensors, input_tensors, opts):
+        self._check_reduction(opts)
+        return self._copy(output_tensors, input_tensors)
+
+    def reduce_scatter(self, output_tensors, input_tensors, opts):
+        self._check_reduction(opts)
+        return self._copy(output_tensors, [self._one(group) for group in input_tensors])
+
+    def scatter(self, output_tensors, input_tensors, opts):
+        self._check_root(opts)
+        return self._copy(output_tensors, [self._one(group) for group in input_tensors])
+
+    def alltoall_base(self, output, source, output_splits, input_splits, opts):
+        if (output_splits and output_splits != [output.size(0)]) or (
+            input_splits and input_splits != [source.size(0)]
+        ):
+            raise RuntimeError("single-rank all-to-all requires one full split")
+        return self._allgather_base(output, source, opts)
+
+    def barrier(self, opts):
+        for device in opts.device_ids or (None,):
+            torch.accelerator.synchronize(device)
+        return _completed_work()
+
+    @staticmethod
+    def _one(tensors):
+        if len(tensors) != 1:
+            raise RuntimeError("expected a single-rank collective buffer")
+        return tensors[0]
 
 
 def _allgather_into_tensor_coalesced(group, output_tensors, input_tensors, opts):
@@ -552,7 +663,12 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         # wraps (see its c10d_backend property).
         inner = getattr(inner, "c10d_backend", inner)
         try:
-            device = torch.device("privateuseone", max(torch.cuda.current_device(), 0))
+            index = (
+                torch.accelerator.current_device_index()
+                if _platform.build_info().uses_nvidia_sdk
+                else torch.cuda.current_device()
+            )
+            device = torch.device("privateuseone", max(index, 0))
             self._register_backend(device, dist.ProcessGroup.BackendType.CUSTOM, inner)
         except Exception:  # noqa: BLE001  - never block PG creation on this
             pass
@@ -560,15 +676,20 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
     def _build_inner(self, store, rank, world_size, timeout):
         """Create the inner backend and return the view-conversion function.
 
-        Table-driven by GEMS_VENDOR (see _VENDOR_PROFILES). For every vendor the
-        priority is: FlagCX (heterogeneous unified comm) first, then the vendor's
-        native backend (NCCL / HCCL / MCCL), then host-staged gloo. The returned
+        Table-driven by GEMS_VENDOR (see _VENDOR_PROFILES). An NVIDIA Native Host
+        group uses local device copies at size one and FlagCX at larger sizes.
+        Other builds try FlagCX, the vendor's native backend, then staged gloo. The returned
         callable maps a flagos (privateuseone) tensor to the physical device view
         the chosen inner backend expects; it is the identity for tensors already
         off flagos, and None for the staged tier, which converts operands itself.
         """
         vendor = os.environ.get("GEMS_VENDOR", _DEFAULT_VENDOR)
         prof = _get_profile(vendor)
+        independent_nvidia = _platform.build_info().uses_nvidia_sdk
+
+        if independent_nvidia and world_size == 1:
+            self._inner = _SingleRankCollectives(store, timeout)
+            return None
 
         # --- Try FlagCX first (heterogeneous unified comm) ---
         # FlagCX self-registers the "flagcx" backend for prof.flagcx_dev on
@@ -578,6 +699,9 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         # _DistributedBackendOptions the same way c10d does.
         if self._try_build_flagcx(store, rank, world_size, timeout):
             return self._resolve_view(prof, vendor, backend="flagcx")
+
+        if independent_nvidia:
+            raise RuntimeError("Multi-rank NVIDIA Native Host groups require FlagCX")
 
         # --- Native vendor backend fallback (NCCL / HCCL) ---
         if prof.native is not None:
@@ -1273,6 +1397,13 @@ _REDIRECT_MARKER = "_flagos_redirects_gloo"
 _ORIGINAL_NEW_GROUP = None
 
 
+def _uses_flagos_accelerator() -> bool:
+    try:
+        return torch._C._get_accelerator().type in _HOST_STAGED_TYPES
+    except Exception:  # noqa: BLE001 - an unavailable query leaves backend selection alone
+        return False
+
+
 def _gloo_requests_are_redirected() -> bool:
     """True when a gloo request on this host has nothing left to fall back on.
 
@@ -1286,13 +1417,7 @@ def _gloo_requests_are_redirected() -> bool:
     Gated by ``FLAGOS_DIST_REDIRECT_GLOO`` so the requested backend can still be
     honoured verbatim while debugging a distributed problem.
     """
-    if not _env.flag("FLAGOS_DIST_REDIRECT_GLOO", True):
-        return False
-    try:
-        accelerator = torch._C._get_accelerator().type
-    except Exception:  # noqa: BLE001 - no accelerator query: leave gloo alone
-        return False
-    return accelerator in _HOST_STAGED_TYPES
+    return _env.flag("FLAGOS_DIST_REDIRECT_GLOO", True) and _uses_flagos_accelerator()
 
 
 def _needs_gloo_redirect(value) -> bool:
@@ -1306,26 +1431,35 @@ def _needs_gloo_redirect(value) -> bool:
     return isinstance(value, str) and value.lower() == dist.Backend.GLOO
 
 
-def _redirect_backend_argument(args, kwargs, position, keyword):
-    """Rewrite a gloo backend argument to "flagos", wherever it was passed.
+def _needs_nccl_redirect(value, device_id) -> bool:
+    if not isinstance(value, str) or value.lower() != dist.Backend.NCCL:
+        return False
+    if device_id is not None and not isinstance(device_id, int):
+        if getattr(device_id, "type", None) not in _HOST_STAGED_TYPES:
+            return False
+    return _env.flag("FLAGOS_DIST_REDIRECT_NCCL", False) and _uses_flagos_accelerator()
+
+
+def _redirect_backend_argument(args, kwargs, position, keyword, device_id=None):
+    """Rewrite a legacy backend argument to "flagos", wherever it was passed.
 
     Both spellings have to be handled: torchrun and the transformers FSDP2 tests
     pass ``backend=`` by keyword, while ``new_group`` is usually called
     positionally.
     """
-    if len(args) > position:
-        if _needs_gloo_redirect(args[position]):
-            args = list(args)
-            args[position] = _FLAGOS_BACKEND
-            args = tuple(args)
-    elif keyword in kwargs and _needs_gloo_redirect(kwargs[keyword]):
+    positional = len(args) > position
+    value = args[position] if positional else kwargs.get(keyword)
+    if _needs_gloo_redirect(value) or _needs_nccl_redirect(value, device_id):
+        if positional:
+            args = (*args[:position], _FLAGOS_BACKEND, *args[position + 1 :])
+            return args, kwargs
         kwargs = dict(kwargs)
         kwargs[keyword] = _FLAGOS_BACKEND
     return args, kwargs
 
 
 def redirect_gloo_requests() -> None:
-    """Interpose on ``init_process_group`` / ``new_group`` to serve gloo requests.
+    """Interpose on ``init_process_group`` / ``new_group`` for legacy requests.
 
     ``torch.distributed`` sends every device type it does not recognise to gloo,
     so on a flagos host ``init_process_group(backend="gloo")`` -- what torchrun
@@ -1350,6 +1484,10 @@ def redirect_gloo_requests() -> None:
     process-wide ``FLAGOS_DIST_REDIRECT_GLOO=0`` switch is the blunter form of
     the same thing.
 
+    ``FLAGOS_DIST_REDIRECT_NCCL=1`` also serves plain NCCL requests through the
+    FlagOS backend when FlagOS is active. An explicitly selected CUDA device
+    keeps NCCL, as does a process with the opt-in disabled.
+
     Called once at ``import torch_fl``; subsequent calls are no-ops.
     """
     if getattr(dist.init_process_group, _REDIRECT_MARKER, False):
@@ -1363,14 +1501,16 @@ def redirect_gloo_requests() -> None:
 
     @functools.wraps(original_init_process_group)
     def init_process_group(*args, **kwargs):
-        args, kwargs = _redirect_backend_argument(args, kwargs, 0, "backend")
+        device_id = args[8] if len(args) > 8 else kwargs.get("device_id")
+        args, kwargs = _redirect_backend_argument(args, kwargs, 0, "backend", device_id)
         return original_init_process_group(*args, **kwargs)
 
     @functools.wraps(original_new_group)
     def new_group(*args, **kwargs):
         # new_group(ranks=None, timeout=..., backend=None, ...): backend is the
         # third positional argument.
-        args, kwargs = _redirect_backend_argument(args, kwargs, 2, "backend")
+        device_id = args[6] if len(args) > 6 else kwargs.get("device_id")
+        args, kwargs = _redirect_backend_argument(args, kwargs, 2, "backend", device_id)
         return original_new_group(*args, **kwargs)
 
     init_process_group._flagos_redirects_gloo = True

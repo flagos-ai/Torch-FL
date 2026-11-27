@@ -134,7 +134,7 @@ Event/Stream shims that inductor's autotuner needs.
 ## AMP and Dtype Support
 
 The flagos device implements PyTorch's standard `AutocastPrivateUse1` policies.
-Autocast supports `torch.float16` and `torch.bfloat16` targets:
+Autocast supports `torch.float16`, `torch.bfloat16`, and `torch.float32` targets.
 
 ```python
 model = torch.nn.Linear(512, 512, device="flagos:0")
@@ -152,13 +152,15 @@ scaler.step(optimizer)
 scaler.update()
 ```
 
-Matrix operations such as `mm`, `linear`, and `addmm` use the selected
-lower-precision dtype. Numerically sensitive operations covered by the standard
+Matrix operations such as `mm`, `linear`, and `addmm` use the selected target
+dtype. An explicit `torch.float32` region also converts eligible
+lower-precision weights to float32 for those operations. Numerically sensitive
+operations covered by the standard
 policy list, such as `softmax`, normalization, and `mse_loss`, run in float32.
 Operations outside that list, such as binary cross entropy, use backend
 fallthrough. Explicit `dtype=` arguments
-remain authoritative for policy wrappers. Unsupported autocast targets such as
-float32 and float64 are disabled by PyTorch with its standard warning.
+remain authoritative for policy wrappers. PyTorch disables autocast with its
+standard warning for unsupported targets such as float64.
 
 Outside autocast, the backend preserves the dtypes exercised by the current
 contract: float16, bfloat16, float32, float64, int64, and bool. Complex and

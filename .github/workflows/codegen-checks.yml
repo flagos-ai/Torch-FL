@@ -110,6 +110,7 @@ jobs:
           python3 scripts/codegen/codegen_native_vendor.py --vendor thead --check
           python3 scripts/codegen/codegen_metax_native_precision.py --check
           python3 scripts/codegen/codegen_metax_native_precision.py --vendor thead --check
+          python3 scripts/codegen/codegen_metax_native_precision.py --vendor nvidia --check
           python3 scripts/codegen/codegen_metax_native_vendor.py --check
           python3 scripts/codegen/codegen_ops.py --check-native-routes
           python3 scripts/codegen/codegen_ops.py --check-out-adapters

@@ -73,9 +73,10 @@ _CHILD_SRC = textwrap.dedent(
 
     def _run_one(op):
         aten = torch.ops.aten
+        # FP16 also exercises the base route on wheels with FP32/BF16 clauses.
         if op == "add.Tensor":
-            a = _randn(0, (4, 4))
-            b = _randn(1, (4, 4))
+            a = _randn(0, (4, 4)).half()
+            b = _randn(1, (4, 4)).half()
             return (aten.add.Tensor(a.to(_DEVICE), b.to(_DEVICE)), aten.add.Tensor(a, b))
         if op == "mul.Tensor":
             a = _randn(2, (4, 4)).to(torch.float16)
@@ -86,8 +87,8 @@ _CHILD_SRC = textwrap.dedent(
             b = _randn(5, (8, 8))
             return (aten.mm(a.to(_DEVICE), b.to(_DEVICE)), aten.mm(a, b))
         if op == "bmm":
-            a = _randn(6, (4, 8, 8))
-            b = _randn(7, (4, 8, 8))
+            a = _randn(6, (4, 8, 8)).half()
+            b = _randn(7, (4, 8, 8)).half()
             return (aten.bmm(a.to(_DEVICE), b.to(_DEVICE)), aten.bmm(a, b))
         if op == "cat":
             a = _randn(8, (4, 4)).to(torch.float16)

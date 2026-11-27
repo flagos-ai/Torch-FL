@@ -308,6 +308,12 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "wheel. Requires FlagGems, Cython and the platform SDK at build time. "
         "FlagGems C++ and TileOPs must be disabled",
     ),
+    "FLAGOS_NVIDIA_FA3_SOURCE": (
+        SCOPE_BUILD,
+        "Unset",
+        "Source checkout of the published NVIDIA FlashAttention 3 v1.0.3 provider, "
+        "including its CUTLASS submodule, for a Hopper Native Host wheel",
+    ),
     "FLAGOS_NATIVE_HOST_DEVICE_BUNDLE": (
         SCOPE_BUILD,
         "Unset",
@@ -468,6 +474,12 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "Alias the cuda device string to flagos for drop-in compatibility. Set "
         "0 to opt out",
     ),
+    "FLAGOS_ALIAS_CUDA_TRANSFERS": (
+        SCOPE_RUNTIME,
+        "0 (off)",
+        "Redirect Tensor.cuda() and Module.cuda() to FlagOS when native CUDA "
+        "tensor allocation is available. Requires FLAGOS_ALIAS_CUDA",
+    ),
     "FLAGOS_DISABLE_CUDA_SHIM": (
         SCOPE_RUNTIME,
         "0 (off)",
@@ -534,6 +546,12 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "device. Set 0 to keep the requested backend, which then rejects flagos "
         "tensors. See torch_fl/comm/process_group.py",
     ),
+    "FLAGOS_DIST_REDIRECT_NCCL": (
+        SCOPE_RUNTIME,
+        "0 (off)",
+        "Route plain NCCL requests through the flagos process group when FlagOS "
+        "is the active accelerator and the caller has not selected a CUDA device",
+    ),
     "FLAGOS_DIST_STAGED_GLOO": (
         SCOPE_RUNTIME,
         "1 (on)",
@@ -572,6 +590,11 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "1 (on)",
         "Caching device allocator. Set 0 to hand every allocation straight to "
         "the vendor runtime",
+    ),
+    "FLAGOS_DISABLE_CPU_FALLBACK": (
+        SCOPE_RUNTIME,
+        "0 (off)",
+        "Raise when a FlagOS operator would compute on the CPU",
     ),
     # --- Compiler and feature backends -----------------------------------
     "FLAGOS_USE_FLAGTREE": (

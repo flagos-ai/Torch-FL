@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PyTorch device aliases for runtime stacks without a CUDA device."""
+"""PyTorch device aliases for FlagOS runtime stacks."""
 
 import torch
 
@@ -114,10 +114,9 @@ _cuda_probe = None
 def has_real_cuda() -> bool:
     """Whether a genuine CUDA runtime is reachable through ``torch.cuda``.
 
-    That is torch's own answer on a CUDA build, and the CUDA-ABI vendor compat
-    layers' constant-True probe on a CPU torch wheel paired with the vendor's
-    externally loaded ``libtorch_cuda.so``. It is *not* the answer once torch_fl
-    itself owns the attribute: `install_alias` writes
+    This may come from native PyTorch or a vendor driver shim on CPU PyTorch.
+    CUDA Tensor operations additionally require an ATen CUDA allocator.
+    After the probe is captured, `install_alias` may write
     ``lambda: flagos.device_count() > 0`` and `_patch_native_cuda_probe` writes
     ``torch.flagos.is_available``, both of which answer True on any build with a
     flagos device, whether or not a CUDA runtime exists.
@@ -137,6 +136,26 @@ def has_real_cuda() -> bool:
     return bool(_cuda_probe())
 
 
+def _install_tensor_cuda_alias(flagos_type: str) -> None:
+    def _tensor_cuda(
+        self, device=None, non_blocking=False, *, memory_format=torch.preserve_format
+    ):
+        if device is None:
+            index = None
+        elif isinstance(device, int):
+            index = device
+        else:
+            requested = torch.device(device)
+            if requested.type not in ("cuda", flagos_type):
+                raise RuntimeError(f"Expected a CUDA device, but got: {requested}")
+            index = requested.index
+        # An omitted index follows the current FlagOS device.
+        target = torch.device(flagos_type, index)
+        return self.to(target, non_blocking=non_blocking, memory_format=memory_format)
+
+    torch.Tensor.cuda = _tensor_cuda
+
+
 def install_alias(flagos) -> None:
     """Make ``device="cuda"`` mean the flagos device when there is no real CUDA.
 
@@ -150,13 +169,11 @@ def install_alias(flagos) -> None:
     This rewrites ``cuda`` device *arguments* to the flagos device, so that
     hardcoded-``cuda`` code lands on the accelerator that is actually present.
 
-    Deliberately a no-op when *torch* reports a CUDA device: on the CUDA and
-    boxing backends ``cuda`` already means a real device, and hijacking it there
-    would break the boxing path, which submits genuine CUDA work. Which is not
-    the same question as whether ``torch.cuda.is_available()`` says so --
-    torch_fl redirects that probe on a build without a CUDA runtime, and reading
-    the redirect here is what kept this alias uninstalled; see
-    ``has_real_cuda``.
+    Preserve native CUDA Tensor methods by default when an ATen CUDA allocator
+    is registered. With ``FLAGOS_ALIAS_CUDA_TRANSFERS=1``, alias
+    ``Tensor.cuda()`` and transfers that use it, such as ``Module.cuda()``.
+    The NVIDIA driver shim on CPU PyTorch can expose CUDA probes and streams
+    without a CUDA allocator, so it needs this transfer alias by default.
 
     Opt out with ``FLAGOS_ALIAS_CUDA=0`` -- worth doing if you need
     ``device="cuda"`` to keep failing loudly rather than silently redirecting.
@@ -165,9 +182,17 @@ def install_alias(flagos) -> None:
     # or the compile integration replaces the live probe.
     global _cuda_probe
     _cuda_probe = torch.cuda.is_available
-    if has_real_cuda():
-        return
     if not _env.flag("FLAGOS_ALIAS_CUDA", True):
+        return
+
+    _flagos_type = torch._C._get_privateuse1_backend_name()
+    if has_real_cuda():
+        if _env.flag(
+            "FLAGOS_ALIAS_CUDA_TRANSFERS", False
+        ) or not torch._C._dispatch_has_kernel_for_dispatch_key(
+            "aten::empty.memory_format", "CUDA"
+        ):
+            _install_tensor_cuda_alias(_flagos_type)
         return
 
     # From here on, every "cuda" this process sees is this alias. Anything that
@@ -179,7 +204,6 @@ def install_alias(flagos) -> None:
 
     from torch.overrides import TorchFunctionMode
 
-    _flagos_type = torch._C._get_privateuse1_backend_name()  # "flagos"
     _orig_device = torch.device
 
     def _remap(dev):
@@ -267,21 +291,7 @@ def install_alias(flagos) -> None:
     torch.device = device
     _keep_device_identity_checks_working(_orig_device, device)
 
-    # Tensor.cuda() / Module.cuda() -> the flagos device.
-    def _tensor_cuda(self, device=None, non_blocking=False, **kwargs):
-        # `Tensor.cuda()` with no argument means the current device on CUDA, so
-        # it has to mean the current device here too: an index-less target is
-        # left index-less and resolved by torch, the same way the `_remap` str
-        # branch does it. Pinning 0 instead put every rank of a multi-rank job
-        # on flagos:0 and NCCL rejected the duplicate device.
-        target = _flagos_type
-        if device is not None:
-            index = _orig_device(_remap(device)).index
-            if index is not None:
-                target = f"{_flagos_type}:{index}"
-        return self.to(target, non_blocking=non_blocking)
-
-    torch.Tensor.cuda = _tensor_cuda
+    _install_tensor_cuda_alias(_flagos_type)
 
     # `torch.cuda.is_available()` is the ecosystem's "have I got an accelerator"
     # probe, and gating on it is what sends code down the CPU path. Report the
@@ -303,5 +313,5 @@ def install_alias(flagos) -> None:
 
 
 def is_active() -> bool:
-    """Return whether the compatibility layer installed device aliases."""
+    """Return whether the compatibility layer aliases the CUDA device namespace."""
     return _active

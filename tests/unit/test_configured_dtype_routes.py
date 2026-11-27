@@ -75,6 +75,11 @@ int main(int argc, char** argv) {
     }
     Dispatcher<Fn> op("mm");
     op.RegisterKernel(Backend::kFlagGems, &Gems);
+    if (mode == "host-disabled") {
+      SetStrictHostRoutes(false);
+      TORCH_CHECK(!CpuFallbackAllowed());
+      return 0;
+    }
     if (mode == "host") {
       auto value = at::ones({2, 2}, at::TensorOptions().dtype(at::kDouble));
       TORCH_CHECK(CpuFallbackAllowed());
@@ -373,6 +378,17 @@ def test_host_matmul_uses_the_shared_strict_fallback_policy(executable, tmp_path
     result = run(executable, tmp_path, "mm = flaggems", mode="host")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "allowed rejected restored"
+
+
+def test_fallback_disable_cannot_be_overridden_by_host_routes(executable, tmp_path):
+    result = run(
+        executable,
+        tmp_path,
+        "mm = flaggems",
+        mode="host-disabled",
+        FLAGOS_DISABLE_CPU_FALLBACK="1",
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(

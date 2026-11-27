@@ -1198,6 +1198,8 @@ class BuildExtWithCmake(_build_ext):
             "include/flagos.h",
         ]
         patterns = ["lib/*.so*", "lib/*.dylib*", "lib/*.dll", "lib/*.lib"]
+        if FLAGOS_ACCELERATOR == "cuda" and os.environ.get("FLAGOS_NVIDIA_FA3_SOURCE"):
+            patterns.append("lib/flash_attn_3_nv/*")
         if FLAGOS_ACCELERATOR == "metax":
             patterns.extend(("lib_metax/*.so*", "lib_metax/vendor_version.py"))
         if FLAGOS_ACCELERATOR == "ppu":

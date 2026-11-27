@@ -185,7 +185,12 @@ def test_builder_initializes_only_platforms_that_require_early_setup(
         "    return []\n"
         "stage_native_sources = build_extensions\n"
     )
-    (tmp_path / "torch.py").write_text("__version__ = '2.10.0+cpu'\n")
+    (tmp_path / "torch.py").write_text(
+        "from types import SimpleNamespace\n"
+        "__version__ = '2.10.0+cpu'\n"
+        "version = SimpleNamespace(git_version='test-revision')\n"
+        "def compiled_with_cxx11_abi(): return True\n"
+    )
     (tmp_path / "triton.py").write_text("__version__ = '3.5.0'\n")
     (tmp_path / "flag_gems.py").write_text(
         "from pathlib import Path\n"

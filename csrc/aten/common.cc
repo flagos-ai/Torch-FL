@@ -3,6 +3,8 @@
 #include "common.h"
 
 #include <ATen/Context.h>
+#include <ATen/ExpandUtils.h>
+#include <flagos_env.h>
 
 #include <atomic>
 #include <cstring>
@@ -334,8 +336,18 @@ void SetStrictHostRoutes(bool enabled) {
   strict_host_routes.store(enabled, std::memory_order_relaxed);
 }
 
+at::Tensor RestorePointwiseLayout(const at::Tensor& input, at::Tensor result) {
+  if (input.is_contiguous()) return result;
+  const auto strides = at::infer_dense_strides(input.sizes(), input.strides());
+  if (result.strides().equals(strides)) return result;
+  auto out = at::empty_strided(result.sizes(), strides, result.options());
+  out.copy_(result);
+  return out;
+}
+
 bool CpuFallbackAllowed() {
-  return !strict_host_routes.load(std::memory_order_relaxed);
+  static const bool disabled = flagos_env::EnvFlag("FLAGOS_DISABLE_CPU_FALLBACK");
+  return !disabled && !strict_host_routes.load(std::memory_order_relaxed);
 }
 
 bool FlagGemsMatmulNeedsHost(at::ScalarType dtype) {

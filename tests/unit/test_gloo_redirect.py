@@ -143,6 +143,7 @@ def test_positional_wins_over_keyword(monkeypatch):
 
 def test_non_gloo_backend_is_left_verbatim(monkeypatch):
     _fake_accelerator(monkeypatch, "flagos")
+    monkeypatch.delenv("FLAGOS_DIST_REDIRECT_NCCL", raising=False)
     args, kwargs = pg._redirect_backend_argument(("nccl",), {}, 0, "backend")
     assert args == ("nccl",)
     assert pg._redirect_backend_argument((), {"backend": "nccl"}, 0, "backend")[1] == {
@@ -214,6 +215,30 @@ def test_redirect_serves_a_positional_gloo_new_group(monkeypatch, restore_dist):
 
     assert dist.new_group([0, 1], None, "gloo") == "new-result"
     assert log == [("new", ([0, 1], None, "flagos"), {})]
+
+
+@pytest.mark.parametrize(
+    ("accelerator", "device", "expected"),
+    [
+        ("flagos", None, "flagos"),
+        ("flagos", "flagos", "flagos"),
+        ("flagos", "cuda", "nccl"),
+        ("cuda", None, "nccl"),
+    ],
+)
+def test_nccl_redirect_opt_in(monkeypatch, restore_dist, accelerator, device, expected):
+    _fake_accelerator(monkeypatch, accelerator)
+    monkeypatch.setenv("FLAGOS_DIST_REDIRECT_NCCL", "1")
+    log = _record(monkeypatch)
+    pg.redirect_gloo_requests()
+    device_id = _FakeAccelerator(device) if device is not None else None
+
+    dist.init_process_group("nccl", device_id=device_id)
+    dist.new_group([0], None, "nccl", device_id=device_id)
+    assert log == [
+        ("init", (expected,), {"device_id": device_id}),
+        ("new", ([0], None, expected), {"device_id": device_id}),
+    ]
 
 
 def test_redirect_leaves_an_explicit_flagos_request_alone(monkeypatch, restore_dist):

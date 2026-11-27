@@ -552,6 +552,11 @@ def _phase_ecosystem() -> None:
 
     cuda.install_alias(flagos)
 
+    if accelerator == "nvidia":
+        from .accelerator.nvidia import fa3
+
+        fa3.install()
+
     # Both of these have to precede the flag_gems import below, which happens
     # here rather than in _phase_vendor_compat for exactly that reason. That
     # import reaches Triton's hint manager, which asks the driver factory to

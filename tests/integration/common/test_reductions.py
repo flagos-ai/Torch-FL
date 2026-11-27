@@ -1,7 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Test indexed reductions with the same PyTorch reference on each device."""
+"""Test reductions against the same PyTorch reference on each device."""
 
 import os
 import subprocess
@@ -11,6 +11,19 @@ from pathlib import Path
 import pytest
 import torch
 import torch_fl  # noqa: F401
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("dim", [0, 1])
+def test_empty_mean_keeps_reduction_shape(dim):
+    host = torch.empty((0, 4), dtype=torch.float32)
+    data = host.to("flagos:0")
+    result = data.mean(dim=dim, keepdim=True)
+    assert result.device == data.device
+    torch.testing.assert_close(
+        result.cpu(), host.mean(dim=dim, keepdim=True), equal_nan=True
+    )
+
 
 DEVICE = torch.device("flagos:0")
 OPERATORS = {"argmin": "argmin", "max": "max.dim", "min": "min.dim"}
@@ -96,3 +109,38 @@ def test_indexed_reduction(op):
     assert process.returncode == 0, process.stdout + process.stderr
     assert "[flagos cpu_fallback]" not in process.stderr, process.stderr
     assert f"[flagos dispatch] {OPERATORS[op]} -> " in process.stderr, process.stderr
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("shape", [(0, 16, 128), (2, 16, 0)])
+def test_mean_empty_input(shape):
+    inputs = torch.empty(shape, dtype=torch.float32)
+    expected = inputs.mean(-1, keepdim=True)
+    result = inputs.to(DEVICE).mean(-1, keepdim=True)
+    assert result.device == DEVICE
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("inplace", [False, True])
+def test_scatter_add_expanded_index(inplace):
+    rows, columns = 16, 12
+    inputs = torch.full((rows + 2, columns), 0.5, dtype=torch.bfloat16)
+    source = torch.full((rows, columns), 0.25, dtype=inputs.dtype)
+    storage = torch.zeros(rows * columns, dtype=torch.long)
+    storage[:rows] = torch.arange(1, rows + 1)
+    index = storage[:rows].view(rows, 1).expand_as(source)
+    device_index = storage.to(DEVICE)[:rows].view(rows, 1).expand_as(source)
+    assert device_index.stride() == (1, 0)
+    expected = inputs.scatter_add(0, index, source)
+
+    destination = inputs.to(DEVICE)
+    operation = destination.scatter_add_ if inplace else destination.scatter_add
+    result = operation(0, device_index, source.to(DEVICE))
+    assert result.device == DEVICE
+    assert result.dtype == inputs.dtype
+    assert (result is destination) == inplace
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        destination.cpu(), expected if inplace else inputs, rtol=0, atol=0
+    )

@@ -76,6 +76,15 @@ class BuildInfo(NamedTuple):
     def vendor(self) -> str:
         return vendor_for(self.platform) or self.accelerator
 
+    @property
+    def uses_nvidia_sdk(self) -> bool:
+        """Whether the NVIDIA Native Host build uses the SDK operator routes."""
+        return (
+            self.vendor == "nvidia"
+            and self.native_hosts
+            and "vendor" not in self.kernels
+        )
+
 
 def _torch_fl_package_dir() -> Path | None:
     # Regular imports already know which wheel owns the module. Tools that load

@@ -1358,7 +1358,54 @@ def gen_flaggems_python_kernel(
                 f"  return at::native::flagos::{target}({', '.join(n for _, n in args)});\n"
                 "#endif\n"
             )
-        if op == "add.Tensor":
+        if op in ("mm", "mm.out", "bmm", "bmm.out"):
+            out_arg = ", &out" if op.endswith(".out") else ""
+            returned = "out" if out_arg else "result"
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                f"  if (auto result = ::flagos::nvidia::TryMatrixProduct(self, mat2{out_arg}); result.defined())\n"
+                f"    return {returned};\n"
+                "#endif\n"
+            )
+        elif op in ("pow.Scalar", "reciprocal", "rsqrt", "silu", "sqrt"):
+            operation = {
+                "pow.Scalar": "PowScalar",
+                "reciprocal": "Reciprocal",
+                "rsqrt": "Rsqrt",
+                "silu": "Silu",
+                "sqrt": "Sqrt",
+            }[op]
+            operands = "self"
+            if op == "pow.Scalar":
+                operands = "exponent, self.toFloat()"
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+            )
+            if op == "pow.Scalar":
+                prelude += (
+                    "  if (exponent.scalar_type() == at::kFloat && "
+                    "(self.isIntegral(false) || self.isFloatingPoint())) {\n"
+                )
+            prelude += (
+                f"  if (auto result = ::flagos::nvidia::TryPointwise(\n"
+                f"      ::flagos::nvidia::PointwiseOp::{operation}, {operands}); result.defined())\n"
+                "    return result;\n"
+            )
+            if op == "pow.Scalar":
+                prelude += "  }\n"
+            prelude += "#endif\n"
+        elif op == "convolution_overrideable":
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (!transposed && (input.dim() == 4 || input.dim() == 5) &&\n"
+                "      input.scalar_type() == at::kBFloat16) {\n"
+                '    auto output = CallPythonOp_Generic("torch_fl.accelerator.nvidia._cudnn.convolution",\n'
+                "        {input, weight, bias, stride, padding, dilation, transposed, output_padding, groups});\n"
+                "    if (output.defined()) return output;\n"
+                "  }\n"
+                "#endif\n"
+            )
+        elif op == "add.Tensor":
             prelude += (
                 "#if defined(USE_DCU)\n"
                 "  if (!alpha.isIntegral(false))\n"
@@ -1374,33 +1421,55 @@ def gen_flaggems_python_kernel(
                 "  }\n"
                 "#endif\n"
             )
-        elif op == "sub.Tensor":
+        elif op in ("addmm", "addmm.out"):
+            # Keep the contracting tile legal with FlagTree's small-block
+            # autotuning. This also serves the registered out overload.
+            call = "at::addmm(self, left, right, beta, alpha)"
+            if op == "addmm.out":
+                call = "at::addmm_out(out, self, left, right, beta, alpha)"
+            out = "&out" if op.endswith(".out") else "nullptr"
+            returned = "out" if op.endswith(".out") else "product"
             prelude += (
-                "#if defined(USE_DCU)\n"
-                "  at::native::sub_check(self, other);\n"
-                "  at::native::alpha_check(at::result_type(self, other), alpha);\n"
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (!beta.isComplex() && !alpha.isComplex()) {\n"
+                f"    auto product = ::flagos::nvidia::TryMatrixProduct(mat1, mat2, {out},\n"
+                "        &self, beta.toFloat(), alpha.toFloat());\n"
+                f"    if (product.defined()) return {returned};\n"
+                "  }\n"
                 "#endif\n"
-            )
-        elif op == "mul.Tensor":
-            prelude += (
-                "#if defined(FLAGOS_NATIVE_HOSTS)\n"
-                "  if (self.is_cpu() || other.is_cpu()) {\n"
-                "    const auto& tensor = self.is_cpu() ? other : self;\n"
-                "    const auto& scalar = self.is_cpu() ? self : other;\n"
-                "    // The compiled scalar path takes a device tensor followed by a wrapped number.\n"
-                "    if (tensor.is_privateuseone() && scalar.dim() == 0 &&\n"
-                "        !scalar.unsafeGetTensorImpl()->is_wrapped_number() &&\n"
-                "        tensor.is_floating_point() && scalar.is_floating_point() &&\n"
-                "        at::result_type(tensor, scalar) == tensor.scalar_type() &&\n"
-                "        MulTensorFnSource.Available()) {\n"
-                "      return MulTensorKernelPython(tensor, at::native::wrapped_scalar_tensor(scalar.item()));\n"
-                "    }\n"
+                "#if defined(FLAGOS_ACCEL_CUDA)\n"
+                "  if (mat1.dim() == 2 && mat2.dim() == 2 && mat1.size(1) > 0 &&\n"
+                "      mat1.size(1) < 16 && mat1.size(1) == mat2.size(0)) {\n"
+                "    const auto padding = 16 - mat1.size(1);\n"
+                "    auto left = at::constant_pad_nd(mat1, {0, padding}, 0);\n"
+                "    auto right = at::constant_pad_nd(mat2, {0, 0, 0, padding}, 0);\n"
+                f"    return {call};\n"
                 "  }\n"
                 "#endif\n"
             )
         elif op == "mean.dim":
+            # Use reduction metadata for empty inputs. If the result has
+            # elements, each corresponds to a reduction over an empty slice.
             prelude += (
-                "  at::native::make_dim_mask(dim, self.dim());\n"
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (dim.has_value() && dim->size() == 1 &&\n"
+                "      (dim->front() == -1 || dim->front() == self.dim() - 1) &&\n"
+                "      (!dtype.has_value() || *dtype == at::kFloat)) {\n"
+                "    if (auto result = ::flagos::nvidia::TryMeanLastDim(self, keepdim); result.defined())\n"
+                "      return result;\n"
+                "  }\n"
+                "#endif\n"
+                "  const auto dim_mask = at::native::make_dim_mask(dim, self.dim());\n"
+                "  if (self.numel() == 0) {\n"
+                "    const auto output_dtype = dtype.value_or(self.scalar_type());\n"
+                '    TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
+                "    const auto shape = at::native::shape_from_dim_mask(self, dim_mask, keepdim);\n"
+                "    auto result = at::empty(shape, self.options().dtype(output_dtype));\n"
+                "    if (result.numel() == 0) return result;\n"
+                "    const auto nan = std::numeric_limits<double>::quiet_NaN();\n"
+                "    return result.fill_(c10::isComplexType(output_dtype)\n"
+                "        ? at::Scalar(c10::complex<double>(nan, nan)) : at::Scalar(nan));\n"
+                "  }\n"
                 "#if defined(FLAGOS_NATIVE_HOSTS)\n"
                 "  at::DimVector full_dims;\n"
                 "  if ((!dim.has_value() || dim->empty()) && MeanDimFnSource.Available()) {\n"
@@ -1425,6 +1494,143 @@ def gen_flaggems_python_kernel(
                 '  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
                 "#endif\n"
             )
+        elif op == "linalg_vector_norm":
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (ord.equal(2.0) && dim.has_value() && dim->size() == 1 &&\n"
+                "      (dim->front() == 1 || dim->front() == 1 - self.dim()) &&\n"
+                "      (!dtype.has_value() || *dtype == at::kBFloat16)) {\n"
+                "    if (auto result = ::flagos::nvidia::TryChannelNorm(self, keepdim); result.defined())\n"
+                "      return result;\n"
+                "  }\n"
+                "#endif\n"
+            )
+        elif op == "native_layer_norm":
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (weight && bias) {\n"
+                "    auto result = ::flagos::nvidia::TryLayerNorm(input, normalized_shape, *weight, *bias, eps);\n"
+                "    if (std::get<0>(result).defined()) return result;\n"
+                "  }\n"
+                "#endif\n"
+            )
+        elif op == "constant_pad_nd":
+            # The published kernel specializes source at runtime for each rank.
+            # ATen's shape/fill/copy composition keeps the data on-device.
+            body = (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  return at::native::constant_pad_nd(self, pad, value);\n"
+                f"#else\n{body}\n#endif"
+            )
+        elif op in ("scatter_add", "scatter_add_"):
+            # The FlagGems scatter-add fast path reads indices linearly. The
+            # published scatter-reduce kernel handles the summed updates with
+            # a statically compiled launcher.
+            writeback = "return result;"
+            if op == "scatter_add_":
+                writeback = "return self.copy_(result);"
+            prelude += (
+                "  if (index.dim() == 2 && !index.is_contiguous()) {\n"
+                '    if (GetBackendForOp("scatter_reduce.two") == Backend::kFlagGems) {\n'
+                '      auto result = at::scatter_reduce(self, dim, index.contiguous(), src, "sum");\n'
+                f"      {writeback}\n"
+                "    }\n"
+                f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{op}>::call(self, dim, index, src);\n"
+                "  }\n"
+            )
+        elif op == "mul.Tensor":
+            # An explicit CPU scalar can send the FlagGems broadcast path
+            # back through mul.out. Use the scalar kernel and retain ATen's
+            # accumulation precision and output layout in either order.
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (auto result = ::flagos::nvidia::TryMultiply(self, other); result.defined())\n"
+                "    return result;\n"
+                "#endif\n"
+                "  const auto& tensor = self.device().is_cpu() ? other : self;\n"
+                "  const auto& scalar = self.device().is_cpu() ? self : other;\n"
+                "  const auto dtype = tensor.scalar_type();\n"
+                "  const bool low_precision = dtype == at::kHalf || dtype == at::kBFloat16;\n"
+                "  const bool host_scalar = tensor.device().is_privateuseone() &&\n"
+                "      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point();\n"
+                "  if (host_scalar && (low_precision || dtype == at::kFloat) &&\n"
+                "      (!scalar.unsafeGetTensorImpl()->is_wrapped_number() ||\n"
+                "       (low_precision && !tensor.is_contiguous()))) {\n"
+                "    const auto output_dtype = at::result_type(tensor, scalar);\n"
+                "    const auto scalar_value = scalar.item();\n"
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "    if (output_dtype == dtype) {\n"
+                "      auto scaled = ::flagos::nvidia::TryScale(tensor, scalar_value.toFloat());\n"
+                "      if (scaled.defined()) return scaled;\n"
+                "    }\n"
+                "#endif\n"
+                "    const auto accumulation = output_dtype == at::kDouble ? at::kDouble : at::kFloat;\n"
+                "    auto result = at::mul(tensor.to(accumulation), scalar_value).to(output_dtype);\n"
+                "    return RestorePointwiseLayout(tensor, std::move(result));\n"
+                "  }\n"
+            )
+            body = body.replace(
+                "  return result;",
+                "  if (host_scalar) return RestorePointwiseLayout(tensor, std::move(result));\n"
+                "  return result;",
+            )
+        elif op == "sub.Tensor":
+            # Pass the CPU scalar value to the published scalar variants
+            # while preserving alpha and operand order.
+            prelude += (
+                "#if defined(USE_DCU)\n"
+                "  at::native::sub_check(self, other);\n"
+                "  at::native::alpha_check(at::result_type(self, other), alpha);\n"
+                "#endif\n"
+                "  const bool cpu_lhs = self.device().is_cpu();\n"
+                "  const auto& tensor = cpu_lhs ? other : self;\n"
+                "  const auto& scalar = cpu_lhs ? self : other;\n"
+                "  if (tensor.device().is_privateuseone() && tensor.is_floating_point() &&\n"
+                "      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point()) {\n"
+                "    const auto dtype = at::result_type(tensor, scalar);\n"
+                "    const auto accumulation = dtype == at::kDouble ? at::kDouble : at::kFloat;\n"
+                "    auto input = tensor.to(accumulation);\n"
+                "    const auto value = scalar.item();\n"
+                '    const std::vector<PyKwarg> kwargs = {{"alpha", alpha}};\n'
+                f'    auto result = cpu_lhs ? CallPythonOp_GenericKw("{gems_func}", {{value, input}}, kwargs)\n'
+                f'                          : CallPythonOp_GenericKw("{gems_func}", {{input, value}}, kwargs);\n'
+                "    return RestorePointwiseLayout(tensor, result.to(dtype));\n"
+                "  }\n"
+            )
+        elif op == "div.Tensor":
+            # Match GPU true division's rounding for a CPU scalar divisor.
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (auto result = ::flagos::nvidia::TryDivide(self, other); result.defined())\n"
+                "    return result;\n"
+                "#endif\n"
+                "#if defined(FLAGOS_ACCEL_CUDA)\n"
+                "  if (self.device().is_privateuseone() && self.is_floating_point() &&\n"
+                "      other.device().is_cpu() && other.dim() == 0 && other.is_floating_point()) {\n"
+                "    const auto dtype = at::result_type(self, other);\n"
+                "    const auto accumulation = dtype == at::kDouble ? at::kDouble : at::kFloat;\n"
+                "    const auto reciprocal = 1.0 / other.item<double>();\n"
+                "    auto result = at::mul(self.to(accumulation), reciprocal).to(dtype);\n"
+                "    return RestorePointwiseLayout(self, std::move(result));\n"
+                "  }\n"
+                "#endif\n"
+            )
+        elif op == "sort.stable":
+            # FlagGems makes the result contiguous even for a transposed
+            # input. ATen's sort metadata preserves the dense stride order.
+            prelude += (
+                "  if (!self.is_contiguous()) {\n"
+                "    auto [values, indices] = at::native::call_fallback_fn<&cpu_fallback, at::_ops::sort_stable>::call(self, stable, dim, descending);\n"
+                "    const auto strides = self.is_non_overlapping_and_dense() ? self.strides().vec() : at::infer_dense_strides(self.sizes(), self.strides());\n"
+                "    auto restore_layout = [&](const at::Tensor& tensor) {\n"
+                "      if (tensor.strides().equals(strides)) return tensor;\n"
+                "      auto result = at::empty_strided(tensor.sizes(), strides, tensor.options());\n"
+                "      result.copy_(tensor);\n"
+                "      return result;\n"
+                "    };\n"
+                "    return {restore_layout(values), restore_layout(indices)};\n"
+                "  }\n"
+            )
         elif op == "_log_softmax_backward_data":
             prelude += (
                 "#if defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)\n"
@@ -1446,14 +1652,16 @@ def gen_flaggems_python_kernel(
                 "#endif\n"
             )
         elif typed and op == "pow.Tensor_Scalar":
-            # PyTorch's FP32 cube uses two multiplications. The general pow
-            # kernel can round these exact products in the device math library.
+            # Small integer powers can use the original FlagGems multiply
+            # kernel and retain the exact FP32 arithmetic.
             prelude += (
                 "#if defined(FLAGOS_NATIVE_HOSTS)\n"
                 "  if (self.scalar_type() == at::kFloat &&\n"
-                "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) &&\n"
-                "      exponent.toDouble() == 3.0 && MulTensorFnSource.Available()) {\n"
-                "    return at::mul(at::mul(self, self), self);\n"
+                "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) && MulTensorFnSource.Available()) {\n"
+                "    const auto power = exponent.toDouble();\n"
+                "    if (power == 1.0) return self.clone(at::MemoryFormat::Preserve);\n"
+                "    if (power == 2.0) return at::mul(self, self);\n"
+                "    if (power == 3.0) return at::mul(at::mul(self, self), self);\n"
                 "  }\n"
                 "#endif\n"
                 "#if defined(USE_DCU)\n"
@@ -1465,6 +1673,10 @@ def gen_flaggems_python_kernel(
         elif op == "cat":
             if typed:
                 prelude += (
+                    "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                    "  if (auto result = TryGemsStridedCat(tensors, dim); result.defined())\n"
+                    "    return result;\n"
+                    "#endif\n"
                     "#if defined(FLAGOS_NATIVE_THEAD_VENDOR)\n"
                     "  if (auto kernel = cat_dispatcher.KernelFor(Backend::kThead);\n"
                     "      kernel && NativeSourceCanRun() && thead_vendor::Concatenation(tensors, dim))\n"
@@ -2300,7 +2512,9 @@ def gen_flaggems_out_adapters(funcs):
         "  const auto& rhs = self_on_device ? other : self;",
         "  const bool cpu_scalar = rhs.device().is_cpu() && rhs.dim() == 0;",
         "  const auto dtype = out.scalar_type();",
-        "  if (!MulTensorFnSource.Available() || tensor.device() != out.device() ||",
+        "  const bool device_multiply = MulTensorFnSource.Available() ||",
+        '      GetBackendForOp("mul.Tensor") == Backend::kFlagGems;',
+        "  if (!device_multiply || tensor.device() != out.device() ||",
         "      (!cpu_scalar && (rhs.device() != out.device() || rhs.scalar_type() != tensor.scalar_type())) ||",
         "      at::result_type(self, other) != dtype || (dtype != at::kFloat && dtype != at::kHalf &&",
         "          dtype != at::kBFloat16 && dtype != at::kLong && dtype != at::kBool)) {",
@@ -2311,6 +2525,7 @@ def gen_flaggems_out_adapters(funcs):
         "  at::assert_no_partial_overlap(out, self);",
         "  at::assert_no_partial_overlap(out, other);",
         "  auto result = MulTensorKernelPython(tensor, rhs);",
+        '  TORCH_CHECK(result.device() == out.device(), "out adapter device mismatch");',
         "  at::native::resize_output(out, result.sizes());",
         "  out.copy_(result);",
         "  return out;",
@@ -2331,14 +2546,30 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         refreshed = refreshed.replace(
             '#include "ops.h"', '#include "ops.h"\n' + include, 1
         )
-    metadata_include = '#include "../strided_ops.h"'
-    if metadata_include not in refreshed:
+    for header in ('#include "../strided_ops.h"', '#include "../copy_ops.h"'):
+        if header not in refreshed:
+            refreshed = refreshed.replace(
+                '#include "ops.h"', '#include "ops.h"\n' + header, 1
+            )
+    old_nvidia_sdk_include = (
+        "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+        '#include "native_host/backends/nvidia/linalg.h"\n'
+        "#endif"
+    )
+    nvidia_sdk_include = old_nvidia_sdk_include.replace(
+        "#endif", '#include "native_host/backends/nvidia/pointwise.h"\n#endif'
+    )
+    if old_nvidia_sdk_include in refreshed:
+        refreshed = refreshed.replace(old_nvidia_sdk_include, nvidia_sdk_include, 1)
+    elif nvidia_sdk_include not in refreshed:
         refreshed = refreshed.replace(
-            '#include "ops.h"', '#include "ops.h"\n' + metadata_include, 1
+            '#include "ops.h"', '#include "ops.h"\n' + nvidia_sdk_include, 1
         )
     for header in (
+        "#include <ATen/ExpandUtils.h>",
         "#include <ATen/native/CPUFallback.h>",
         "#include <ATen/native/ReduceOpsUtils.h>",
+        "#include <ATen/ops/constant_pad_nd_native.h>",
         '#include "../fallback.h"',
     ):
         if header not in refreshed:
@@ -2355,21 +2586,37 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
             )
     for op, category, keywords in (
         ("add.Tensor", "functional_pure", {"alpha"}),
+        ("div.Tensor", "functional_pure", set()),
+        ("addmm", "functional_pure", {"beta", "alpha"}),
+        ("addmm.out", "out_variant_gemskwout", {"beta", "alpha", "out"}),
+        ("constant_pad_nd", "functional_pure", set()),
+        ("convolution_overrideable", "functional_pure", set()),
+        ("mean.dim", "functional_pure", {"dtype"}),
+        ("linalg_vector_norm", "functional_pure", {"dtype"}),
+        ("mm.out", "out_variant_gemskwout", {"out"}),
+        ("scatter_add", "functional_pure", set()),
+        ("scatter_add_", "inplace", set()),
+        ("mul.Tensor", "functional_pure", set()),
+        ("native_layer_norm", "tuple_return", set()),
+        ("sort.stable", "tuple_return", {"stable", "dim", "descending"}),
         ("add_.Tensor", "inplace", {"alpha"}),
         ("sub.Tensor", "functional_pure", {"alpha"}),
-        ("mul.Tensor", "functional_pure", set()),
-        ("mean.dim", "functional_pure", {"dtype"}),
         ("sum.dim_IntList", "functional_pure", {"dtype"}),
         ("cat", "tensorlist_dim", set()),
         ("mm", "functional_pure", set()),
         ("bmm", "functional_pure", set()),
+        ("bmm.out", "out_variant_gemsout", set()),
+        ("pow.Scalar", "functional_pure", set()),
         ("pow.Tensor_Scalar", "functional_pure", set()),
+        ("reciprocal", "functional_pure", set()),
+        ("rsqrt", "functional_pure", set()),
+        ("silu", "functional_pure", set()),
+        ("sqrt", "functional_pure", set()),
         ("full", "factory", {"size", "fill_value"}),
         ("index_copy_", "inplace", set()),
         ("nll_loss_backward", "functional_pure", set()),
         ("_log_softmax_backward_data", "functional_pure", {"input_dtype"}),
         ("slice_backward", "functional_pure", set()),
-        ("constant_pad_nd", "functional_pure", set()),
         ("where.self", "functional_pure", set()),
         *((op, "functional_pure", set()) for op in FLAGGEMS_HCU_METADATA_ADAPTERS),
         ("argmin", "functional_pure", set()),
@@ -2392,21 +2639,37 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
             "flag_gems."
             + {
                 "add.Tensor": "add",
+                "div.Tensor": "true_divide",
+                "addmm": "addmm",
+                "addmm.out": "addmm_out",
+                "constant_pad_nd": "constant_pad_nd",
+                "convolution_overrideable": "convolution_overrideable",
+                "mean.dim": "mean_dim",
+                "linalg_vector_norm": "vector_norm",
+                "mm.out": "mm_out",
+                "scatter_add": "scatter_add",
+                "scatter_add_": "scatter_add_",
+                "mul.Tensor": "mul",
+                "native_layer_norm": "native_layer_norm",
+                "sort.stable": "sort_stable",
                 "add_.Tensor": "add_",
                 "sub.Tensor": "sub",
-                "mul.Tensor": "mul",
-                "mean.dim": "mean_dim",
                 "sum.dim_IntList": "sum_dim",
                 "cat": "cat",
                 "mm": "mm",
                 "bmm": "bmm",
+                "bmm.out": "bmm_out",
+                "pow.Scalar": "pow_scalar",
                 "pow.Tensor_Scalar": "pow_tensor_scalar",
+                "reciprocal": "reciprocal",
+                "rsqrt": "rsqrt",
+                "silu": "silu",
+                "sqrt": "sqrt",
                 "full": "full",
                 "index_copy_": "index_copy_",
                 "nll_loss_backward": "nll_loss_backward",
                 "_log_softmax_backward_data": "log_softmax_backward",
                 "slice_backward": "slice_backward",
-                "constant_pad_nd": "constant_pad_nd",
                 "where.self": "where_self",
                 "_unsafe_view": "_unsafe_view",
                 "transpose.int": "transpose",
@@ -2942,6 +3205,8 @@ def nvidia_conf_header():
         "#",
         "# Native NVIDIA precision entries serve only measured dtype clauses.",
         "# Uncovered base routes use `none` and reach CPU fallback.",
+        "# SDPA uses the NVIDIA SDK for eligible BF16 inference. Other SDPA",
+        "# inputs use the composite on the original FlagOS tensors.",
         "#",
         "# Exceptions: ops that pass the static discovery gates but cannot use",
         "# the FlagGems route here are held off it",
@@ -2989,6 +3254,8 @@ def nvidia_conf_header():
 def main():
     repo_root = Path(__file__).parent.parent.parent
     conf_path = repo_root / "torch_fl/configs/backends_nvidia.conf"
+    sdpa_op = "scaled_dot_product_attention"
+    sdpa_backend = "nvidia"
     # Refresh only the deterministic dtype clauses without rediscovering the
     # installed FlagGems operator surface or changing unrelated base routes.
     if "--native-routes-only" in sys.argv or "--check-native-routes" in sys.argv:
@@ -2997,8 +3264,14 @@ def main():
         first_op = next(
             index for index, line in enumerate(lines) if "=" in line.split("#", 1)[0]
         )
+        base_routes = [
+            f"{sdpa_op} = {sdpa_backend}"
+            if line.partition("=")[0].strip() == sdpa_op
+            else line
+            for line in lines[first_op:]
+        ]
         expected = render_config_routes(
-            "\n".join(nvidia_conf_header() + lines[first_op:]) + "\n", "nvidia"
+            "\n".join(nvidia_conf_header() + base_routes) + "\n", "nvidia"
         )
         if "--check-native-routes" in sys.argv:
             if current != expected:
@@ -3226,6 +3499,8 @@ def main():
         "#ifdef FLAGOS_FLAGGEMS_PYTHON",
         "",
         '#include "ops.h"',
+        "#include <ATen/ExpandUtils.h>",
+        "#include <ATen/ops/constant_pad_nd_native.h>",
         '#include "../device_boxing.h"',
         '#include "../backends/flagos/python_op_caller.h"',
         '#include "../backends/flagos/typed_source_host.h"',
@@ -3430,10 +3705,8 @@ def main():
             # which no numerics comparison can see.
             "_unsafe_view",
             # compile: FlagTree AABS shrinks tl.dot's K tile below 16 (see above)
-            "addmm",
             "addmm.dtype",
             "addmm.dtype_out",
-            "addmm.out",
             "addmm_",
         }
 
@@ -3550,7 +3823,6 @@ def main():
             "median.dim_values",
             "mse_loss_backward",
             "nanmedian.out",
-            "native_layer_norm",
             "range",
             "scatter.src",
             "scatter_.src",
@@ -3612,8 +3884,11 @@ def main():
         n_flaggems_routes = 0
         n_held_off_flaggems = 0
         n_metadata_override = 0
-        for op in sorted(op_info):
-            if op in NVIDIA_NATIVE_TRAINING_ADAPTERS:
+        config_ops = op_info.keys() | {sdpa_op}
+        for op in sorted(config_ops):
+            if op == sdpa_op:
+                backend = sdpa_backend
+            elif op in NVIDIA_NATIVE_TRAINING_ADAPTERS:
                 backend = "flaggems"
             elif op in metadata_route_overrides:
                 backend = fallback_key
@@ -3639,7 +3914,8 @@ def main():
         tileops_annotated = sum(1 for op in op_info if op in TILEOPS_OPS)
         print(
             f"   regenerated {conf_path.name} with {n_flaggems_routes} flaggems "
-            f"and {len(op_info) - n_flaggems_routes} {fallback_key} routes "
+            f"and {len(config_ops) - n_flaggems_routes - 1} {fallback_key} routes "
+            "plus NVIDIA SDPA "
             f"({tileops_annotated} annotated # tileops, "
             f"{n_held_off_flaggems} flaggems ops held off the FlagGems route)"
         )

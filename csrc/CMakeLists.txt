@@ -586,23 +586,69 @@ endif()
 # for the torch in the build environment rather than for a directory the
 # conditions below might fall back to.
 set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA OFF)
-get_target_property(_flagos_torch_cpu_location torch_cpu_library IMPORTED_LOCATION)
-get_target_property(_flagos_torch_python_location torch_python_library IMPORTED_LOCATION)
-foreach(_flagos_torch_location IN ITEMS
-    "${_flagos_torch_cpu_location}" "${_flagos_torch_python_location}")
-  if(_flagos_torch_location)
-    get_filename_component(_flagos_torch_dir "${_flagos_torch_location}" DIRECTORY)
-    if(EXISTS "${_flagos_torch_dir}/libtorch_cuda.so")
-      set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA ON)
-    endif()
+get_target_property(_flagos_torch_links torch_cpu_library INTERFACE_LINK_LIBRARIES)
+if("torch" IN_LIST _flagos_torch_links AND TARGET torch_cuda)
+  get_target_property(_flagos_torch_cuda torch_cuda IMPORTED_LOCATION_RELEASE)
+  if(NOT _flagos_torch_cuda)
+    get_target_property(_flagos_torch_cuda torch_cuda IMPORTED_LOCATION)
   endif()
-endforeach()
+  get_filename_component(_flagos_torch_cuda_name "${_flagos_torch_cuda}" NAME)
+  if(_flagos_torch_cuda_name STREQUAL "libtorch_cuda.so" AND EXISTS "${_flagos_torch_cuda}")
+    set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA ON)
+  endif()
+endif()
 message(STATUS "torch_fl: torch links libtorch_cuda.so: ${FLAGOS_TORCH_LINKS_LIBTORCH_CUDA}")
 if(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA)
+  if(_flagos_is_cuda AND FLAGOS_NATIVE_HOSTS)
+    message(FATAL_ERROR "Build NVIDIA native hosts against CPU-only PyTorch to keep Torch-FL independent of libtorch_cuda.so.")
+  endif()
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TORCH_LINKS_LIBTORCH_CUDA=1)
 endif()
 
 set(_torch_fl_link_libs torch_cpu_library torch_python_library flagos ${CUDA_RUNTIME_LIB})
+if(_flagos_is_cuda)
+  if(FLAGOS_NATIVE_HOSTS)
+    if(NOT "$ENV{FLAGOS_NVIDIA_FA3_SOURCE}" STREQUAL "")
+      include("${CMAKE_SOURCE_DIR}/cmake/nvidia_fa3.cmake")
+      flagos_add_nvidia_fa3(${LIBRARY_NAME} "$ENV{FLAGOS_NVIDIA_FA3_SOURCE}")
+    endif()
+    target_sources(${LIBRARY_NAME} PRIVATE
+      native_host/backends/nvidia/linalg.cc
+      native_host/backends/nvidia/pointwise.cc
+      native_host/backends/nvidia/generated_pointwise.cu)
+    # Carry device binaries for Ampere and Hopper. A CUDA minor
+    # compatibility driver can load these without compiling newer-toolkit PTX.
+    set_property(TARGET ${LIBRARY_NAME} APPEND PROPERTY CUDA_ARCHITECTURES 80-real 90-real)
+    list(APPEND _torch_fl_link_libs ${CMAKE_DL_LIBS})
+    find_path(FLAGOS_NVIDIA_CUDNN_FRONTEND_INCLUDE_DIR cudnn_frontend.h
+      HINTS ENV CUDNN_FRONTEND_INCLUDE_DIR PATH_SUFFIXES cudnn_frontend include)
+    find_path(FLAGOS_NVIDIA_CUDNN_INCLUDE_DIR cudnn.h HINTS ENV CUDNN_INCLUDE_DIR)
+    find_library(FLAGOS_NVIDIA_CUDNN_LIBRARY NAMES cudnn libcudnn.so.9
+      HINTS ENV CUDNN_LIBRARY_DIR)
+    if(FLAGOS_NVIDIA_CUDNN_FRONTEND_INCLUDE_DIR AND FLAGOS_NVIDIA_CUDNN_INCLUDE_DIR
+       AND FLAGOS_NVIDIA_CUDNN_LIBRARY)
+      target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HAVE_NVIDIA_CUDNN=1)
+      target_include_directories(${LIBRARY_NAME} PRIVATE
+        ${FLAGOS_NVIDIA_CUDNN_FRONTEND_INCLUDE_DIR} ${FLAGOS_NVIDIA_CUDNN_INCLUDE_DIR})
+      target_sources(${LIBRARY_NAME} PRIVATE native_host/backends/nvidia/cudnn_attention.cc)
+      list(APPEND _torch_fl_link_libs ${FLAGOS_NVIDIA_CUDNN_LIBRARY})
+    endif()
+    find_path(FLAGOS_NVIDIA_CUTLASS_INCLUDE_DIR cutlass/cutlass.h
+      HINTS ENV CUTLASS_INCLUDE_DIR ENV CUTLASS_PATH PATH_SUFFIXES include)
+    find_path(FLAGOS_NVIDIA_CURAND_INCLUDE_DIR curand_kernel.h
+      HINTS ENV CURAND_INCLUDE_DIR ${CUDAToolkit_INCLUDE_DIRS} PATH_SUFFIXES include)
+    if(FLAGOS_NVIDIA_CUTLASS_INCLUDE_DIR AND FLAGOS_NVIDIA_CURAND_INCLUDE_DIR)
+      target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HAVE_NVIDIA_CUTLASS=1)
+      target_include_directories(${LIBRARY_NAME} PRIVATE
+        ${FLAGOS_NVIDIA_CUTLASS_INCLUDE_DIR} ${FLAGOS_NVIDIA_CURAND_INCLUDE_DIR})
+      target_sources(${LIBRARY_NAME} PRIVATE
+        native_host/backends/nvidia/cutlass_attention.cc
+        native_host/backends/nvidia/cutlass_attention_kernel.cu)
+      set_source_files_properties(native_host/backends/nvidia/cutlass_attention_kernel.cu
+        PROPERTIES COMPILE_OPTIONS "--expt-relaxed-constexpr")
+    endif()
+  endif()
+endif()
 if(FLAGOS_BUILD_FLAGGEMS_CPP)
   if(TARGET FlagGems::operators)
     list(APPEND _torch_fl_link_libs FlagGems::operators)
