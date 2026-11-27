@@ -23,6 +23,7 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <string_view>
 #include <tuple>
 
 namespace flagos::nvidia {
@@ -176,6 +177,17 @@ struct MatrixHandle {
   at::Tensor workspace;
 };
 
+using GemmEx = cublasStatus_t (*)(
+    cublasHandle_t, cublasOperation_t, cublasOperation_t, int, int, int,
+    const void*, const void*, cudaDataType_t, int, const void*, cudaDataType_t, int,
+    const void*, void*, cudaDataType_t, int, cublasComputeType_t, cublasGemmAlgo_t);
+using GemmStridedBatchedEx = cublasStatus_t (*)(
+    cublasHandle_t, cublasOperation_t, cublasOperation_t, int, int, int,
+    const void*, const void*, cudaDataType_t, int, long long int,
+    const void*, cudaDataType_t, int, long long int,
+    const void*, void*, cudaDataType_t, int, long long int, int,
+    cublasComputeType_t, cublasGemmAlgo_t);
+
 void MatrixProduct(const at::Tensor& left, const at::Tensor& right, at::Tensor& out) {
   const auto device = left.device().index();
   const auto stream = GetCurrentStreamForDevice(device);
@@ -210,14 +222,14 @@ void MatrixProduct(const at::Tensor& left, const at::Tensor& right, at::Tensor& 
   const float alpha = 1.0f, beta = 0.0f;
   const auto handle = state.handle;
   if (bf16 && batches == 1) {
-    static const auto gemm = FLAGOS_SDK_FUNCTION(BlasLibrary(), cublasGemmEx);
+    static const auto gemm = LoadSymbol<GemmEx>(BlasLibrary(), "cublasGemmEx");
     Check(gemm(handle, trans_a, trans_b, n, m, k, &alpha,
                a.tensor.const_data_ptr(), CUDA_R_16BF, a.leading,
                b.tensor.const_data_ptr(), CUDA_R_16BF, b.leading, &beta,
                out.mutable_data_ptr(), CUDA_R_16BF, n,
                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP), "cublasGemmEx");
   } else if (bf16) {
-    static const auto gemm = FLAGOS_SDK_FUNCTION(BlasLibrary(), cublasGemmStridedBatchedEx);
+    static const auto gemm = LoadSymbol<GemmStridedBatchedEx>(BlasLibrary(), "cublasGemmStridedBatchedEx");
     Check(gemm(handle, trans_a, trans_b, n, m, k, &alpha,
                a.tensor.const_data_ptr(), CUDA_R_16BF, a.leading, a.tensor.stride(0),
                b.tensor.const_data_ptr(), CUDA_R_16BF, b.leading, b.tensor.stride(0), &beta,

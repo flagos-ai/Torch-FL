@@ -6,6 +6,7 @@
 #include "ops.h"
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
 #include "native_host/backends/nvidia/linalg.h"
+#include "native_host/backends/nvidia/pointwise.h"
 #endif
 #include <ATen/ScalarOps.h>
 #include <ATen/ops/full_native.h>
@@ -3786,6 +3787,13 @@ at::Tensor & PolygammaInplaceKernelPython(at::Tensor & self, int64_t n) {
 
 static TypedSourceSlot PowScalarFnSource("aten::pow.Scalar", "flag_gems.pow_scalar", "d197ecedbe47684b4c58921f3ff349638f5b42634bcf8b60569a5f234f74833d", "{\"abi\": \"d197ecedbe47684b4c58921f3ff349638f5b42634bcf8b60569a5f234f74833d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.pow_scalar\", \"op\": \"aten::pow.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PowScalarKernelPython(const at::Scalar & self, const at::Tensor & exponent) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (exponent.scalar_type() == at::kFloat && (self.isIntegral(false) || self.isFloatingPoint())) {
+  if (auto result = ::flagos::nvidia::TryPointwise(
+      ::flagos::nvidia::PointwiseOp::PowScalar, exponent, self.toFloat()); result.defined())
+    return result;
+  }
+#endif
   auto result = PowScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.pow_scalar", {self, exponent}); }, static_cast<const at::Scalar&>(self), static_cast<const at::Tensor&>(exponent));
   UnboxToFlagos(result);
   return result;
@@ -3918,6 +3926,11 @@ at::Tensor RangeKernelPython(const at::Scalar & start, const at::Scalar & end, :
 
 static TypedSourceSlot ReciprocalFnSource("aten::reciprocal", "flag_gems.reciprocal", "18b006032b7640344dc59a0fc27057c11e527a4866faeb5db7fae09a60acade6", "{\"abi\": \"18b006032b7640344dc59a0fc27057c11e527a4866faeb5db7fae09a60acade6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.reciprocal\", \"op\": \"aten::reciprocal\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReciprocalKernelPython(const at::Tensor & self) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = ::flagos::nvidia::TryPointwise(
+      ::flagos::nvidia::PointwiseOp::Reciprocal, self); result.defined())
+    return result;
+#endif
   auto result = ReciprocalFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reciprocal", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
@@ -4158,6 +4171,11 @@ at::Tensor RreluWithNoiseBackwardKernelPython(const at::Tensor & grad_output, co
 
 static TypedSourceSlot RsqrtFnSource("aten::rsqrt", "flag_gems.rsqrt", "3bffec368790e2ce3cbdf8f3dc44041da3887c91c4414e5156e96c1a95c28a35", "{\"abi\": \"3bffec368790e2ce3cbdf8f3dc44041da3887c91c4414e5156e96c1a95c28a35\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.rsqrt\", \"op\": \"aten::rsqrt\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RsqrtKernelPython(const at::Tensor & self) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = ::flagos::nvidia::TryPointwise(
+      ::flagos::nvidia::PointwiseOp::Rsqrt, self); result.defined())
+    return result;
+#endif
   auto result = RsqrtFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.rsqrt", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
@@ -4338,6 +4356,11 @@ at::Tensor & SignbitOutKernelPython(const at::Tensor & self, at::Tensor & out) {
 
 static TypedSourceSlot SiluFnSource("aten::silu", "flag_gems.silu", "77ede37f10b7b913efee7aa0481df144a21be010fa9f631bc96aac6e8efdc723", "{\"abi\": \"77ede37f10b7b913efee7aa0481df144a21be010fa9f631bc96aac6e8efdc723\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.silu\", \"op\": \"aten::silu\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SiluKernelPython(const at::Tensor & self) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = ::flagos::nvidia::TryPointwise(
+      ::flagos::nvidia::PointwiseOp::Silu, self); result.defined())
+    return result;
+#endif
   auto result = SiluFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.silu", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;

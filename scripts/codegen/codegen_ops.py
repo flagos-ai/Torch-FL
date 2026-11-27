@@ -1367,6 +1367,32 @@ def gen_flaggems_python_kernel(
                 f"    return {returned};\n"
                 "#endif\n"
             )
+        elif op in ("pow.Scalar", "reciprocal", "rsqrt", "silu"):
+            operation = {
+                "pow.Scalar": "PowScalar",
+                "reciprocal": "Reciprocal",
+                "rsqrt": "Rsqrt",
+                "silu": "Silu",
+            }[op]
+            operands = "self"
+            if op == "pow.Scalar":
+                operands = "exponent, self.toFloat()"
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+            )
+            if op == "pow.Scalar":
+                prelude += (
+                    "  if (exponent.scalar_type() == at::kFloat && "
+                    "(self.isIntegral(false) || self.isFloatingPoint())) {\n"
+                )
+            prelude += (
+                f"  if (auto result = ::flagos::nvidia::TryPointwise(\n"
+                f"      ::flagos::nvidia::PointwiseOp::{operation}, {operands}); result.defined())\n"
+                "    return result;\n"
+            )
+            if op == "pow.Scalar":
+                prelude += "  }\n"
+            prelude += "#endif\n"
         elif op == "add.Tensor":
             prelude += (
                 "#if defined(USE_DCU)\n"
@@ -2453,14 +2479,19 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         refreshed = refreshed.replace(
             '#include "ops.h"', '#include "ops.h"\n' + metadata_include, 1
         )
-    nvidia_blas_include = (
+    old_nvidia_sdk_include = (
         "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
         '#include "native_host/backends/nvidia/linalg.h"\n'
         "#endif"
     )
-    if nvidia_blas_include not in refreshed:
+    nvidia_sdk_include = old_nvidia_sdk_include.replace(
+        "#endif", '#include "native_host/backends/nvidia/pointwise.h"\n#endif'
+    )
+    if old_nvidia_sdk_include in refreshed:
+        refreshed = refreshed.replace(old_nvidia_sdk_include, nvidia_sdk_include, 1)
+    elif nvidia_sdk_include not in refreshed:
         refreshed = refreshed.replace(
-            '#include "ops.h"', '#include "ops.h"\n' + nvidia_blas_include, 1
+            '#include "ops.h"', '#include "ops.h"\n' + nvidia_sdk_include, 1
         )
     for header in (
         "#include <ATen/ExpandUtils.h>",
@@ -2501,7 +2532,11 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         ("mm", "functional_pure", set()),
         ("bmm", "functional_pure", set()),
         ("bmm.out", "out_variant_gemsout", set()),
+        ("pow.Scalar", "functional_pure", set()),
         ("pow.Tensor_Scalar", "functional_pure", set()),
+        ("reciprocal", "functional_pure", set()),
+        ("rsqrt", "functional_pure", set()),
+        ("silu", "functional_pure", set()),
         ("full", "factory", {"size", "fill_value"}),
         ("index_copy_", "inplace", set()),
         ("nll_loss_backward", "functional_pure", set()),
@@ -2547,7 +2582,11 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "mm": "mm",
                 "bmm": "bmm",
                 "bmm.out": "bmm_out",
+                "pow.Scalar": "pow_scalar",
                 "pow.Tensor_Scalar": "pow_tensor_scalar",
+                "reciprocal": "reciprocal",
+                "rsqrt": "rsqrt",
+                "silu": "silu",
                 "full": "full",
                 "index_copy_": "index_copy_",
                 "nll_loss_backward": "nll_loss_backward",

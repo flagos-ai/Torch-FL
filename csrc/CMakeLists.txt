@@ -609,7 +609,10 @@ set(_torch_fl_link_libs torch_cpu_library torch_python_library flagos ${CUDA_RUN
 if(_flagos_is_cuda)
   target_sources(${LIBRARY_NAME} PRIVATE native_host/backends/nvidia/flash_attention.cc)
   if(FLAGOS_NATIVE_HOSTS)
-    target_sources(${LIBRARY_NAME} PRIVATE native_host/backends/nvidia/linalg.cc)
+    target_sources(${LIBRARY_NAME} PRIVATE
+      native_host/backends/nvidia/linalg.cc
+      native_host/backends/nvidia/pointwise.cc
+      native_host/backends/nvidia/generated_pointwise.cu)
     list(APPEND _torch_fl_link_libs ${CMAKE_DL_LIBS})
   endif()
 endif()
