@@ -494,6 +494,48 @@ at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
   return out.copy_(selected.reshape(plan.output_shape));
 }
 
+at::Tensor ReplaceDevicePositions(const at::Tensor& input, int64_t dim,
+                                  const at::Tensor& positions, const at::Tensor& updates) {
+  // Pick the last value for repeated positions using an integer max. The
+  // remaining operations only gather or copy the original value bits.
+  auto extent = input.size(dim);
+  auto ordinals = at::arange(positions.numel(), positions.options());
+  auto missing = at::full({extent}, -1, positions.options());
+  auto mapping = at::scatter_reduce(missing, 0, positions, ordinals, "amax");
+  auto selected = SelectDevicePositions(updates, dim, mapping.clamp_min(0));
+  std::vector<int64_t> broadcast_shape(input.dim(), 1);
+  broadcast_shape[dim] = extent;
+  return at::where(mapping.ge(0).reshape(broadcast_shape), selected, input);
+}
+
+at::Tensor& DeviceIndexCopyOut(const at::Tensor& self, int64_t dim,
+                               const at::Tensor& index, const at::Tensor& source,
+                               at::Tensor& out) {
+  TORCH_CHECK(out.device() == self.device() && source.device() == self.device() &&
+              index.device() == self.device(), "index_copy(): tensors must share a device");
+  TORCH_CHECK(out.scalar_type() == self.scalar_type() &&
+              source.scalar_type() == self.scalar_type(),
+              "index_copy(): input, source and output must have the same dtype");
+  TORCH_CHECK_INDEX(index.dim() <= 1 && index.scalar_type() == at::kLong,
+                    "index_copy(): expected a scalar or vector of int64 indices");
+  dim = at::maybe_wrap_dim(dim, self.dim());
+  auto input = self.dim() == 0 ? self.unsqueeze(0) : self;
+  auto updates = source.dim() == 0 ? source.unsqueeze(0) : source;
+  auto expected = input.sizes().vec();
+  expected[dim] = index.numel();
+  TORCH_CHECK_INDEX(updates.sizes().equals(expected),
+                    "index_copy(): source must match the indexed slice shape");
+  at::native::resize_output(out, self.sizes());
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, index);
+  at::assert_no_overlap(out, source);
+  at::assert_no_partial_overlap(out, self);
+  auto positions = NormalizeDeviceIndex(index.reshape({-1}), input.size(dim), false);
+  if (updates.numel() == 0) return out.copy_(self);
+  auto result = ReplaceDevicePositions(input, dim, positions, updates);
+  return out.copy_(result.reshape(self.sizes()));
+}
+
 at::Tensor& DeviceAdvancedIndexPut(
     at::Tensor& self, const c10::List<std::optional<at::Tensor>>& raw,
     const at::Tensor& values, bool accumulate) {
@@ -514,25 +556,16 @@ at::Tensor& DeviceAdvancedIndexPut(
   auto updates = expanded.reshape(update_shape);
   if (!updates.numel()) return self;
 
-  std::vector<int64_t> index_shape(plan.flattened.dim(), 1);
   at::Tensor result;
   if (accumulate) {
+    std::vector<int64_t> index_shape(plan.flattened.dim(), 1);
     index_shape[plan.axis] = plan.positions.numel();
     auto scatter_indices = plan.positions.reshape(index_shape).expand(update_shape);
     result = at::native::flagos::CallPythonOp_Generic(
         "flag_gems.scatter_reduce",
         {plan.flattened, plan.axis, scatter_indices.contiguous(), updates, "sum"});
   } else {
-    // Pick the last value for repeated positions using an integer max. The
-    // remaining operations only gather or copy the original value bits.
-    auto extent = plan.flattened.size(plan.axis);
-    auto ordinals = at::arange(plan.positions.numel(), plan.positions.options());
-    auto missing = at::full({extent}, -1, plan.positions.options());
-    auto mapping = at::native::flagos::CallPythonOp_Generic(
-        "flag_gems.scatter_reduce", {missing, 0, plan.positions, ordinals, "amax"});
-    auto selected = SelectDevicePositions(updates, plan.axis, mapping.clamp_min(0));
-    index_shape[plan.axis] = extent;
-    result = at::where(mapping.ge(0).reshape(index_shape), selected, plan.flattened);
+    result = ReplaceDevicePositions(plan.flattened, plan.axis, plan.positions, updates);
   }
   plan.input.copy_(result.reshape(plan.input.sizes()));
   return self;
@@ -1119,6 +1152,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("_upsample_nearest_exact2d.out", DeviceUpsampleNearestExact2dOut);
   m.impl("equal", WrapperEqual);
   m.impl("index.Tensor_out", DeviceAdvancedIndexOut);
+#if defined(FLAGOS_FLAGGEMS_PYTHON)
+  m.impl("index_copy.out", DeviceIndexCopyOut);
+#endif
   m.impl("index_select", DeviceIndexSelect);
   m.impl("prod.int_out", DeviceProdDimOut);
 #endif

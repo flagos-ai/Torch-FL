@@ -95,6 +95,30 @@ def test_index_selection_and_advanced_indexing_without_cpu_fallback():
 
 @pytest.mark.nvidia
 @pytest.mark.flaggems_python
+def test_index_copy_preserves_output_layout_and_last_write():
+    host = torch.arange(24, dtype=torch.bfloat16).reshape(4, 6).t()
+    device = host.to("flagos:0")
+    index = torch.tensor([2, 0, 2], device=device.device)
+    updates = torch.arange(-18, 0, dtype=host.dtype).reshape(3, 6).t()
+    out = torch.empty((4, 6), device=device.device, dtype=host.dtype).t()
+    expected = host.clone()
+    expected[:, 0] = updates[:, 1]
+    expected[:, 2] = updates[:, 2]
+    was_allowed = torch.ops.flagos.cpu_fallback_allowed()
+    torch.ops.flagos.strict_host_routes(True)
+    try:
+        assert (
+            torch.index_copy(device, -1, index, updates.to(device.device), out=out)
+            is out
+        )
+    finally:
+        torch.ops.flagos.strict_host_routes(not was_allowed)
+    assert out.stride() == host.stride()
+    torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.nvidia
+@pytest.mark.flaggems_python
 def test_small_addmm_writes_to_the_supplied_output_on_device():
     bias = torch.arange(4, dtype=torch.bfloat16)
     left = torch.arange(12, dtype=torch.bfloat16).reshape(4, 3)
