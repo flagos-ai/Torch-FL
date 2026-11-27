@@ -8,7 +8,7 @@
 
 namespace at::native::flagos::cambricon {
 
-// Copies `src` into the contiguous `dst` on the device, honouring `src`'s
+// Copies between equal-shaped tensors on the same device, honouring both
 // strides.
 //
 // contiguous_ops.cc sends a strided PrivateUse1 source through a host
@@ -19,9 +19,8 @@ namespace at::native::flagos::cambricon {
 // every binary kernel gathers its operands this way, so the cost was paid
 // several times a layer.
 //
-// Returns false for anything this path declines -- a non-contiguous or
-// mismatched destination, a source out of the dtype range -- in which case the
-// caller keeps its existing fallback.
+// Returns false for mismatched devices, shapes and dtypes, and dtypes outside
+// the supported range.
 bool StridedCopy(const at::Tensor& dst, const at::Tensor& src);
 
 } // namespace at::native::flagos::cambricon

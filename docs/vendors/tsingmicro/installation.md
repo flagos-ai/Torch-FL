@@ -3,9 +3,9 @@
 TsingMicro TX8 uses the Kuiper SDK's TX runtime (`tx_runtime.h`, `libhpgr`). It is
 not a CUDA-compatible stack: there is no `libcuda.so`, no `libtorch_cuda.so`, and
 no CUDA-ABI vendor torch. Operator coverage therefore comes from FlagGems'
-TsingMicro Triton backend, with `cpu_fallback` for every op the routing file does
-not name. The one native kernel set is the host-draw RNG family in
-`csrc/aten/backends/tsingmicro/rng.cc`.
+TsingMicro Triton backend, with `cpu_fallback` for unlisted operators in the
+ordinary build. The host-draw RNG kernels are in `csrc/aten/backends/tsingmicro/rng.cc`.
+Set `FLAGOS_BUILD_NATIVE_HOST=1` to build the FlagGems Native Host wheel.
 
 This platform is **Experimental**. It is measured on TX8110 hardware, but it has
 no CI job and no published wheel.
@@ -18,10 +18,8 @@ no CI job and no published wheel.
   the CMake cache variable `KUIPER_ROOT` (`-DKUIPER_ROOT=/path/to/kuiper`).
 - **FlagGems**: `flag_gems==5.4.0` (the version the routing tables were generated
   against).
-- **Triton**: `triton>=3.5.1`. TsingMicro has no FlagTree build, so `setup.py`
-  declares a stock Triton requirement instead of pinning FlagTree. A vendor
-  Triton build that carries the `tsingmicro` backend is the validated case.
-- **Python**: 3.8 or later (validated with 3.10).
+- **FlagTree** `flagtree==0.7.0+tsingmicro3.6` supplies the TsingMicro Triton backend.
+- **Python** 3.10 matches the published TsingMicro FlagTree wheel.
 - **Device access**: the TX8 runtime must see at least one device (`tsm_smi`
   lists them).
 - **Operating system**: Linux.

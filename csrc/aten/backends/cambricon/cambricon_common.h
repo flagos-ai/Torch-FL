@@ -127,6 +127,9 @@ inline cnnlHandle_t HandleForDevice(int device_index) {
   return handle;
 }
 
+at::Tensor DtypeCast(const at::Tensor& input, at::ScalarType dtype,
+                     const at::Tensor& destination = {});
+
 // cnnlDataType_t for an aten dtype. Only the types a kernel declares support
 // for are mapped; everything else is a programming error in that kernel's
 // dtype gate, not a fallback the marshalling layer should invent.
@@ -247,18 +250,15 @@ class OpTensorDesc {
 // cnnlActivationForward / cnnlActivationBackward rather than as their own entry
 // point -- silu is one: there is no cnnlSilu, but the mode CNNL_ACTIVATION_SILU
 // is supported.
-//
-// HIGH_PRECISION is what the vendor sets for every mode but floor-div:
-// torch_mlu/csrc/aten/operators/cnnl/internal/activation_inertnal.cpp builds all
-// its descriptors with CNNL_ACTIVATION_HIGH_PRECISION, and sets no other
-// attribute for the modes that take no scalars (sigmoid, tanh, silu, swish).
 class ActivationDesc {
  public:
-  explicit ActivationDesc(cnnlActivationMode_t mode) {
+  explicit ActivationDesc(
+      cnnlActivationMode_t mode,
+      cnnlActivationPreference_t prefer = CNNL_ACTIVATION_HIGH_PRECISION,
+      cnnlNanPropagation_t nan = CNNL_NOT_PROPAGATE_NAN) {
     CheckCnnl(
         cnnlCreateActivationDescriptor(&desc_),
         "cnnlCreateActivationDescriptor");
-    auto prefer = CNNL_ACTIVATION_HIGH_PRECISION;
     CheckCnnl(
         cnnlSetActivationDescAttr(
             desc_, CNNL_ACTIVATION_PREFERENCE, &prefer, sizeof(prefer)),
@@ -267,6 +267,10 @@ class ActivationDesc {
         cnnlSetActivationDescAttr(
             desc_, CNNL_ACTIVATION_MODE, &mode, sizeof(mode)),
         "cnnlSetActivationDescAttr (mode)");
+    CheckCnnl(
+        cnnlSetActivationDescAttr(
+            desc_, CNNL_ACTIVATION_NAN_PROP, &nan, sizeof(nan)),
+        "cnnlSetActivationDescAttr (NaN propagation)");
   }
   ~ActivationDesc() { cnnlDestroyActivationDescriptor(desc_); }
 

@@ -11,18 +11,26 @@
 // mudnn links against musart only -- no torch symbols -- so unlike the previous
 // at::musa::* passthroughs these kernels are independent of the torch version.
 
+#include "../../../common.h"
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ExpandUtils.h>
+#include <ATen/native/ReduceOpsUtils.h>
+#include <ATen/ops/cross_entropy_loss_compositeimplicitautograd_dispatch.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/mul_compositeexplicitautograd_dispatch.h>
 #include <ATen/ops/result_type.h>
 #include <ATen/ops/view_as_complex_native.h>
 #include <ATen/ops/view_as_real_native.h>
 #include <c10/core/DefaultDtype.h>
 #include <c10/core/Scalar.h>
 #include <c10/core/ScalarType.h>
+#include <torch/csrc/autograd/autograd.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include <torch/library.h>
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 #include "../mudnn_common.h"
@@ -30,6 +38,39 @@
 namespace at::native::flagos {
 
 namespace musa_ops = at::native::flagos::musa_ops;
+
+namespace {
+std::optional<at::Scalar> HostFloatScalar(const at::Tensor& tensor,
+                                         const at::Tensor& other,
+                                         at::ScalarType compute_dtype) {
+  const auto dtype = tensor.scalar_type();
+  if (!tensor.is_privateuseone() || (dtype != at::kFloat && dtype != at::kBFloat16) ||
+      !other.is_cpu() || other.dim() != 0 || !other.is_floating_point() ||
+      tensor.is_conj() || tensor.is_neg() || at::result_type(tensor, other) != dtype) {
+    return std::nullopt;
+  }
+  // The Binary path would first convert the scalar to the compute dtype.
+  // Preserve that rounding before passing it to Unary::SetAlpha.
+  if (compute_dtype == at::kBFloat16) return at::Scalar(other.item<c10::BFloat16>());
+  if (compute_dtype == at::kFloat) return at::Scalar(other.item<float>());
+  return std::nullopt;
+}
+
+bool IsUnitAlpha(const at::Scalar& alpha) {
+  return (alpha.isFloatingPoint() || alpha.isIntegral(false)) &&
+      alpha.toDouble() == 1.0;
+}
+
+void RunFloatScalar(const at::Tensor& input, at::Tensor& out, const at::Scalar& value,
+                    musa_ops::mudnn::Unary::Mode mode, const char* tag) {
+  if (input.numel() == 0) return;
+  musa_ops::MudnnTensorWrapper source(input), destination(out);
+  musa_ops::mudnn::Unary op;
+  op.SetMode(mode);
+  op.SetAlpha(value.to<double>());
+  EXEC_MUDNN_CMD(tag, input, op.Run(_mudnn_h, destination.get(), source.get()));
+}
+}  // namespace
 
 at::Tensor ViewAsComplexKernelMusa(const at::Tensor& self) {
   return at::native::view_as_complex(self);
@@ -522,6 +563,14 @@ at::Tensor Expm1KernelMusa(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(Expm1Fn, expm1_dispatcher, Backend::kMthreads, Expm1KernelMusa)
 
 at::Tensor MulTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
+  const bool host_first = self.is_cpu();
+  const auto& tensor = host_first ? other : self;
+  const auto& host = host_first ? self : other;
+  if (auto scalar = HostFloatScalar(tensor, host, tensor.scalar_type())) {
+    auto out = at::empty(tensor.sizes(), tensor.options());
+    RunFloatScalar(tensor, out, *scalar, musa_ops::mudnn::Unary::Mode::MUL, "mul");
+    return out;
+  }
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
     auto fallback_device = self.is_cpu() ? other.device() : self.device();
@@ -749,6 +798,13 @@ at::Tensor PowTensorTensorKernelMusa(const at::Tensor& self, const at::Tensor& o
 REGISTER_IMPL_TO_DISPATCHER(PowTensorTensorFn, pow_tensor_tensor_dispatcher, Backend::kMthreads, PowTensorTensorKernelMusa)
 
 at::Tensor AddTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  if (IsUnitAlpha(alpha)) {
+    if (auto scalar = HostFloatScalar(self, other, self.scalar_type())) {
+      auto out = at::empty(self.sizes(), self.options());
+      RunFloatScalar(self, out, *scalar, musa_ops::mudnn::Unary::Mode::ADD, "add");
+      return out;
+    }
+  }
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
     auto fallback_device = self.is_cpu() ? other.device() : self.device();
@@ -852,6 +908,18 @@ at::Tensor& AddInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other
       c10::canCast(result_dtype, self.scalar_type()),
       "result type ", result_dtype,
       " can't be cast to the desired output type ", self.scalar_type());
+  if (IsUnitAlpha(alpha) && self.is_non_overlapping_and_dense()) {
+    if (auto scalar = HostFloatScalar(self, other, result_dtype)) {
+      if (result_dtype == self.scalar_type()) {
+        RunFloatScalar(self, self, *scalar, musa_ops::mudnn::Unary::Mode::ADD, "add_");
+      } else {
+        auto wide = self.to(result_dtype);
+        RunFloatScalar(wide, wide, *scalar, musa_ops::mudnn::Unary::Mode::ADD, "add_");
+        self.copy_(wide);
+      }
+      return self;
+    }
+  }
   // A non-device operand (the wrapped number, a CPU tensor) has to be moved
   // before mudnn can read it; expand() to self's shape stays a view, and mudnn
   // reads 0-strides correctly, so broadcasting costs no allocation.
@@ -1375,6 +1443,17 @@ at::Tensor MulScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) 
 
 REGISTER_IMPL_TO_DISPATCHER(MulScalarFn, mul_scalar_dispatcher, Backend::kMthreads, MulScalarKernelMusa)
 
+at::Tensor& MulInplaceScalarKernelMusa(at::Tensor& self, const at::Scalar& other) {
+  if (self.scalar_type() != at::kBFloat16 || !other.isFloatingPoint() ||
+      self.is_conj() || self.is_neg() || !self.is_non_overlapping_and_dense()) {
+    return at::compositeexplicitautograd::mul_(self, other);
+  }
+  RunFloatScalar(self, self, other, musa_ops::mudnn::Unary::Mode::MUL, "mul_");
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MulInplaceScalarFn, mul_inplace_scalar_dispatcher, Backend::kMthreads, MulInplaceScalarKernelMusa)
+
 at::Tensor DivScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(at::result_type(self, other))) {
@@ -1721,6 +1800,8 @@ at::Tensor MmKernelMusa(const at::Tensor& self, const at::Tensor& mat2) {
   if (!musa_ops::MudnnSupportsMatmulDtype(mat2.scalar_type())) {
     musa_ops::MusaRaiseUnsupportedMatmulDtype("mm", mat2.scalar_type());
   }
+  at::Tensor empty_product;
+  if (TryEmptyMatmul(self, mat2, 2, empty_product)) return empty_product;
   std::vector<int64_t> out_shape = self.sizes().vec();
   out_shape.back() = mat2.size(-1);
   auto out = at::empty(out_shape, self.options());
@@ -1728,13 +1809,17 @@ at::Tensor MmKernelMusa(const at::Tensor& self, const at::Tensor& mat2) {
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
   if (out.numel() == 0) return out;
-  auto self_c = self.contiguous();
-  auto mat2_c = mat2.contiguous();
+  const auto [self_c, trans_self] = musa_ops::MudnnMatmulInput(self);
+  const auto [mat2_c, trans_mat2] = musa_ops::MudnnMatmulInput(mat2);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_mat2(mat2_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::MatMul op;
+  musa_ops::MudnnSetMatmulDeterminism(op, "mm");
+  const auto trans_status = op.SetTranspose(trans_self, trans_mat2);
+  TORCH_CHECK(trans_status == musa_ops::mudnn::Status::SUCCESS,
+              "mm: mudnn SetTranspose failed: ", musa_ops::MudnnStatusName(trans_status));
   EXEC_MUDNN_CMD(
       "mm", self,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_mat2.get(),
@@ -1751,6 +1836,8 @@ at::Tensor BmmKernelMusa(const at::Tensor& self, const at::Tensor& mat2) {
   if (!musa_ops::MudnnSupportsMatmulDtype(mat2.scalar_type())) {
     musa_ops::MusaRaiseUnsupportedMatmulDtype("bmm", mat2.scalar_type());
   }
+  at::Tensor empty_product;
+  if (TryEmptyMatmul(self, mat2, 3, empty_product)) return empty_product;
   std::vector<int64_t> out_shape = self.sizes().vec();
   out_shape.back() = mat2.size(-1);
   auto out = at::empty(out_shape, self.options());
@@ -1758,13 +1845,17 @@ at::Tensor BmmKernelMusa(const at::Tensor& self, const at::Tensor& mat2) {
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
   if (out.numel() == 0) return out;
-  auto self_c = self.contiguous();
-  auto mat2_c = mat2.contiguous();
+  const auto [self_c, trans_self] = musa_ops::MudnnMatmulInput(self);
+  const auto [mat2_c, trans_mat2] = musa_ops::MudnnMatmulInput(mat2);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_mat2(mat2_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::BatchMatMul op;
+  musa_ops::MudnnSetMatmulDeterminism(op, "bmm");
+  const auto trans_status = op.SetTranspose(trans_self, trans_mat2);
+  TORCH_CHECK(trans_status == musa_ops::mudnn::Status::SUCCESS,
+              "bmm: mudnn SetTranspose failed: ", musa_ops::MudnnStatusName(trans_status));
   EXEC_MUDNN_CMD(
       "bmm", self,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_mat2.get(),
@@ -1781,18 +1872,29 @@ at::Tensor& MmOutKernelMusa(const at::Tensor& self, const at::Tensor& mat2, at::
   if (!musa_ops::MudnnSupportsMatmulDtype(mat2.scalar_type())) {
     musa_ops::MusaRaiseUnsupportedMatmulDtype("mm.out", mat2.scalar_type());
   }
+  at::Tensor empty_product;
+  if (TryEmptyMatmul(self, mat2, 2, empty_product)) {
+    TORCH_CHECK(out.device() == self.device() && out.scalar_type() == self.scalar_type(),
+                "matmul output must have the same device and dtype as its operands");
+    if (!out.sizes().equals(empty_product.sizes())) out.resize_(empty_product.sizes());
+    return out.copy_(empty_product);
+  }
   std::vector<int64_t> out_shape = self.sizes().vec();
   out_shape.back() = mat2.size(-1);
   if (!out.sizes().equals(out_shape)) {
     out.resize_(out_shape);
   }
-  auto self_c = self.contiguous();
-  auto mat2_c = mat2.contiguous();
+  const auto [self_c, trans_self] = musa_ops::MudnnMatmulInput(self);
+  const auto [mat2_c, trans_mat2] = musa_ops::MudnnMatmulInput(mat2);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_mat2(mat2_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::MatMul op;
+  musa_ops::MudnnSetMatmulDeterminism(op, "mm");
+  const auto trans_status = op.SetTranspose(trans_self, trans_mat2);
+  TORCH_CHECK(trans_status == musa_ops::mudnn::Status::SUCCESS,
+              "mm: mudnn SetTranspose failed: ", musa_ops::MudnnStatusName(trans_status));
   EXEC_MUDNN_CMD(
       "mm", self,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_mat2.get(),
@@ -1809,18 +1911,29 @@ at::Tensor& BmmOutKernelMusa(const at::Tensor& self, const at::Tensor& mat2, at:
   if (!musa_ops::MudnnSupportsMatmulDtype(mat2.scalar_type())) {
     musa_ops::MusaRaiseUnsupportedMatmulDtype("bmm.out", mat2.scalar_type());
   }
+  at::Tensor empty_product;
+  if (TryEmptyMatmul(self, mat2, 3, empty_product)) {
+    TORCH_CHECK(out.device() == self.device() && out.scalar_type() == self.scalar_type(),
+                "matmul output must have the same device and dtype as its operands");
+    if (!out.sizes().equals(empty_product.sizes())) out.resize_(empty_product.sizes());
+    return out.copy_(empty_product);
+  }
   std::vector<int64_t> out_shape = self.sizes().vec();
   out_shape.back() = mat2.size(-1);
   if (!out.sizes().equals(out_shape)) {
     out.resize_(out_shape);
   }
-  auto self_c = self.contiguous();
-  auto mat2_c = mat2.contiguous();
+  const auto [self_c, trans_self] = musa_ops::MudnnMatmulInput(self);
+  const auto [mat2_c, trans_mat2] = musa_ops::MudnnMatmulInput(mat2);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_mat2(mat2_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::BatchMatMul op;
+  musa_ops::MudnnSetMatmulDeterminism(op, "bmm");
+  const auto trans_status = op.SetTranspose(trans_self, trans_mat2);
+  TORCH_CHECK(trans_status == musa_ops::mudnn::Status::SUCCESS,
+              "bmm: mudnn SetTranspose failed: ", musa_ops::MudnnStatusName(trans_status));
   EXEC_MUDNN_CMD(
       "bmm", self,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_mat2.get(),
@@ -1839,28 +1952,22 @@ at::Tensor SumDimIntlistKernelMusa(
       (dtype.has_value() && !musa_ops::MudnnSupportsDtype(dtype.value()))) {
     return at::sum(self.cpu(), dim, keepdim, dtype).to(self.device());
   }
-  int64_t ndim = self.dim();
-  std::vector<int64_t> norm_dims;
-  if (dim.has_value() && !dim.value().empty()) {
-    for (int64_t d : dim.value()) norm_dims.push_back(d < 0 ? d + ndim : d);
+  const int64_t ndim = self.dim();
+  const auto dim_mask = at::native::make_dim_mask(dim, ndim);
+  std::vector<int> mudnn_dims;
+  if (dim.has_value() && !dim->empty()) {
+    mudnn_dims = musa_ops::ToMudnnDims(*dim, ndim);
   } else {
-    for (int64_t d = 0; d < ndim; ++d) norm_dims.push_back(d);
+    // The mudnn descriptor represents a scalar as a one-element vector.
+    const int64_t rank = std::max(ndim, int64_t{1});
+    mudnn_dims.reserve(rank);
+    for (int64_t d = 0; d < rank; ++d) mudnn_dims.push_back(static_cast<int>(d));
   }
-  // aten's answer shape, and the *squeezed* shape mudnn must be handed. mudnn
-  // silently drops all but the first output element when the output still
-  // carries the reduced axes as extent-1 dims and the input is non-contiguous
-  // (measured on v3300: (4,5) stride (0,1) reduced over dim 0 into a [1,5]
-  // output writes only out[0]). Reducing into the squeezed shape is correct in
-  // every configuration probed, so keepdim is restored with a view afterwards.
-  auto out_shape = self.sizes().vec();
-  std::vector<int64_t> sorted_dims(norm_dims);
-  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
-  auto squeezed_shape = self.sizes().vec();
-  for (int64_t d : sorted_dims) {
-    if (keepdim) out_shape[d] = 1;
-    else out_shape.erase(out_shape.begin() + d);
-    squeezed_shape.erase(squeezed_shape.begin() + d);
-  }
+  // On a strided input, mudnn can write only the first output element when
+  // the output keeps the reduced axes. Restore those axes after reducing.
+  const auto squeezed_shape = at::native::shape_from_dim_mask(self, dim_mask, false);
+  const auto out_shape = keepdim ? at::native::shape_from_dim_mask(self, dim_mask, true)
+                                 : squeezed_shape;
 
   auto out_dtype = dtype.value_or(
       true && at::isIntegralType(self.scalar_type(), true)
@@ -1870,14 +1977,14 @@ at::Tensor SumDimIntlistKernelMusa(
   // mudnn multi-dim Reduce (more than one axis at a time) silently ignores
   // strides and reads the input as if contiguous (verified: (4,5) stride (0,1)
   // reduced over all dims gives 210 = sum(1..20) instead of 60 = 4*sum(1..5)).
-  // Single-dim reduces honour strides correctly, except on a fully-broadcast
-  // input (a 0-stride view of one element), where a single-dim reduce
-  // intermittently writes only out[0]. MudnnReduceNeedsContiguous catches
-  // that; together the two branches cover the stride bug, the SIGFPE and the
-  // partial write.
-  if (norm_dims.size() > 1 && !self_c.is_contiguous()) {
-    self_c = self_c.contiguous();
-  } else if (musa_ops::MudnnReduceNeedsContiguous(self_c)) {
+  // BF16 sums need the vendor Torch's contiguous input layout even for one
+  // axis. The strided kernel rounds some halfway values differently.
+  const bool contiguous_bf16_sum =
+      musa_ops::mudnn::Reduce::Mode::ADD == musa_ops::mudnn::Reduce::Mode::ADD &&
+      out_dtype == at::kBFloat16;
+  if (!self_c.is_contiguous() &&
+      (mudnn_dims.size() > 1 || contiguous_bf16_sum ||
+       musa_ops::MudnnReduceNeedsContiguous(self_c))) {
     self_c = self_c.contiguous();
   }
   auto out = at::empty(squeezed_shape, self.options().dtype(out_dtype));
@@ -1885,7 +1992,6 @@ at::Tensor SumDimIntlistKernelMusa(
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
   if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
-  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1910,28 +2016,22 @@ at::Tensor MeanDimKernelMusa(
       (dtype.has_value() && !musa_ops::MudnnSupportsDtype(dtype.value()))) {
     return at::mean(self.cpu(), dim, keepdim, dtype).to(self.device());
   }
-  int64_t ndim = self.dim();
-  std::vector<int64_t> norm_dims;
-  if (dim.has_value() && !dim.value().empty()) {
-    for (int64_t d : dim.value()) norm_dims.push_back(d < 0 ? d + ndim : d);
+  const int64_t ndim = self.dim();
+  const auto dim_mask = at::native::make_dim_mask(dim, ndim);
+  std::vector<int> mudnn_dims;
+  if (dim.has_value() && !dim->empty()) {
+    mudnn_dims = musa_ops::ToMudnnDims(*dim, ndim);
   } else {
-    for (int64_t d = 0; d < ndim; ++d) norm_dims.push_back(d);
+    // The mudnn descriptor represents a scalar as a one-element vector.
+    const int64_t rank = std::max(ndim, int64_t{1});
+    mudnn_dims.reserve(rank);
+    for (int64_t d = 0; d < rank; ++d) mudnn_dims.push_back(static_cast<int>(d));
   }
-  // aten's answer shape, and the *squeezed* shape mudnn must be handed. mudnn
-  // silently drops all but the first output element when the output still
-  // carries the reduced axes as extent-1 dims and the input is non-contiguous
-  // (measured on v3300: (4,5) stride (0,1) reduced over dim 0 into a [1,5]
-  // output writes only out[0]). Reducing into the squeezed shape is correct in
-  // every configuration probed, so keepdim is restored with a view afterwards.
-  auto out_shape = self.sizes().vec();
-  std::vector<int64_t> sorted_dims(norm_dims);
-  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
-  auto squeezed_shape = self.sizes().vec();
-  for (int64_t d : sorted_dims) {
-    if (keepdim) out_shape[d] = 1;
-    else out_shape.erase(out_shape.begin() + d);
-    squeezed_shape.erase(squeezed_shape.begin() + d);
-  }
+  // On a strided input, mudnn can write only the first output element when
+  // the output keeps the reduced axes. Restore those axes after reducing.
+  const auto squeezed_shape = at::native::shape_from_dim_mask(self, dim_mask, false);
+  const auto out_shape = keepdim ? at::native::shape_from_dim_mask(self, dim_mask, true)
+                                 : squeezed_shape;
 
   auto out_dtype = dtype.value_or(
       false && at::isIntegralType(self.scalar_type(), true)
@@ -1941,14 +2041,14 @@ at::Tensor MeanDimKernelMusa(
   // mudnn multi-dim Reduce (more than one axis at a time) silently ignores
   // strides and reads the input as if contiguous (verified: (4,5) stride (0,1)
   // reduced over all dims gives 210 = sum(1..20) instead of 60 = 4*sum(1..5)).
-  // Single-dim reduces honour strides correctly, except on a fully-broadcast
-  // input (a 0-stride view of one element), where a single-dim reduce
-  // intermittently writes only out[0]. MudnnReduceNeedsContiguous catches
-  // that; together the two branches cover the stride bug, the SIGFPE and the
-  // partial write.
-  if (norm_dims.size() > 1 && !self_c.is_contiguous()) {
-    self_c = self_c.contiguous();
-  } else if (musa_ops::MudnnReduceNeedsContiguous(self_c)) {
+  // BF16 sums need the vendor Torch's contiguous input layout even for one
+  // axis. The strided kernel rounds some halfway values differently.
+  const bool contiguous_bf16_sum =
+      musa_ops::mudnn::Reduce::Mode::MEAN == musa_ops::mudnn::Reduce::Mode::ADD &&
+      out_dtype == at::kBFloat16;
+  if (!self_c.is_contiguous() &&
+      (mudnn_dims.size() > 1 || contiguous_bf16_sum ||
+       musa_ops::MudnnReduceNeedsContiguous(self_c))) {
     self_c = self_c.contiguous();
   }
   auto out = at::empty(squeezed_shape, self.options().dtype(out_dtype));
@@ -1956,7 +2056,6 @@ at::Tensor MeanDimKernelMusa(
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
   if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
-  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -2075,6 +2174,86 @@ at::Tensor MeanKernelMusa(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(MeanFn, mean_dispatcher, Backend::kMthreads, MeanKernelMusa)
+
+namespace {
+using MusaCrossEntropy = musa_ops::mudnn::CrossEntropyLoss;
+
+void ConfigureMusaCrossEntropy(MusaCrossEntropy& op) {
+  using Status = musa_ops::mudnn::Status;
+  TORCH_CHECK(op.SetReductionMode(MusaCrossEntropy::ReductionMode::MEAN) == Status::SUCCESS &&
+              op.SetIgnoreIndex(-100) == Status::SUCCESS &&
+              op.SetLabelSmoothing(0.0) == Status::SUCCESS,
+              "cross_entropy_loss: muDNN configuration failed");
+}
+
+at::Tensor MusaCrossEntropyForward(const at::Tensor& input, const at::Tensor& labels) {
+  auto loss = at::empty({}, input.options());
+  musa_ops::MudnnTensorWrapper out(loss), source(input), target(labels);
+  musa_ops::mudnn::Tensor weight;
+  MusaCrossEntropy op;
+  ConfigureMusaCrossEntropy(op);
+  EXEC_MUDNN_CMD("cross_entropy_loss", input,
+                op.Run(_mudnn_h, out.get(), source.get(), target.get(),
+                       weight, musa_ops::MudnnWorkspaceFor(input)));
+  return loss;
+}
+
+class MusaCrossEntropyFunction : public torch::autograd::Function<MusaCrossEntropyFunction> {
+ public:
+  static at::Tensor forward(torch::autograd::AutogradContext* ctx,
+                            const at::Tensor& input, const at::Tensor& labels) {
+    ctx->save_for_backward({input, labels});
+    return MusaCrossEntropyForward(input, labels);
+  }
+
+  static torch::autograd::variable_list backward(
+      torch::autograd::AutogradContext* ctx, torch::autograd::variable_list grads) {
+    const auto saved = ctx->get_saved_variables();
+    const auto& input = saved[0];
+    const auto& labels = saved[1];
+    if (at::GradMode::is_enabled()) {
+      auto loss = at::compositeimplicitautograd::cross_entropy_loss(input, labels);
+      auto higher = torch::autograd::grad({loss}, {input}, grads,
+                                         /*retain_graph=*/true, /*create_graph=*/true);
+      return {higher[0], at::Tensor()};
+    }
+    auto grad_input = at::empty(input.sizes(), input.options());
+    musa_ops::MudnnTensorWrapper out(grad_input), source(input), target(labels),
+        grad_output(grads[0]);
+    musa_ops::mudnn::Tensor weight;
+    MusaCrossEntropy op;
+    ConfigureMusaCrossEntropy(op);
+    EXEC_MUDNN_CMD("cross_entropy_loss_backward", input,
+                  op.RunBwd(_mudnn_h, out.get(), source.get(), grad_output.get(),
+                            target.get(), weight, musa_ops::MudnnWorkspaceFor(input)));
+    return {grad_input, at::Tensor()};
+  }
+};
+}  // namespace
+
+at::Tensor CrossEntropyLossKernelMusa(const at::Tensor& self, const at::Tensor& target,
+                    const std::optional<at::Tensor>& weight, int64_t reduction,
+                    c10::SymInt ignore_index, double label_smoothing) {
+  // Match the vendor's eager fused class-index loss using original logits.
+  // Other layouts, weights and reductions use ATen's differentiable composite.
+  if (GetBackendForOp("cross_entropy_loss") != Backend::kMthreads ||
+      !self.is_privateuseone() || self.device() != target.device() ||
+      self.is_nested() || target.is_nested() || self.has_names() || target.has_names() ||
+      self.scalar_type() != at::kFloat || target.scalar_type() != at::kLong ||
+      self.dim() != 2 || target.dim() != 1 || self.numel() == 0 ||
+      self.size(0) != target.size(0) || !self.is_contiguous() || !target.is_contiguous() ||
+      self.is_neg() || target.is_neg() ||
+      (weight && weight->defined()) || reduction != at::Reduction::Mean ||
+      ignore_index.maybe_as_int() != -100 || label_smoothing != 0.0 ||
+      self._fw_grad(0).defined()) {
+    return at::compositeimplicitautograd::cross_entropy_loss_symint(
+        self, target, weight, reduction, ignore_index, label_smoothing);
+  }
+  if (at::GradMode::is_enabled() && self.requires_grad()) {
+    return MusaCrossEntropyFunction::apply(self, target);
+  }
+  return MusaCrossEntropyForward(self, target);
+}
 
 at::Tensor GeluKernelMusa(const at::Tensor& self, c10::string_view approximate) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -3065,6 +3244,7 @@ at::Tensor AddmmKernelMusa(
   musa_ops::MudnnTensorWrapper t_mat2(mat2_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::MatMul op;
+  musa_ops::MudnnSetMatmulDeterminism(op, "addmm");
 
   const bool self_is_out_shaped = self.sizes().equals(out_shape);
   const bool self_is_vector =
@@ -3138,6 +3318,7 @@ at::Tensor BaddbmmKernelMusa(
   musa_ops::MudnnTensorWrapper t_mat2(mat2_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::BatchMatMul op;
+  musa_ops::MudnnSetMatmulDeterminism(op, "baddbmm");
 
   const bool self_is_out_shaped = self.sizes().equals(out_shape);
   const bool self_is_vector =
@@ -4504,3 +4685,11 @@ at::Tensor ArgminKernelMusa(
 REGISTER_IMPL_TO_DISPATCHER(ArgminFn, argmin_dispatcher, Backend::kMthreads, ArgminKernelMusa)
 
 } // namespace at::native::flagos
+
+TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+  m.impl("cross_entropy_loss", TORCH_FN(at::native::flagos::CrossEntropyLossKernelMusa));
+}
+
+TORCH_LIBRARY_IMPL(aten, AutogradPrivateUse1, m) {
+  m.impl("cross_entropy_loss", TORCH_FN(at::native::flagos::CrossEntropyLossKernelMusa));
+}

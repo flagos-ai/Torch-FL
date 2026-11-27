@@ -18,12 +18,17 @@ _module = None
 _manifest = None
 _sdk_manifest = None
 
+_DEVICE_ONLY_VENDORS = {"metax": "MetaX", "thead": "T-Head"}
 
-def _verify_cpu_core():
+
+def _verify_cpu_core(vendor="metax"):
     import torch
 
+    display = _DEVICE_ONLY_VENDORS[vendor]
     if not str(torch.__version__).endswith("+cpu") or torch.version.cuda is not None:
-        raise RuntimeError("MetaX native vendor precision requires official CPU Torch")
+        raise RuntimeError(
+            f"{display} native vendor precision requires official CPU Torch"
+        )
     root = Path(torch.__file__).resolve().parent / "lib"
     maps = Path("/proc/self/maps").read_text().splitlines()
     for name in ("libc10.so", "libtorch_cpu.so", "libtorch_python.so"):
@@ -34,43 +39,53 @@ def _verify_cpu_core():
         }
         if mapped != {(root / name).resolve()}:
             raise RuntimeError(
-                f"MetaX native vendor entry changed the CPU core: {name}"
+                f"{display} native vendor entry changed the CPU core: {name}"
             )
 
 
-def _load_metax_vendor(package):
-    _verify_cpu_core()
-    directory = package / "native_host/_generated/metax_vendor"
+def _load_device_only_vendor(package, vendor):
+    _verify_cpu_core(vendor)
+    directory = package / "native_host/_generated" / f"{vendor}_vendor"
     for name in ("libc10_cuda.so", "libtorch_cuda.so"):
         ctypes.CDLL(str(directory / name), mode=os.RTLD_LAZY | os.RTLD_GLOBAL)
     old_flags = sys.getdlopenflags()
     sys.setdlopenflags(os.RTLD_LAZY | os.RTLD_GLOBAL)
     try:
         module = importlib.import_module(
-            "torch_fl.native_host._generated._metax_vendor"
+            f"torch_fl.native_host._generated._{vendor}_vendor"
         )
     finally:
         sys.setdlopenflags(old_flags)
-    _verify_cpu_core()
+    _verify_cpu_core(vendor)
     return module
 
 
 def _verify_sdk(manifest):
     import torch
 
-    catalog = json.loads(torch.ops.flagos.native_metax_sdk_catalog())
+    vendor = manifest["policy"]["vendor"]
+    display = {"metax": "MetaX", "thead": "T-Head"}.get(vendor)
+    if display is None:
+        raise RuntimeError("unsupported native SDK precision policy")
+    catalog = json.loads(getattr(torch.ops.flagos, f"native_{vendor}_sdk_catalog")())
     if catalog != {name: manifest[name] for name in ("policy", "policy_sha256")}:
-        raise RuntimeError("native MetaX SDK precision policy differs from the core")
+        raise RuntimeError(
+            f"native {display} SDK precision policy differs from the core"
+        )
     for name in ("flag_gems", "flagtree"):
         if importlib.metadata.version(name) != manifest[name]:
-            raise RuntimeError("native MetaX SDK precision dependency cohort changed")
-    libraries = dict(torch.ops.flagos.native_metax_sdk_libraries())
+            raise RuntimeError(
+                f"native {display} SDK precision dependency cohort changed"
+            )
+    libraries = dict(getattr(torch.ops.flagos, f"native_{vendor}_sdk_libraries")())
     if libraries.keys() != manifest["numerical_libraries"].keys():
-        raise RuntimeError("native MetaX SDK numerical library set changed")
+        raise RuntimeError(f"native {display} SDK numerical library set changed")
     for name, path in libraries.items():
         record = manifest["numerical_libraries"][name]
         if digest(path) != record["sha256"]:
-            raise RuntimeError(f"native MetaX SDK numerical library changed: {name}")
+            raise RuntimeError(
+                f"native {display} SDK numerical library changed: {name}"
+            )
 
 
 def stream_scope(device=None):
@@ -104,22 +119,28 @@ def activate():
     import torch
     from torch_fl import _build_config
 
-    if _build_config.ACCELERATOR == "metax" and "vendor" in _build_config.KERNELS:
+    vendor = _build_config.ACCELERATOR
+    if vendor in ("metax", "thead") and "vendor" in _build_config.KERNELS:
         if "boxing" in _build_config.KERNELS:
-            raise RuntimeError("native MetaX SDK precision requires a non-boxing build")
+            raise RuntimeError(
+                f"native {vendor} SDK precision requires a non-boxing build"
+            )
         directory = Path(__file__).parent / "_generated"
         _sdk_manifest = json.loads((directory / "manifest.json").read_text()).get(
             "sdk_precision"
         )
-        if _sdk_manifest is None:
-            raise RuntimeError("native MetaX SDK precision manifest is missing")
+        if _sdk_manifest is None or _sdk_manifest["policy"]["vendor"] != vendor:
+            raise RuntimeError(
+                f"native {vendor} SDK precision manifest is missing or invalid"
+            )
         _verify_sdk(_sdk_manifest)
         if not getattr(_build_config, "NATIVE_VENDOR", False):
             return
     if not getattr(_build_config, "NATIVE_VENDOR", False):
         return
-    vendor = _build_config.ACCELERATOR
-    if vendor not in ("nvidia", "metax", "hygon") or "boxing" in _build_config.KERNELS:
+    if vendor not in {"nvidia", "hygon", *_DEVICE_ONLY_VENDORS} or (
+        "boxing" in _build_config.KERNELS
+    ):
         raise RuntimeError(
             "native vendor precision requires a measured non-boxing build"
         )
@@ -148,8 +169,8 @@ def activate():
             "native vendor schema/policy catalog differs from the core library"
         )
     _module = (
-        _load_metax_vendor(package)
-        if vendor == "metax"
+        _load_device_only_vendor(package, vendor)
+        if vendor in _DEVICE_ONLY_VENDORS
         else importlib.import_module("torch_fl.native_host._generated._vendor")
     )
     _verify_libraries(_module, _manifest)
@@ -173,13 +194,14 @@ def audit():
         import torch
 
         _verify_sdk(_sdk_manifest)
+        vendor = _sdk_manifest["policy"]["vendor"]
         sdk = {
-            "vendor": "metax",
+            "vendor": vendor,
             "vendor_torch": _sdk_manifest["policy"]["vendor_torch"],
             "policy": _sdk_manifest["policy"],
             "catalog": _sdk_manifest["policy"]["operators"],
             "numerical_libraries": _sdk_manifest["numerical_libraries"],
-            "hits": dict(torch.ops.flagos.native_metax_sdk_hits()),
+            "hits": dict(getattr(torch.ops.flagos, f"native_{vendor}_sdk_hits")()),
         }
     if _module is None:
         return sdk
@@ -191,8 +213,8 @@ def audit():
                 f"native vendor artifact changed during execution: {relative}"
             )
     vendor = _manifest.get("vendor", "nvidia")
-    if vendor == "metax":
-        _verify_cpu_core()
+    if vendor in _DEVICE_ONLY_VENDORS:
+        _verify_cpu_core(vendor)
     result = {
         "vendor": vendor,
         "vendor_torch": _manifest["vendor_torch"],

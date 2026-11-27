@@ -149,8 +149,8 @@ Error_t Memcpy(void* dst, const void* src, size_t count, MemcpyKind kind) {
     return Success;
   }
 
-  // cnrtMemcpy is the blocking form; it synchronises internally, so it needs no
-  // queue argument once the default queue exists on the target device.
+  // cnrtMemcpy blocks the calling thread. The caller orders the transfer
+  // against work submitted to an explicit CNRT queue before calling it.
   return toError(
       cnrtMemcpy(dst, const_cast<void*>(src), count, dir), "cnrtMemcpy");
 }

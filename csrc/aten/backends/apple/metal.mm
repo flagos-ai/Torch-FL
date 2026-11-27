@@ -4,6 +4,7 @@
 #include "metal.h"
 
 #include <ATen/native/mps/MetalShaderLibrary.h>
+#include <ATen/ops/empty.h>
 #include <runtime/accelerator/apple/mps.h>
 #include <runtime/allocator/caching_device_allocator.h>
 #include <runtime/functions.h>
@@ -11,6 +12,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <unordered_map>
@@ -123,6 +125,22 @@ id<MTLComputePipelineState> GetBundledPipeline(const std::string& name) {
   return pipeline;
 }
 
+const char* MetalFloatName(at::ScalarType dtype) {
+  switch (dtype) {
+    case at::kFloat: return "float";
+    case at::kHalf: return "half";
+    case at::kBFloat16: return "bfloat";
+    default: return nullptr;
+  }
+}
+
+template <typename T>
+int64_t MetalScalarBytes(T value) {
+  int64_t bytes = 0;
+  std::memcpy(&bytes, &value, sizeof(value));
+  return bytes;
+}
+
 } // namespace
 
 struct MetalKernel::Impl {
@@ -142,20 +160,15 @@ MetalKernel::MetalKernel(const std::string& source) {
 MetalKernel::~MetalKernel() = default;
 
 void MetalKernel::run(c10::ArrayRef<MetalArg> args, const MetalGrid& threads,
-                      const std::optional<MetalGrid>& group_size) const {
-  Submit(impl_->pipeline, args, threads, group_size, false);
+                      const std::optional<MetalGrid>& group_size,
+                      bool compiled_host) const {
+  Submit(impl_->pipeline, args, threads, group_size, compiled_host);
 }
 
 bool RunMetalUnary(const at::Tensor& out, const at::Tensor& input,
                    const char* name) {
-  const char* dtype;
-  switch (input.scalar_type()) {
-    case at::kFloat: dtype = "float"; break;
-    case at::kHalf: dtype = "half"; break;
-    case at::kBFloat16: dtype = "bfloat"; break;
-    default: return false;
-  }
-  if (input.numel() > std::numeric_limits<uint32_t>::max()) return false;
+  const char* dtype = MetalFloatName(input.scalar_type());
+  if (dtype == nullptr || input.numel() > std::numeric_limits<uint32_t>::max()) return false;
 
   @autoreleasepool {
     const std::string function = std::string(name) + "_dense_" + dtype + "_" + dtype;
@@ -165,6 +178,55 @@ bool RunMetalUnary(const at::Tensor& out, const at::Tensor& input,
            std::nullopt, true);
   }
   return true;
+}
+
+bool RunMetalBinaryAlpha(const at::Tensor& out, const at::Tensor& input,
+                        const at::Tensor& other, const at::Scalar& alpha,
+                        const char* name) {
+  const auto type = input.scalar_type();
+  const char* dtype = MetalFloatName(type);
+  if (dtype == nullptr || input.numel() > std::numeric_limits<uint32_t>::max()) return false;
+  int64_t bytes;
+  switch (type) {
+    case at::kFloat: bytes = MetalScalarBytes(alpha.toFloat()); break;
+    case at::kHalf: bytes = MetalScalarBytes(alpha.toHalf()); break;
+    case at::kBFloat16: bytes = MetalScalarBytes(alpha.toBFloat16()); break;
+    default: return false;
+  }
+  @autoreleasepool {
+    const std::string function = std::string(name) + "_alpha_dense_" + dtype + "_" + dtype + "_" + dtype;
+    const auto pipeline = GetBundledPipeline(function);
+    const std::array<MetalArg, 4> args{out, input, other, bytes};
+    Submit(pipeline, args, {static_cast<uint64_t>(input.numel()), 1, 1},
+           std::nullopt, true);
+  }
+  return true;
+}
+
+bool RunMetalFp32ScaledAdd(const at::Tensor& out, const at::Tensor& input,
+                           const at::Tensor& left, const at::Tensor& right,
+                           const at::Scalar& alpha, const char* term_name) {
+  if (input.scalar_type() != at::kFloat ||
+      input.numel() > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  // Reuse the bundled dense kernels on devices that cannot run MPSGraph.
+  const auto term = at::empty(input.sizes(), input.options());
+  @autoreleasepool {
+    const auto pipeline = GetBundledPipeline(std::string(term_name) + "_dense_float_float");
+    const std::array<MetalArg, 3> args{term, left, right};
+    Submit(pipeline, args, {static_cast<uint64_t>(input.numel()), 1, 1},
+           std::nullopt, true);
+  }
+  return RunMetalBinaryAlpha(out, input, term, alpha, "add");
+}
+
+void RunMetalTernaryAlpha(const MetalKernel& kernel, const at::Tensor& out,
+                          const at::Tensor& input, const at::Tensor& left,
+                          const at::Tensor& right, float alpha) {
+  const auto count = static_cast<uint64_t>(out.numel());
+  const std::array<MetalArg, 5> args{out, input, left, right, MetalScalarBytes(alpha)};
+  kernel.run(args, {count, 1, 1}, std::nullopt, true);
 }
 
 EnqueueTrace::Events CaptureEnqueues(const std::function<void()>& run) {

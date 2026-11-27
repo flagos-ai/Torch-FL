@@ -37,10 +37,9 @@ pytestmark = pytest.mark.profiler
 #   cuda    #272 moved `mm`/`bmm` from `cuda` to `flaggems`, and FlagGems' Triton
 #           matmul does not surface device time on the launching op (FlagGems
 #           issue #6223). Before that reroute the case passed on CUDA.
-#   ppu     `backends_thead.conf` routes `mm`, `mm.out` and `bmm` to `none` --
-#           the same reroute, for a platform with no native mm to fall back to
-#           (PPU lane, run 40144165031). The operator still runs (cpu_fallback),
-#           so the trace has `aten::matmul` and `aten::mm`, both at 0.0 s.
+#   ppu     PPU lane 40144165031 showed no device time on `aten::matmul` or
+#           `aten::mm`. Functional matrix multiplication now uses FlagGems;
+#           the profiler must demonstrate device attribution independently.
 #
 # The condition is written down rather than left implicit because `xfail` runs
 # the test body and only absorbs the outcome -- an unconditional marker is not a

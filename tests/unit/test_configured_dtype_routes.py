@@ -269,7 +269,7 @@ def test_plain_override_replaces_an_included_dtype_rule(executable, tmp_path):
         ("gcu", "gcu"),
         ("mps", "mps"),
         ("bpu", "drobotics"),
-        ("thead", "none"),
+        ("thead", "thead"),
         ("nvidia", "nvidia"),
         ("hygon", "hygon"),
     ],

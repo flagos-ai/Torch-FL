@@ -138,7 +138,13 @@ void Forward(const c10::OperatorHandle& forward, Stack* stack) {
     bool ordered = allocator && c10::flagos::CachingDeviceAllocator::is_enabled();
     if (ordered) {
       for (const auto& tensor : borrowed) {
-        ordered &= allocator->record_stream(tensor.storage().data_ptr(), stream);
+        const auto& ptr = tensor.storage().data_ptr();
+        if (!ptr.get()) continue;
+        if (allocator->owns_data_ptr(ptr)) {
+          allocator->record_stream(ptr, stream);
+        } else {
+          ordered = false;
+        }
       }
     }
     if (!ordered) CheckCuda(cudaStreamSynchronize(queue));

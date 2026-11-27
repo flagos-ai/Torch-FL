@@ -29,6 +29,9 @@
   m.impl("_foreach_sqrt_", WrapperForeachSqrtInplace);
   m.impl("_foreach_sub_.List", WrapperForeachSubInplaceList);
   m.impl("_foreach_sub_.Scalar", WrapperForeachSubInplaceScalar);
+  m.impl("_log_softmax", WrapperPrivLogSoftmax);
+  m.impl("_log_softmax_backward_data", WrapperPrivLogSoftmaxBackwardData);
+  m.impl("_log_softmax_backward_data.out", WrapperPrivLogSoftmaxBackwardDataOut);
   m.impl("_sample_dirichlet", WrapperPrivSampleDirichlet);
   m.impl("_scaled_dot_product_efficient_attention", WrapperPrivScaledDotProductEfficientAttention);
   m.impl("_softmax", WrapperPrivSoftmax);
@@ -57,6 +60,9 @@
   m.impl("bernoulli_.Tensor", WrapperBernoulliInplaceTensor);
   m.impl("bernoulli_.float", WrapperBernoulliInplaceFloat);
   m.impl("binomial", WrapperBinomial);
+  m.impl("bitwise_and.Tensor_out", WrapperBitwiseAndTensorOut);
+  m.impl("bitwise_not.out", WrapperBitwiseNotOut);
+  m.impl("bitwise_or.Tensor_out", WrapperBitwiseOrTensorOut);
   m.impl("bmm", WrapperBmm);
   m.impl("bmm.out", WrapperBmmOut);
   m.impl("cat", WrapperCat);
@@ -66,6 +72,8 @@
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
   m.impl("cos", WrapperCos);
   m.impl("cosh", WrapperCosh);
+  m.impl("cumsum", WrapperCumsum);
+  m.impl("cumsum.out", WrapperCumsumOut);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
   m.impl("embedding", WrapperEmbedding);
@@ -131,6 +139,10 @@
   m.impl("ne.Tensor", WrapperNeTensor);
   m.impl("neg", WrapperNeg);
   m.impl("new_ones", WrapperNewOnes);
+  m.impl("nll_loss_backward", WrapperNllLossBackward);
+  m.impl("nll_loss_backward.grad_input", WrapperNllLossBackwardGradInput);
+  m.impl("nll_loss_forward", WrapperNllLossForward);
+  m.impl("nll_loss_forward.output", WrapperNllLossForwardOutput);
   m.impl("nonzero", WrapperNonzero);
   m.impl("nonzero_static", WrapperNonzeroStatic);
   m.impl("normal.Tensor_Tensor", WrapperNormalTensorTensor);

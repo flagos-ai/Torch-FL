@@ -15,6 +15,8 @@
 #include <flagos.h>
 #include <xpu/runtime.h>
 
+#include "xpu_stream.h"
+
 Error_t GetDeviceCount(int* count) {
   if (!count) {
     return ErrorUnknown;
@@ -62,6 +64,9 @@ Error_t DeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority) 
 }
 
 Error_t DeviceSynchronize(void) {
-  // NULL means "the default stream of the current device" in the XPU runtime.
-  return (xpu_wait(NULL) == 0) ? Success : ErrorUnknown;
+  int device = 0;
+  if (xpu_current_device(&device) != XPU_SUCCESS) {
+    return ErrorUnknown;
+  }
+  return at::native::flagos::kunlunxin::SynchronizeXpuDevice(device);
 }

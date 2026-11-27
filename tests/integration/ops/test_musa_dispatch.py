@@ -64,7 +64,7 @@ _OPS = {
     # NATIVE_TRITON_GAPS['musa'] so the conf and the registration agree.
     "add.Tensor": ("a + b", "musa"),
     "mul.Tensor": ("a * b", "musa"),  # mudnn native only
-    "_softmax": ("torch.softmax(a, -1)", "flagos_python"),  # FlagGems coverage
+    "_softmax": ("torch.softmax(a, -1)", "musa"),  # Float uses vendor reduction order.
     "relu": ("torch.relu(a)", "flagos_python"),  # FlagGems coverage
 }
 

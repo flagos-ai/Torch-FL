@@ -25,6 +25,7 @@ namespace {
 
 std::mutex stream_mutex;
 std::unordered_map<int, XPUStream> default_streams;
+std::unordered_map<XPUStream, int> explicit_streams;
 thread_local std::unordered_map<int, XPUStream> current_streams;
 
 XPUStream get_default_stream(int device) {
@@ -93,21 +94,22 @@ Error_t StreamCreateWithPriority(
   // priority nor a flags argument, so there is nothing to honour here. The
   // priority is dropped and an ordinary stream is returned; the caller pairs
   // this with DeviceGetStreamPriorityRange, which reports a single level.
-  if (!stream) {
-    return ErrorUnknown;
-  }
-  return (xpu_stream_create(reinterpret_cast<XPUStream*>(stream)) == 0)
-      ? Success
-      : ErrorUnknown;
+  return StreamCreate(stream);
 }
 
 Error_t StreamCreate(Stream_t* stream) {
-  if (!stream) {
+  int device = 0;
+  if (!stream || xpu_current_device(&device) != XPU_SUCCESS) {
     return ErrorUnknown;
   }
-  return (xpu_stream_create(reinterpret_cast<XPUStream*>(stream)) == 0)
-      ? Success
-      : ErrorUnknown;
+  std::lock_guard<std::mutex> lock(stream_mutex);
+  XPUStream created = nullptr;
+  if (xpu_stream_create(&created) != XPU_SUCCESS) {
+    return ErrorUnknown;
+  }
+  explicit_streams.emplace(created, device);
+  *stream = reinterpret_cast<Stream_t>(created);
+  return Success;
 }
 
 Error_t StreamGetPriority(Stream_t /*stream*/, int* priority) {
@@ -117,9 +119,13 @@ Error_t StreamGetPriority(Stream_t /*stream*/, int* priority) {
 }
 
 Error_t StreamDestroy(Stream_t stream) {
-  return (xpu_stream_destroy(reinterpret_cast<XPUStream>(stream)) == 0)
-      ? Success
-      : ErrorUnknown;
+  std::lock_guard<std::mutex> lock(stream_mutex);
+  auto handle = reinterpret_cast<XPUStream>(stream);
+  if (xpu_stream_destroy(handle) != XPU_SUCCESS) {
+    return ErrorUnknown;
+  }
+  explicit_streams.erase(handle);
+  return Success;
 }
 
 Error_t StreamQuery(Stream_t /*stream*/) {
@@ -220,6 +226,26 @@ Error_t EventElapsedTime(float* ms, Event_t start, Event_t end) {
 }
 
 namespace at::native::flagos::kunlunxin {
+
+Error_t SynchronizeXpuDevice(int device) {
+  // The SDK waits on one queue. The runtime null queue, FlagOS default queue,
+  // and every live FlagOS user queue on this device can all hold work.
+  std::lock_guard<std::mutex> lock(stream_mutex);
+  if (xpu_wait(nullptr) != XPU_SUCCESS) {
+    return ErrorUnknown;
+  }
+  const auto default_stream = default_streams.find(device);
+  if (default_stream != default_streams.end() &&
+      xpu_wait(default_stream->second) != XPU_SUCCESS) {
+    return ErrorUnknown;
+  }
+  for (const auto& [stream, owner] : explicit_streams) {
+    if (owner == device && xpu_wait(stream) != XPU_SUCCESS) {
+      return ErrorUnknown;
+    }
+  }
+  return Success;
+}
 
 FLAGOS_EXPORT void DrainDefaultXpuStreams() {
   std::vector<XPUStream> streams;

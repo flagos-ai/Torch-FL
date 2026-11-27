@@ -337,7 +337,8 @@ install_flag_gems
 if [[ "$CI_STAGE" == "integration" ]]; then
   # The host-program tests use torch.utils.cpp_extension.load, which requires
   # Ninja even though the wheel itself can be built with CMake/Make.
-  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry pytest transformers ninja
+  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry pytest ninja \
+    "transformers==$QWEN3_TRANSFORMERS_VERSION_DEFAULT"
 fi
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'

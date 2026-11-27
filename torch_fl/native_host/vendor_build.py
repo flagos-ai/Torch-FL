@@ -57,19 +57,23 @@ def _hygon_links(cohort, bundled, _build_temp):
     )
 
 
-def _metax_links(cohort, bundled, build_temp):
-    # Expose only the verified host headers to the official CPU Torch frontend.
+def _stage_published_headers(cohort, build_temp):
+    # Expose only verified device headers to the official CPU Torch frontend.
     headers = build_temp / "published_headers"
     for relative, record in cohort["host_headers"].items():
         target = headers / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(record["path"], target)
         if digest(target) != record["sha256"]:
-            raise RuntimeError("published MetaX host header copy changed")
+            raise RuntimeError(f"published device header copy changed: {relative}")
+    return headers
+
+
+def _metax_links(cohort, bundled, build_temp):
     maca = Path(os.environ.get("MACA_PATH", "/opt/maca"))
     return _LinkOptions(
         includes=(
-            headers,
+            _stage_published_headers(cohort, build_temp),
             maca / "tools/cu-bridge/include",
             maca / "include",
             maca / "include/mcr",
@@ -77,6 +81,25 @@ def _metax_links(cohort, bundled, build_temp):
         libraries=tuple(bundled / name for name in cohort["libraries"]),
         rpaths=("$ORIGIN/metax_vendor",),
         cflags=("-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE",),
+    )
+
+
+def _thead_links(cohort, bundled, build_temp):
+    sdk = Path(
+        os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME") or "/usr/local/PPU_SDK"
+    )
+    cuda = Path(os.environ.get("CUDA_HOME") or sdk / "CUDA_SDK")
+    return _LinkOptions(
+        includes=(
+            _stage_published_headers(cohort, build_temp),
+            cuda / "include",
+            sdk / "include",
+        ),
+        libraries=(
+            *(bundled / name for name in cohort["libraries"]),
+            cuda / "lib64/libcudart.so.13",
+        ),
+        rpaths=("$ORIGIN/thead_vendor",),
     )
 
 
@@ -118,6 +141,13 @@ _BUILD_SPECS = {
         header="backends/metax/precision.h",
         official_cpu_first=True,
         explicit_cxx11_abi=False,
+        load=_preload_libraries,
+    ),
+    "thead": _BuildSpec(
+        _thead_links,
+        ("codegen_native_vendor.py", "--vendor", "thead"),
+        module="_thead_vendor",
+        official_cpu_first=True,
         load=_preload_libraries,
     ),
 }
@@ -182,8 +212,8 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
     spec = _BUILD_SPECS[vendor]
     policy = load_build_policy(source_root).precision_policy(vendor)
     cohort = describe(vendor_library, policy)
-    # The MetaX GPU libraries use the official CPU Torch frontend. The other
-    # builds let torch_fl select the platform libraries before importing Torch.
+    # Device-only builds keep the official CPU Torch frontend. The other builds
+    # let torch_fl select the platform libraries before importing Torch.
     torch = (
         _load_cpu_torch(policy, cohort, exact_cpu=True)
         if spec.official_cpu_first

@@ -80,6 +80,13 @@ FLAGOS_EXPORT void FlagosMPSCommitCommandBuffer(Stream_t stream, void* buffer);
 // A no-op when `stream` has no queue (no Metal device), like the accessor above.
 FLAGOS_EXPORT void FlagosMPSStreamSentinel(Stream_t stream);
 
+// The caching allocator only needs completion of work already submitted on a
+// stream. Its events retain the newest committed command buffer for queries.
+// EventDestroy releases this reference through the regular event storage.
+FLAGOS_EXPORT Error_t FlagosMPSAllocatorEventCreate(Event_t* event);
+FLAGOS_EXPORT Error_t FlagosMPSAllocatorEventRecord(Event_t event, Stream_t stream);
+FLAGOS_EXPORT Error_t FlagosMPSAllocatorEventQuery(Event_t event);
+
 // Drain queued work and invoke the caching allocator's exit hook. Called both
 // by the Python atexit path and as the final safety net for a process that
 // imported torch_fl but never drained a queue itself. Idempotent.

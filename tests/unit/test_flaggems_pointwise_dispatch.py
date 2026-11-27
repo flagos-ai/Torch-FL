@@ -258,6 +258,12 @@ class TestBroadcastShapesMemo:
 class TestGate:
     """The patch is scoped to the builds and confs it was measured on."""
 
+    def test_precompiled_eager_skips_legacy_launch_memoization(self, monkeypatch):
+        monkeypatch.setenv("FLAGOS_NATIVE_HOST_REQUIRE_DEVICE_ARTIFACTS", "1")
+        monkeypatch.setattr(launch.runtime, "routes_to_flaggems", lambda: True)
+        assert not launch.launch_patches_apply("nvidia")
+        assert not launch.launch_patches_apply("hygon")
+
     def _restore(self, run, key, descriptor_key, broadcast_shapes):
         libentry.LibEntry.run = run
         libentry.LibEntry.key = key

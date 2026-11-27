@@ -122,6 +122,7 @@ def _query_metax_device_properties(mcruntime, device_index):
         return val.value if ret == 0 else 0
 
     props.multi_processor_count = get_attr(16)
+    props.L2_cache_size = get_attr(38)
     props.warp_size = get_attr(10)
     props.max_threads_per_multi_processor = get_attr(39)
     props.shared_memory_per_block = get_attr(8)

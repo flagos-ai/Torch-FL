@@ -4,6 +4,7 @@
 
 #if defined(USE_ASCEND)
 #include "backends/ascend_memory.h"
+#include "runtime/accelerator/ascend/acl_stream.h"
 #endif
 #if defined(USE_DCU)
 #include "backends/hygon_memory.h"
@@ -169,8 +170,13 @@ at::DataPtr CachingDeviceAllocator::allocate(size_t nbytes) {
   }
 
   Stream_t stream = nullptr;
-#if defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_MACA) || \
-    defined(USE_ASCEND) || defined(USE_MUSA)
+#if defined(USE_ASCEND)
+  stream = reinterpret_cast<Stream_t>(
+      at::native::flagos::ascend::GetCurrentAclStreamForDevice(device));
+#elif defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_MACA) || \
+    defined(USE_MUSA) || \
+    ((defined(USE_ILUVATAR) || defined(USE_KUNLUNXIN) || defined(FLAGOS_ACCEL_PPU)) && \
+     defined(FLAGOS_NATIVE_HOSTS))
   // Keep native runtime pools separate per stream. Same-stream reuse is ordered by
   // the queue; a free block must not be handed to a different queue prematurely.
   stream = ::GetCurrentStreamForDevice(device);
@@ -273,6 +279,14 @@ void CachingDeviceAllocator::free_block(Block* block) {
   // Update stats.
   state.stats.bytes_allocated -= block->size;
   state.stats.num_free_calls++;
+
+#if defined(USE_MPS)
+  if (block->mps_default_snapshot) {
+    state.outstanding_events.emplace_back(block->mps_default_snapshot, block);
+    block->mps_default_snapshot = nullptr;
+    ++block->event_count;
+  }
+#endif
 
   // If there are outstanding events on other streams, defer the free.
   if (block->event_count > 0) {
@@ -440,6 +454,12 @@ bool CachingDeviceAllocator::release_cached_blocks(DeviceState& state) {
       pool.blocks.insert(block);
     }
 
+#if defined(USE_ASCEND)
+    if (!to_release.empty()) {
+      // The SDK free can wait for device work only after the host has sent it.
+      at::native::flagos::ascend::WaitForAscendEagerSubmissions();
+    }
+#endif
     for (auto* block : to_release) {
       backend_->device_free(block->ptr);
       state.stats.bytes_reserved -= block->size;
@@ -512,6 +532,14 @@ void CachingDeviceAllocator::shutdown() {
     for (auto& state_ptr : device_states_) {
       if (state_ptr) {
         std::lock_guard<std::recursive_mutex> dev_lock(state_ptr->mutex);
+#if defined(USE_MPS)
+        for (auto* block : state_ptr->active_blocks) {
+          if (block->mps_default_snapshot) {
+            backend_->event_destroy(block->mps_default_snapshot);
+            block->mps_default_snapshot = nullptr;
+          }
+        }
+#endif
         process_events(*state_ptr);
         release_cached_blocks(*state_ptr);
       }
@@ -522,36 +550,73 @@ void CachingDeviceAllocator::shutdown() {
   device_states_.clear();
 }
 
-bool CachingDeviceAllocator::record_stream(
+bool CachingDeviceAllocator::owns_data_ptr(const at::DataPtr& ptr) const {
+  return ptr.get_deleter() ==
+      (backend_->provides_caching() ? &delegated_deleter : &block_deleter);
+}
+
+#if defined(USE_ASCEND)
+bool CachingDeviceAllocator::owns_data_ptr_on_stream(
+    const at::DataPtr& ptr, Stream_t stream) const {
+  if (ptr.get_deleter() != &block_deleter) return false;
+  const auto* block = static_cast<const Block*>(ptr.get_context());
+  return block && block->stream == stream;
+}
+#endif
+
+void CachingDeviceAllocator::record_stream(
     const at::DataPtr& ptr,
     Stream_t stream) {
   if (!ptr.get()) {
-    return true;
+    return;
   }
 
   if (backend_->provides_caching()) {
     backend_->caching_record_stream(ptr.get(), stream);
-    return ptr.get_deleter() == &delegated_deleter;
+    return;
   }
 
   // The Block* is stored as the DataPtr context by allocate(). Only trust it
   // when the deleter matches (i.e. this DataPtr came from our block pool, not
   // the delegation path or a foreign allocator).
   if (ptr.get_deleter() != &block_deleter) {
-    return false;
+    return;
   }
   Block* block = static_cast<Block*>(ptr.get_context());
   if (!block) {
-    return false;
+    return;
   }
 
-#if defined(FLAGOS_ACCEL_CUDA)
-  // The NVIDIA pool already orders a block's reuse on its allocation stream.
-  if (block->stream == stream) return true;
+#if defined(USE_ASCEND) || (defined(FLAGOS_NATIVE_HOSTS) && \
+    (defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_PPU) || \
+     defined(USE_KUNLUNXIN) || defined(USE_ILUVATAR)))
+  // Free blocks stay in their allocation stream's pool. The queue
+  // orders reuse there, so only users on other streams need an event.
+  if (block->stream == stream) return;
 #endif
 
+#if defined(USE_ASCEND)
+  // A cross-stream event must follow any pending enqueue on the source stream.
+  at::native::flagos::ascend::FlushAscendEager();
+#endif
   auto& state = get_device_state(block->device);
   std::lock_guard<std::recursive_mutex> lock(state.mutex);
+
+#if defined(USE_MPS)
+  // The latest command buffer on the default Metal queue orders all earlier
+  // uses. Keep one snapshot per live block and queue it when the block is freed.
+  if (block->allocated &&
+      (!stream || stream == ::GetDefaultStreamForDevice(block->device))) {
+    auto& snapshot = block->mps_default_snapshot;
+    if (!snapshot) {
+      TORCH_CHECK(backend_->event_create(&snapshot) == Success,
+                  "MPS default stream snapshot allocation failed");
+    }
+    TORCH_CHECK(backend_->event_record(snapshot, stream) == Success,
+                "MPS default stream snapshot recording failed");
+    return;
+  }
+#endif
 
   // Record an event on the given stream. When the event completes,
   // we know the stream is done using this block.
@@ -564,7 +629,6 @@ bool CachingDeviceAllocator::record_stream(
 
   block->event_count++;
   state.outstanding_events.push_back({event, block});
-  return true;
 }
 
 std::pair<size_t, size_t> CachingDeviceAllocator::get_memory_info(int device) {

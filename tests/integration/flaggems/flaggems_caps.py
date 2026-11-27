@@ -186,7 +186,7 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # claim carries every dtype through the prelude, so the key cannot box), and
     # left this count at the pre-reroute 452. The hygon lane reported the two it
     # had gained as `assert 454 == 452`.
-    "dcu": 463,
+    "dcu": 466,
     # Isolated full-model precision checks restore SiLU to FlagGems.
     "gcu": 253,
     # The iluvatar lane's landing: the conf routes 583 ops to FlagGems, thirteen
@@ -211,22 +211,22 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # FlagGems' complex `add` is wrong on this chip, which `FlagGemsRejectsDtype`
     # now expresses at run time instead. `add.Scalar` stays on `none` -- FlagGems
     # 5.4.0 ships no kernel for that overload.
-    "iluvatar": 583,
+    "iluvatar": 587,
     # 256: two screens on a P800. The whole 618-op cohort first, at one profile
     # with the survey's default tolerance; then every survivor over ten profiles
     # (the survey's seven plus 13x7, 3x5x7 and 64x3) compared at atol=rtol=1e-4,
     # which is the tolerance these tests assert with. The number is a
     # measurement, not the cohort size -- see KUNLUNXIN_FLAGGEMS_MEASURED.
-    "kunlunxin": 258,
+    "kunlunxin": 259,
     # 585 since `mm` joined: the default conf routes it to FlagGems so the
     # soft-lowp matrix claim has a registered key to follow.
     "metax": 586,
     # 0: the apple conf routes no operator to FlagGems -- its native MPSGraph
     # kernels serve what it accelerates and the rest reaches cpu_fallback.
     "apple": 0,
-    "musa": 464,
-    "ppu": 590,
-    "nvidia": 553,
+    "musa": 466,
+    "ppu": 594,
+    "nvidia": 559,
     # The sparse TsingMicro config also spells two aliases `flagos_python`.
     "tsingmicro": 63,
 }
@@ -253,7 +253,7 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "musa": "none",
     "ppu": "none",
     "nvidia": "none",
-    # `backends_tsingmicro.conf` does not name the composite.
+    # `backends_tsingmicro.conf` does not name the composite, like the CUDA conf.
     "tsingmicro": None,
 }
 
@@ -283,19 +283,26 @@ def conf_path() -> Path:
     return Path(torch_fl.backend_config_path())
 
 
-def load_routes() -> dict[str, str]:
-    """Every ``op -> backend`` route in the conf, as written (``none`` included).
+def route_for_dtype(value: str, dtype: str | None = None) -> str:
+    """Resolve a backend conf value for the supplied ATen input dtype."""
+    base, *clauses = value.split(";")
+    if dtype is not None:
+        input_dtype = dtype.casefold()
+        for clause in clauses:
+            types, _, override = clause.partition(":")
+            if any(item.strip().casefold() == input_dtype for item in types.split(",")):
+                return override.strip()
+    return base.strip()
 
-    Parsed the same way the C++ reader does: drop anything after ``#`` and split
-    the remainder on the first ``=``. The value is the raw conf backend, before
-    input-dtype clauses and the log-name mapping ``route_reason`` apply.
-    """
+
+def load_routes(dtype: str | None = None) -> dict[str, str]:
+    """Read the base routes or apply the clauses for the requested ATen dtype."""
     routes: dict[str, str] = {}
     with open(conf_path()) as f:
         for line in f:
             name, sep, value = line.split("#")[0].partition("=")
             if sep:
-                routes[name.strip()] = value.split(";", 1)[0].strip()
+                routes[name.strip()] = route_for_dtype(value, dtype)
     return routes
 
 

@@ -64,7 +64,6 @@ from backend_coverage import TILEOPS_OPS  # noqa: E402
 from native_source_entries import wrap_call as wrap_native_source_call  # noqa: E402
 from native_host_policy import (  # noqa: E402
     NATIVE_BMM_ADAPTATIONS,
-    NATIVE_REDUCTION_ADAPTATIONS,
     render_config_routes,
 )
 
@@ -165,6 +164,15 @@ def _dot_contract_prelude(op, args):
                 f"the schema has {sorted(arg_names)}"
             )
     lhs, rhs = operands
+    empty = ""
+    if op in ("mm", "bmm"):
+        rank = 2 if op == "mm" else 3
+        # Empty products are defined by their metadata and need no dot launch.
+        empty = (
+            "  at::Tensor empty_product;\n"
+            f"  if (at::native::flagos::TryEmptyMatmul({lhs}, {rhs}, {rank}, empty_product)) "
+            "{ return empty_product; }\n"
+        )
     native = ""
     if op in NATIVE_BMM_ADAPTATIONS["metax"]["operators"]:
         condition = f"at::native::flagos::TryNativeHostBmmOuterProduct({lhs}, {rhs}, native_product)"
@@ -181,25 +189,11 @@ def _dot_contract_prelude(op, args):
             result = "out.copy_(native_product); return out;"
         native = f"  at::Tensor native_product;\n  if ({condition}) {{ {result} }}\n"
     lines = (
-        native + f"  at::Tensor {lhs}_dotpad = {lhs};\n"
+        empty + native + f"  at::Tensor {lhs}_dotpad = {lhs};\n"
         f"  at::Tensor {rhs}_dotpad = {rhs};\n"
         f"  at::native::flagos::PadMatmulPairForDot({lhs}_dotpad, {rhs}_dotpad);\n"
     )
     return lines, {lhs: f"{lhs}_dotpad", rhs: f"{rhs}_dotpad"}
-
-
-def _native_reduction_prelude(op):
-    policy = NATIVE_REDUCTION_ADAPTATIONS["metax"]
-    if op != policy["operator"]:
-        return ""
-    extents = " || ".join(f"self.size(-1) == {extent}" for extent in policy["extents"])
-    return (
-        "#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)\n"
-        "  at::Tensor native_mean;\n"
-        f"  if (self.dim() > 0 && ({extents}) && "
-        "at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) "
-        "{ return native_mean; }\n#endif\n"
-    )
 
 
 # Matmul ops whose FlagGems Python kernel must leave the device entirely for the
@@ -1370,6 +1364,15 @@ def gen_flaggems_python_kernel(
                 "  if (!alpha.isIntegral(false))\n"
                 "    at::native::alpha_check(at::result_type(self, other), alpha);\n"
                 "#endif\n"
+                "#if defined(USE_ASCEND) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  // The published BF16 add corrupts values for dense matrices with different strides.\n"
+                "  if (self.scalar_type() == at::kBFloat16 && other.scalar_type() == at::kBFloat16 &&\n"
+                "      self.device() == other.device() && self.dim() == 2 && self.sizes().equals(other.sizes()) &&\n"
+                "      !self.is_contiguous() && other.is_contiguous() && self.is_non_overlapping_and_dense()) {\n"
+                "    if (const auto native = add_tensor_dispatcher.KernelFor(Backend::kAscend))\n"
+                "      return native(self, other, alpha);\n"
+                "  }\n"
+                "#endif\n"
             )
         elif op in ("addmm", "addmm.out"):
             # Keep the contracting tile legal with FlagTree's small-block
@@ -1389,11 +1392,39 @@ def gen_flaggems_python_kernel(
                 "#endif\n"
             )
         elif op == "mean.dim":
-            # FlagGems reduces by dividing by the outer extent, which may be zero.
+            # Use reduction metadata for empty inputs. If the result has
+            # elements, each corresponds to a reduction over an empty slice.
             prelude += (
+                "  const auto dim_mask = at::native::make_dim_mask(dim, self.dim());\n"
                 "  if (self.numel() == 0) {\n"
-                "    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::mean_dim>::call(self, dim, keepdim, dtype);\n"
+                "    const auto output_dtype = dtype.value_or(self.scalar_type());\n"
+                '    TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
+                "    const auto shape = at::native::shape_from_dim_mask(self, dim_mask, keepdim);\n"
+                "    auto result = at::empty(shape, self.options().dtype(output_dtype));\n"
+                "    if (result.numel() == 0) return result;\n"
+                "    const auto nan = std::numeric_limits<double>::quiet_NaN();\n"
+                "    return result.fill_(c10::isComplexType(output_dtype)\n"
+                "        ? at::Scalar(c10::complex<double>(nan, nan)) : at::Scalar(nan));\n"
                 "  }\n"
+                "#if defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  at::DimVector full_dims;\n"
+                "  if ((!dim.has_value() || dim->empty()) && MeanDimFnSource.Available()) {\n"
+                "    // A backend with no mean kernel enters ATen's mean.dim composite again.\n"
+                '    const auto mean = c10::Dispatcher::singleton().findSchemaOrThrow("aten::mean", "");\n'
+                "    if (!mean.hasKernelForDispatchKey(c10::DispatchKey::PrivateUse1)) {\n"
+                "      const auto reduction_dtype = dtype.value_or(self.scalar_type());\n"
+                '      TORCH_CHECK(c10::isFloatingType(reduction_dtype) || c10::isComplexType(reduction_dtype), "mean(): input or output dtype must be floating point or complex");\n'
+                "      if (self.dim() == 0) return self.to(reduction_dtype, false, true);\n"
+                "      // Redispatch explicitly promoted inputs in their reduction dtype.\n"
+                "      // This admits the same-dtype Native Host or vendor kernel.\n"
+                "      if (reduction_dtype != self.scalar_type()) {\n"
+                "        return mean_dim_dispatcher(self.to(reduction_dtype), dim, keepdim, dtype);\n"
+                "      }\n"
+                "      for (int64_t axis = 0; axis < self.dim(); ++axis) full_dims.push_back(axis);\n"
+                "      dim = at::IntArrayRef(full_dims);\n"
+                "    }\n"
+                "  }\n"
+                "#endif\n"
                 "#if defined(USE_DCU)\n"
                 "  const auto output_dtype = dtype.value_or(self.scalar_type());\n"
                 '  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
@@ -1452,6 +1483,10 @@ def gen_flaggems_python_kernel(
             # Pass the CPU scalar value to the published scalar variants
             # while preserving alpha and operand order.
             prelude += (
+                "#if defined(USE_DCU)\n"
+                "  at::native::sub_check(self, other);\n"
+                "  at::native::alpha_check(at::result_type(self, other), alpha);\n"
+                "#endif\n"
                 "  const bool cpu_lhs = self.device().is_cpu();\n"
                 "  const auto& tensor = cpu_lhs ? other : self;\n"
                 "  const auto& scalar = cpu_lhs ? self : other;\n"
@@ -1470,6 +1505,7 @@ def gen_flaggems_python_kernel(
         elif op == "div.Tensor":
             # Match GPU true division's rounding for a CPU scalar divisor.
             prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA)\n"
                 "  if (self.device().is_privateuseone() && self.is_floating_point() &&\n"
                 "      other.device().is_cpu() && other.dim() == 0 && other.is_floating_point()) {\n"
                 "    const auto dtype = at::result_type(self, other);\n"
@@ -1478,6 +1514,7 @@ def gen_flaggems_python_kernel(
                 "    auto result = at::mul(self.to(accumulation), reciprocal).to(dtype);\n"
                 "    return RestorePointwiseLayout(self, std::move(result));\n"
                 "  }\n"
+                "#endif\n"
             )
         elif op == "sort.stable":
             # FlagGems makes the result contiguous even for a transposed
@@ -1495,10 +1532,37 @@ def gen_flaggems_python_kernel(
                 "    return {restore_layout(values), restore_layout(indices)};\n"
                 "  }\n"
             )
-        elif typed and op == "pow.Tensor_Scalar":
-            # Match the existing floating-square decomposition while keeping
-            # the nested multiply on its configured dispatcher route.
+        elif op == "_log_softmax_backward_data":
             prelude += (
+                "#if defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (output.dim() > 0 && output.numel() > 0 &&\n"
+                "      output.sizes().equals(grad_output.sizes()) && output.device() == grad_output.device() &&\n"
+                "      output.scalar_type() == grad_output.scalar_type() &&\n"
+                "      (output.scalar_type() == input_dtype || output.scalar_type() == at::kFloat) &&\n"
+                "      (input_dtype == at::kFloat || input_dtype == at::kHalf || input_dtype == at::kBFloat16)) {\n"
+                "    const auto axis = at::maybe_wrap_dim(dim, output.dim());\n"
+                "    // The published backward reduces a single tile, capped at 512 / BLOCK_M.\n"
+                "    // All published configurations cover up to 64 elements in that tile.\n"
+                "    if (output.size(axis) > 64) {\n"
+                "      const auto grad = grad_output.to(at::kFloat);\n"
+                "      const auto scale = at::sum(grad, at::IntArrayRef(axis), true);\n"
+                "      return at::addcmul(grad, at::exp(output.to(at::kFloat)), scale, -1)\n"
+                "          .to(input_dtype).contiguous();\n"
+                "    }\n"
+                "  }\n"
+                "#endif\n"
+            )
+        elif typed and op == "pow.Tensor_Scalar":
+            # PyTorch's FP32 cube uses two multiplications. The general pow
+            # kernel can round these exact products in the device math library.
+            prelude += (
+                "#if defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (self.scalar_type() == at::kFloat &&\n"
+                "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) &&\n"
+                "      exponent.toDouble() == 3.0 && MulTensorFnSource.Available()) {\n"
+                "    return at::mul(at::mul(self, self), self);\n"
+                "  }\n"
+                "#endif\n"
                 "#if defined(USE_DCU)\n"
                 "  if (MulTensorFnSource.Available() && c10::isFloatingType(self.scalar_type()) &&\n"
                 "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) && exponent.toDouble() == 2.0)\n"
@@ -1506,9 +1570,39 @@ def gen_flaggems_python_kernel(
                 "#endif\n"
             )
         elif op == "cat":
+            if typed:
+                prelude += (
+                    "#if defined(FLAGOS_NATIVE_THEAD_VENDOR)\n"
+                    "  if (auto kernel = cat_dispatcher.KernelFor(Backend::kThead);\n"
+                    "      kernel && NativeSourceCanRun() && thead_vendor::Concatenation(tensors, dim))\n"
+                    "    return kernel(tensors, dim);\n"
+                    "#endif\n"
+                )
             body = body.replace(
                 "  return result;",
                 "#if defined(USE_DCU)\n  for (const auto& input : tensors) if (result.is_alias_of(input)) return result.clone();\n#endif\n  return result;",
+            )
+        elif op == "index_copy_":
+            prelude += (
+                "#if defined(USE_MACA)\n"
+                "  // The published rank-four provider reads the value cache in dense order.\n"
+                "  if (!source.is_contiguous() && source.dim() == 4 &&\n"
+                "      source.scalar_type() == at::kBFloat16 && source.device() == self.device() &&\n"
+                "      (dim == 2 || dim == -2))\n"
+                "    return IndexCopyInplaceKernelPython(self, dim, index, source.contiguous());\n"
+                "#endif\n"
+            )
+        elif op == "nll_loss_backward":
+            declarations.insert(
+                0,
+                "#if defined(FLAGOS_ACCEL_CUDA)\n"
+                f"{ret_type} NllLossMeanBackwardNvidia({args_decl(args)});\n"
+                "#endif\n",
+            )
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA)\n"
+                f"  return NllLossMeanBackwardNvidia({', '.join(n for _, n in args)});\n"
+                "#endif\n"
             )
         return (
             "".join(declarations)
@@ -1547,6 +1641,16 @@ def gen_flaggems_python_kernel(
                 f": at::kLong;\n"
             )
             dtype_expr = "_dt"
+        elif op == "full":
+            infer = (
+                "#if defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  // ATen allocates the result and its fill uses the configured FlagGems host.\n"
+                "  if (layout.value_or(at::kStrided) == at::kStrided && !pin_memory.value_or(false)) {\n"
+                "    return at::native::full(size, fill_value, dtype, layout,\n"
+                "                            TypedSourceFactoryDevice(device), pin_memory);\n"
+                "  }\n"
+                "#endif\n"
+            )
         call = (
             f'CallPythonOp_Factory("{gems_func}", '
             f"{pos_init}, {dtype_expr}, {device_expr})"
@@ -1664,11 +1768,66 @@ def gen_flaggems_python_kernel(
         ] + [a.name for a in out_args]
     else:
         passed_names = [a.name for a in aten_args if a.name not in kw_names]
-    # Widen a contracted axis the platform's triton will not compile, before the
-    # operands are packed for the call. See _DOT_CONTRACT_PADDED_OPS.
+    # Normalize layouts before either the typed or boxed FlagGems call.
     native_names = passed_names[:]
-    dotpad_lines, dotpad_rename = _dot_contract_prelude(op, args)
-    passed_names = [dotpad_rename.get(n, n) for n in passed_names]
+    layout_prelude, layout_names = _dot_contract_prelude(op, args)
+    if op == "slice_backward":
+        # The published kernel uses linear source offsets, including when
+        # CatBackward provides a gradient view with gaps between rows.
+        layout_prelude += "  const auto grad_output_c = grad_output.contiguous();\n"
+        layout_names["grad_output"] = "grad_output_c"
+    if op == "sum.dim_IntList" and typed:
+        layout_prelude += (
+            "  at::Tensor collapsed;\n"
+            "#if defined(FLAGOS_NATIVE_HOSTS) && \\\n"
+            "    (defined(FLAGOS_ACCEL_ILUVATAR) || defined(FLAGOS_ACCEL_METAX))\n"
+            "  const auto rank = self.dim();\n"
+            "  if (rank >= 3 && self.is_privateuseone() && self.scalar_type() == at::kBFloat16 &&\n"
+            "      (!dtype || *dtype == at::kBFloat16) && self.numel() && !self.is_neg() &&\n"
+            "      self.is_non_overlapping_and_dense() && self.stride(-1) == 1 &&\n"
+            "      self.size(-1) > 1 && dim && dim->size() == static_cast<size_t>(rank - 1) &&\n"
+            f"      {fn_type}Source.Available()) {{\n"
+            "    bool leading = true;\n"
+            "    for (int64_t axis = 0; leading && axis < rank - 1; ++axis) {\n"
+            "      const auto reduced = (*dim)[axis];\n"
+            "      leading = reduced == axis || reduced == axis - rank;\n"
+            "    }\n"
+            "    if (leading) {\n"
+            "      // Each storage row has one element of each output column.\n"
+            "      // Use the published single-axis kernel on the original storage.\n"
+            "      const auto width = self.size(-1);\n"
+            "      collapsed = self.as_strided({self.numel() / width, width}, {width, 1});\n"
+            "    }\n"
+            "  }\n"
+            "#endif\n"
+            "  const int64_t leading_axis = 0;\n"
+            "  const at::OptionalIntArrayRef reduced_axes = collapsed.defined()\n"
+            "      ? at::OptionalIntArrayRef(at::IntArrayRef(leading_axis)) : dim;\n"
+            "  const auto& reduction_input = collapsed.defined() ? collapsed : self;\n"
+            "  const bool reduction_keepdim = keepdim && !collapsed.defined();\n"
+        )
+        layout_names.update(
+            self="reduction_input", dim="reduced_axes", keepdim="reduction_keepdim"
+        )
+    if op == "constant_pad_nd":
+        # Use the native fill and copy composition when the published rank
+        # wrapper cannot lower its Python scheduling object. On MetaX, keep
+        # ordinary mask fills on FlagGems to avoid Python fill submissions.
+        layout_prelude += (
+            "#if defined(FLAGOS_NATIVE_HOSTS) && \\\n"
+            "    (defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_DCU) || \\\n"
+            "     defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_ILUVATAR) || defined(FLAGOS_ACCEL_MUSA))\n"
+            "#if defined(FLAGOS_ACCEL_METAX)\n"
+            "  const bool native_fill = !value.isComplex() && value.toDouble() < 0;\n"
+            "#else\n"
+            "  constexpr bool native_fill = true;\n"
+            "#endif\n"
+            "  if (native_fill && self.scalar_type() == at::kLong && !ConstantPadNdFnSource.Available()) {\n"
+            "    return at::native::constant_pad_nd(self, pad, value);\n"
+            "  }\n"
+            "#endif\n"
+        )
+    passed_names = [layout_names.get(n, n) for n in passed_names]
     if op == "embedding":
         # sparse only selects the ATen backward representation. The forward
         # gather is identical; FlagGems rejects sparse=True unnecessarily.
@@ -1702,7 +1861,11 @@ def gen_flaggems_python_kernel(
     elif category == "inplace":
         self_name = passed_names[0]
         ret_line = "" if ret_type == "void" else f"\n  return {self_name};"
-        body = f"  auto result = {gen_call};\n  {self_name}.copy_(result);{ret_line}"
+        copy_back = f"{self_name}.copy_(result);"
+        if op == "add_.Tensor":
+            # The published add_ host writes into its out0 tensor and returns it.
+            copy_back = f"if (!result.is_same({self_name})) {copy_back}"
+        body = f"  auto result = {gen_call};\n  {copy_back}{ret_line}"
     elif category == "tuple_return":
         n = ret_type.count(",") + 1  # ::std::tuple<a,b> -> 2
         unbox = "\n".join(f"  UnboxToFlagos(result[{i}]);" for i in range(n))
@@ -1793,11 +1956,24 @@ def gen_flaggems_python_kernel(
             outputs,
         )
     body = body.replace(original_call, replacement)
+    if op == "sum.dim_IntList" and typed:
+        body = body.replace(
+            "  return result;",
+            "  if (collapsed.defined() && keepdim) {\n"
+            "    std::vector<int64_t> shape(self.dim(), 1);\n"
+            "    shape.back() = self.size(-1);\n"
+            "    return result.view(shape);\n"
+            "  }\n"
+            "  return result;",
+        )
 
     # Ordered: the host escape returns before the padding runs, because a dtype
     # this route cannot serve at all should not pay for a pad it will not use.
     host_lines = _host_matmul_prelude(op, args, ret_type)
-    return finish(body, host_lines + _native_reduction_prelude(op) + dotpad_lines)
+    return finish(
+        body,
+        host_lines + layout_prelude,
+    )
 
 
 # These out schemas are absent from the published registry. The generated
@@ -1805,11 +1981,20 @@ def gen_flaggems_python_kernel(
 # route. No numerical kernel or CUDA redispatch is introduced.
 FLAGGEMS_OUT_ADAPTERS = {
     "add.out": "add.Tensor",
+    "sub.out": "sub.Tensor",
     "mul.out": "mul.Tensor",
     "mean.out": "mean.dim",
     "cat.out": "cat",
 }
-NVIDIA_OUT_ADAPTERS = {"mul.out"}
+NVIDIA_NATIVE_TRAINING_ADAPTERS = (
+    "_log_softmax_backward_data.out",
+    "_softmax_backward_data.out",
+    "embedding_dense_backward",
+    "mul.out",
+    "nll_loss_forward.output",
+    "nll_loss_backward.grad_input",
+    "sum.IntList_out",
+)
 # Reuse the existing ATen metadata primitives. These allocate no device data
 # and introduce no numerical implementation or vendor dispatch.
 FLAGGEMS_HCU_METADATA_ADAPTERS = {
@@ -1827,24 +2012,225 @@ FLAGGEMS_REDUCTION_ADAPTERS = {
 _OUT_ADAPTER_MARKER = "// BEGIN GENERATED FLAGGEMS OUT ADAPTERS"
 
 
+def gen_nvidia_native_training_adapters(funcs, signature):
+    lines = [
+        "#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(FLAGOS_ACCEL_CUDA)",
+        "#include <ATen/MemoryOverlap.h>",
+        "#include <ATen/core/Reduction.h>",
+        "#include <ATen/native/CPUFallback.h>",
+        "#include <ATen/native/ReduceOpsUtils.h>",
+        "#include <ATen/native/Resize.h>",
+        "#include <ATen/ops/_log_softmax_backward_data_ops.h>",
+        "#include <ATen/ops/_softmax_backward_data_ops.h>",
+        "#include <ATen/ops/nll_loss_backward_ops.h>",
+        "#include <ATen/ops/nll_loss_forward_ops.h>",
+        "#include <ATen/ops/sum_ops.h>",
+        "#include <limits>",
+        '#include "../fallback.h"',
+        "namespace at::native::flagos {",
+        "namespace {",
+    ]
+    for name, host, slot_type, out, category in (
+        ("nll_loss_forward", "forward", "NllLossNdForwardFn", "output", "tuple_return"),
+        (
+            "nll_loss_backward",
+            "backward",
+            "NllLossNdBackwardFn",
+            "grad_input",
+            "functional_pure",
+        ),
+    ):
+        func = funcs[name]
+        _, result, args = signature(func)
+        lines.append(
+            gen_flaggems_python_kernel(
+                f"{name}.{out}",
+                slot_type,
+                result,
+                args,
+                f"flag_gems.nll_loss_nd_{host}",
+                category,
+                func,
+                typed=True,
+            )
+        )
+    _, forward_result, forward_args = signature(funcs["nll_loss_forward.output"])
+    _, backward_result, backward_args = signature(funcs["nll_loss_backward"])
+    _, backward_out_result, backward_out_args = signature(
+        funcs["nll_loss_backward.grad_input"]
+    )
+    softmax_adapters = []
+    softmax_registrations = []
+    for softmax_op, out, max_rank, dtype_guard in (
+        ("_log_softmax_backward_data.out", "out", 3, "input_dtype != at::kFloat"),
+        (
+            "_softmax_backward_data.out",
+            "grad_input",
+            4,
+            "(input_dtype != at::kFloat && input_dtype != at::kBFloat16)",
+        ),
+    ):
+        _, softmax_result, softmax_args = signature(funcs[softmax_op])
+        fn, dispatcher = schema_to_cpp_name(softmax_op)
+        aten_op = softmax_op.replace(".", "_")
+        name = fn.removeprefix("Priv").removesuffix("DataOutFn") + "OutNvidia"
+        softmax_adapters += [
+            "",
+            f"{softmax_result} {name}({args_decl(softmax_args)}) {{",
+            f"  if (!{fn}Source.Available() || {dtype_guard} ||",
+            f"      grad_output.scalar_type() != input_dtype || output.scalar_type() != input_dtype || {out}.scalar_type() != input_dtype ||",
+            f"      output.device() != grad_output.device() || {out}.device() != output.device() ||",
+            f"      output.dim() < 2 || output.dim() > {max_rank} || !output.is_contiguous() ||",
+            f"      {out}.layout() != at::kStrided || !grad_output.sizes().equals(output.sizes()) ||",
+            "      output.numel() == 0 || output.numel() > std::numeric_limits<int32_t>::max()) {",
+            f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{aten_op}>::call(",
+            f"        grad_output, output, dim, input_dtype, {out});",
+            "  }",
+            f"  at::assert_no_internal_overlap({out});",
+            f"  at::assert_no_overlap({out}, grad_output);",
+            f"  at::assert_no_overlap({out}, output);",
+            f"  if (!{out}.is_contiguous()) {{",
+            "    auto buffer = at::empty(output.sizes(), output.options());",
+            f"    {fn[:-2]}KernelPython(grad_output, output, dim, input_dtype, buffer);",
+            f"    at::native::resize_output({out}, buffer.sizes());",
+            f"    return {out}.copy_(buffer);",
+            "  }",
+            f"  return {fn[:-2]}KernelPython(grad_output, output, dim, input_dtype, {out});",
+            "}",
+        ]
+        softmax_registrations.append(
+            f"REGISTER_IMPL_TO_DISPATCHER({fn}, {dispatcher}, Backend::kFlagGems, {name})"
+        )
+    _, sum_result, sum_args = signature(funcs["sum.IntList_out"])
+    lines += [
+        "",
+        "bool IsNativeMeanLossNvidia(const at::Tensor& self, const at::Tensor& target,",
+        "    const std::optional<at::Tensor>& weight, int64_t reduction, int64_t ignore_index) {",
+        "  // Rank three selects the bounds-masked published NLL kernels.",
+        "  // The rank-two provider's backward writes through ignored indices.",
+        "  return reduction == at::Reduction::Mean && (!weight || !weight->defined()) &&",
+        "      self.dim() == 2 && self.is_contiguous() && self.numel() > 0 &&",
+        "      self.numel() <= std::numeric_limits<int32_t>::max() &&",
+        "      self.scalar_type() == at::kFloat && target.dim() == 1 &&",
+        "      target.size(0) == self.size(0) && target.scalar_type() == at::kLong &&",
+        "      target.device() == self.device() &&",
+        "      ignore_index >= std::numeric_limits<int32_t>::min() &&",
+        "      ignore_index <= std::numeric_limits<int32_t>::max();",
+        "}",
+        "",
+        "void CheckNativeLossTargetsNvidia(const at::Tensor& target, int64_t classes, int64_t ignore_index) {",
+        "  auto invalid = at::logical_and(target.ne(ignore_index),",
+        "      at::logical_or(target.lt(0), target.ge(classes)));",
+        '  TORCH_CHECK_INDEX(!at::any(invalid).item<bool>(), "NLL loss target is out of bounds");',
+        "}",
+        "",
+        f"{forward_result} NllLossMeanForwardOutNvidia({args_decl(forward_args)}) {{",
+        "  if (!NllLossNdForwardFnSource.Available() ||",
+        "      !IsNativeMeanLossNvidia(self, target, weight, reduction, ignore_index) ||",
+        "      output.scalar_type() != self.scalar_type() || output.device() != self.device() ||",
+        "      total_weight.scalar_type() != self.scalar_type() || total_weight.device() != self.device()) {",
+        "    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::nll_loss_forward_output>::call(",
+        "        self, target, weight, reduction, ignore_index, output, total_weight);",
+        "  }",
+        "  at::assert_no_internal_overlap(output);",
+        "  at::assert_no_internal_overlap(total_weight);",
+        "  at::assert_no_overlap(output, self);",
+        "  at::assert_no_overlap(output, target);",
+        "  at::assert_no_overlap(total_weight, self);",
+        "  at::assert_no_overlap(total_weight, target);",
+        "  at::assert_no_overlap(total_weight, output);",
+        "  CheckNativeLossTargetsNvidia(target, self.size(1), ignore_index);",
+        "  auto [loss, count] = NllLossNdForwardKernelPython(",
+        "      self.unsqueeze(-1), target.unsqueeze(-1), std::nullopt, reduction, ignore_index);",
+        "  at::native::resize_output(output, {});",
+        "  at::native::resize_output(total_weight, {});",
+        "  output.copy_(loss.masked_fill(count.eq(0), std::numeric_limits<float>::quiet_NaN()));",
+        "  total_weight.copy_(count);",
+        "  return {output, total_weight};",
+        "}",
+        "",
+        f"{backward_result} NllLossMeanBackwardNvidia({args_decl(backward_args)}) {{",
+        "  if (!NllLossNdBackwardFnSource.Available() ||",
+        "      !IsNativeMeanLossNvidia(self, target, weight, reduction, ignore_index) ||",
+        "      grad_output.numel() != 1 || grad_output.scalar_type() != self.scalar_type() ||",
+        "      grad_output.device() != self.device() || total_weight.numel() != 1 ||",
+        "      total_weight.scalar_type() != self.scalar_type() || total_weight.device() != self.device()) {",
+        "    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::nll_loss_backward>::call(",
+        "        grad_output, self, target, weight, reduction, ignore_index, total_weight);",
+        "  }",
+        "  CheckNativeLossTargetsNvidia(target, self.size(1), ignore_index);",
+        "  return NllLossNdBackwardKernelPython(grad_output, self.unsqueeze(-1), target.unsqueeze(-1),",
+        "      std::nullopt, reduction, ignore_index, total_weight).squeeze(-1);",
+        "}",
+        "",
+        f"{backward_out_result} NllLossMeanBackwardOutNvidia({args_decl(backward_out_args)}) {{",
+        "  if (grad_input.device() != self.device() || grad_input.scalar_type() != self.scalar_type()) {",
+        "    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::nll_loss_backward_grad_input>::call(",
+        "        grad_output, self, target, weight, reduction, ignore_index, total_weight, grad_input);",
+        "  }",
+        "  at::assert_no_internal_overlap(grad_input);",
+        "  at::assert_no_overlap(grad_input, self);",
+        "  at::assert_no_overlap(grad_input, target);",
+        "  at::assert_no_overlap(grad_input, total_weight);",
+        "  at::assert_no_overlap(grad_input, grad_output);",
+        "  auto result = NllLossMeanBackwardNvidia(",
+        "      grad_output, self, target, weight, reduction, ignore_index, total_weight);",
+        "  at::native::resize_output(grad_input, result.sizes());",
+        "  grad_input.copy_(result);",
+        "  return grad_input;",
+        "}",
+        *softmax_adapters,
+        "",
+        f"{sum_result} SumIntlistOutNvidia({args_decl(sum_args)}) {{",
+        "  const auto output_dtype = dtype.value_or(out.scalar_type());",
+        "  if (!SumIntlistOutFnSource.Available() ||",
+        "      (self.scalar_type() != at::kFloat && self.scalar_type() != at::kBFloat16) ||",
+        "      (output_dtype != at::kFloat && output_dtype != at::kBFloat16) ||",
+        "      output_dtype != out.scalar_type() || !out.is_contiguous() || out.device() != self.device() ||",
+        "      (self.numel() != 0 && (!dim || dim->empty()))) {",
+        "    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::sum_IntList_out>::call(",
+        "        self, dim, keepdim, dtype, out);",
+        "  }",
+        "  at::assert_no_internal_overlap(out);",
+        "  at::assert_no_overlap(out, self);",
+        "  if (self.numel() == 0) {",
+        "    const auto axes = at::native::make_dim_mask(dim, self.dim());",
+        "    at::native::resize_reduction_result(out, self, axes, keepdim, output_dtype);",
+        "    if (out.numel() != 0) out.zero_();",
+        "    return out;",
+        "  }",
+        "  return SumIntlistOutKernelPython(self, dim, keepdim, output_dtype, out);",
+        "}",
+        "}",
+        *softmax_registrations,
+        "REGISTER_IMPL_TO_DISPATCHER(NllLossForwardOutputFn, nll_loss_forward_output_dispatcher, Backend::kFlagGems, NllLossMeanForwardOutNvidia)",
+        "REGISTER_IMPL_TO_DISPATCHER(NllLossBackwardGradInputFn, nll_loss_backward_grad_input_dispatcher, Backend::kFlagGems, NllLossMeanBackwardOutNvidia)",
+        "REGISTER_IMPL_TO_DISPATCHER(SumIntlistOutFn, sum_intlist_out_dispatcher, Backend::kFlagGems, SumIntlistOutNvidia)",
+        "} // namespace at::native::flagos",
+        "#endif",
+    ]
+    return lines
+
+
 def gen_flaggems_out_adapters(funcs):
+    def signature(func):
+        with local.parametrize(
+            use_const_ref_for_mutable_tensors=func.use_const_ref_for_mutable_tensors,
+            use_ilistref_for_tensor_lists=not should_use_arrayref(func),
+        ):
+            return unified_sig(func)
+
     lines = [
         _OUT_ADAPTER_MARKER,
-        "#if defined(FLAGOS_FLAGGEMS_PYTHON)",
+        "#if defined(FLAGOS_FLAGGEMS_PYTHON) && (defined(USE_DCU) || defined(USE_ILUVATAR))",
         "#include <ATen/MemoryOverlap.h>",
+        "#include <ATen/native/CPUFallback.h>",
         "#include <ATen/native/Resize.h>",
+        '#include "../fallback.h"',
         "namespace at::native::flagos {",
     ]
     for op, functional in FLAGGEMS_OUT_ADAPTERS.items():
         out_func, source_func = funcs[op], funcs[functional]
-
-        def signature(func):
-            with local.parametrize(
-                use_const_ref_for_mutable_tensors=func.use_const_ref_for_mutable_tensors,
-                use_ilistref_for_tensor_lists=not should_use_arrayref(func),
-            ):
-                return unified_sig(func)
-
         _, result_type, args = signature(out_func)
         _, source_result, source_args = signature(source_func)
         outs = list(out_func.func.arguments.out)
@@ -1857,11 +2243,9 @@ def gen_flaggems_out_adapters(funcs):
         fn_type, dispatcher = schema_to_cpp_name(op)
         _, source_dispatcher = schema_to_cpp_name(functional)
         kernel = fn_type[:-2] + "Adapter"
-        guard = "defined(USE_DCU)"
-        if op in NVIDIA_OUT_ADAPTERS:
-            guard += " || defined(FLAGOS_ACCEL_CUDA)"
+        if op != "add.out":
+            lines.append("#if defined(USE_DCU)")
         lines += [
-            f"#if {guard}",
             f"{result_type} {kernel}({args_decl(args)}) {{",
             f"  at::assert_no_internal_overlap({out_name});",
         ]
@@ -1889,13 +2273,160 @@ def gen_flaggems_out_adapters(funcs):
             f"  return {out_name};",
             "}",
             f"REGISTER_IMPL_TO_DISPATCHER({fn_type}, {dispatcher}, Backend::kFlagGems, {kernel})",
-            "#endif",
         ]
+        if op != "add.out":
+            lines.append("#endif")
+
+    # Align the published provider's device check with PrivateUse1.
+    # Its scatter accumulates in FP32. Keep the dtype and layout envelope measured
+    # against the vendor and use the previous fallback for other inputs.
+    op = "embedding_dense_backward"
+    func = funcs[op]
+    fn_type, dispatcher = schema_to_cpp_name(op)
+    _, result, args = signature(func)
+    call_args = ", ".join(n for _, n in args)
     lines += [
         "} // namespace at::native::flagos",
         "#endif",
-        "// END GENERATED FLAGGEMS OUT ADAPTERS",
+        "#if defined(FLAGOS_FLAGGEMS_PYTHON) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_DCU) || defined(USE_MUSA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_ILUVATAR) || defined(USE_KUNLUNXIN) || (defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)))",
+        "#include <ATen/native/CPUFallback.h>",
+        "#include <ATen/ops/embedding_dense_backward_ops.h>",
+        '#include "../fallback.h"',
+        "#if defined(USE_KUNLUNXIN)",
+        '#include "../embedding_utils.h"',
+        "#endif",
+        "namespace at::native::flagos {",
+        gen_flaggems_python_kernel(
+            op,
+            fn_type,
+            result,
+            args,
+            f"flag_gems.{op}",
+            "functional_pure",
+            func,
+            [],
+            typed=True,
+        ),
+        f"{result} EmbeddingDenseBackwardNative({args_decl(args)}) {{",
+        "  auto dtype = grad_output.scalar_type();",
+        "  auto index_dtype = indices.scalar_type();",
+        "  if ((dtype != at::kFloat && dtype != at::kBFloat16) ||",
+        "#if !defined(USE_DCU)",
+        "      !EmbeddingDenseBackwardFnSource.Available() ||",
+        "#endif",
+        "      (index_dtype != at::kInt && index_dtype != at::kLong) ||",
+        "      grad_output.device() != indices.device() ||",
+        "      grad_output.layout() != at::kStrided || indices.layout() != at::kStrided ||",
+        "      grad_output.dim() < 2 || grad_output.numel() == 0 || num_weights <= 0",
+        "#if defined(USE_KUNLUNXIN)",
+        "      // The published frequency division changes BF16 accumulation rounding.",
+        "      || (scale_grad_by_freq && dtype == at::kBFloat16)",
+        "      || !grad_output.sizes().slice(0, grad_output.dim() - 1).equals(indices.sizes())",
+        "      || grad_output.numel() > INT32_MAX || num_weights > INT32_MAX / grad_output.size(-1)",
+        "#endif",
+        "      ) {",
+        f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{op}>::call({call_args});",
+        "  }",
+        "#if defined(USE_KUNLUNXIN)",
+        "  if (scale_grad_by_freq && index_dtype == at::kLong &&",
+        "      !grad_output.is_neg() && !indices.is_neg() && padding_idx >= -1 && padding_idx < num_weights) {",
+        f"    if (const auto vendor = {dispatcher}.KernelFor(Backend::kKunlunxin))",
+        f"      return vendor({call_args});",
+        "  }",
+        "  // Apply the frequency before the published unscaled accumulation.",
+        "  auto grad = grad_output;",
+        "  if (scale_grad_by_freq) {",
+        "    grad = ScaleEmbeddingGradByFrequency(",
+        "        grad_output, indices, [&](const at::Tensor& ones) {",
+        f"          return {fn_type[:-2]}KernelPython(ones, indices, num_weights, -1, false);",
+        "        });",
+        "  }",
+        f"  auto result = {fn_type[:-2]}KernelPython(grad, indices, num_weights, padding_idx, false);",
+        "  // The published XPU reduction can leave the padding row populated.",
+        "  if (padding_idx >= 0 && padding_idx < num_weights) {",
+        "    const auto offset = result.storage_offset() + padding_idx * result.stride(0);",
+        "    result.as_strided({result.size(1)}, {result.stride(1)}, offset).zero_();",
+        "  }",
+        "  return result;",
+        "#else",
+        f"  return {fn_type[:-2]}KernelPython({call_args});",
+        "#endif",
+        "}",
+        f"REGISTER_IMPL_TO_DISPATCHER({fn_type}, {dispatcher}, Backend::kFlagGems, EmbeddingDenseBackwardNative)",
     ]
+    lines += [
+        "} // namespace at::native::flagos",
+        "#endif",
+        "#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_ILUVATAR)",
+        "#include <ATen/MemoryOverlap.h>",
+        "#include <ATen/native/CPUFallback.h>",
+        "#include <ATen/native/Resize.h>",
+        "#include <ATen/ops/mean_ops.h>",
+        '#include "../fallback.h"',
+        "namespace at::native::flagos {",
+    ]
+    _, result, args = signature(funcs["mean.out"])
+    # Keep the measured last-axis FlagGems reduction separate from the known
+    # empty and non-inner failures in this vendor's published cohort.
+    lines += [
+        f"{result} MeanOutIluvatar({args_decl(args)}) {{",
+        "  const auto input_dtype = self.scalar_type();",
+        "  if (!dim || dim->size() != 1 || self.dim() == 0 ||",
+        "      ((*dim)[0] != -1 && (*dim)[0] != self.dim() - 1) ||",
+        "      self.numel() == 0 || !self.is_contiguous() ||",
+        "      (input_dtype != at::kFloat && input_dtype != at::kBFloat16) ||",
+        "      dtype.value_or(input_dtype) != input_dtype ||",
+        "      out.scalar_type() != input_dtype || out.device() != self.device()) {",
+        "    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::mean_out>::call(",
+        "        self, dim, keepdim, dtype, out);",
+        "  }",
+        "  at::assert_no_internal_overlap(out);",
+        "  at::assert_no_partial_overlap(out, self);",
+        "  auto result = MeanDimKernelPython(self, dim, keepdim, dtype);",
+        "  at::native::resize_output(out, result.sizes());",
+        "  out.copy_(result);",
+        "  return out;",
+        "}",
+        "REGISTER_IMPL_TO_DISPATCHER(MeanOutFn, mean_out_dispatcher, Backend::kFlagGems, MeanOutIluvatar)",
+        "} // namespace at::native::flagos",
+        "#endif",
+    ]
+    lines += gen_nvidia_native_training_adapters(funcs, signature)
+    _, result, args = signature(funcs["mul.out"])
+    lines += [
+        "#if defined(FLAGOS_FLAGGEMS_PYTHON) && (defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_MUSA) || defined(USE_ILUVATAR) || defined(USE_KUNLUNXIN) || (defined(USE_MACA) && defined(FLAGOS_NATIVE_HOSTS)))",
+        "#include <ATen/MemoryOverlap.h>",
+        "#include <ATen/native/CPUFallback.h>",
+        "#include <ATen/native/Resize.h>",
+        "#include <ATen/ops/mul_ops.h>",
+        '#include "../fallback.h"',
+        "namespace at::native::flagos {",
+        f"{result} MulOutFlagGems({args_decl(args)}) {{",
+        "  const bool self_on_device = self.device() == out.device();",
+        "  const auto& tensor = self_on_device ? self : other;",
+        "  const auto& rhs = self_on_device ? other : self;",
+        "  const bool cpu_scalar = rhs.device().is_cpu() && rhs.dim() == 0;",
+        "  const auto dtype = out.scalar_type();",
+        "  if (!MulTensorFnSource.Available() || tensor.device() != out.device() ||",
+        "      (!cpu_scalar && (rhs.device() != out.device() || rhs.scalar_type() != tensor.scalar_type())) ||",
+        "      at::result_type(self, other) != dtype || (dtype != at::kFloat && dtype != at::kHalf &&",
+        "          dtype != at::kBFloat16 && dtype != at::kLong && dtype != at::kBool)) {",
+        "    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::mul_out>::call(",
+        "        self, other, out);",
+        "  }",
+        "  at::assert_no_internal_overlap(out);",
+        "  at::assert_no_partial_overlap(out, self);",
+        "  at::assert_no_partial_overlap(out, other);",
+        "  auto result = MulTensorKernelPython(tensor, rhs);",
+        "  at::native::resize_output(out, result.sizes());",
+        "  out.copy_(result);",
+        "  return out;",
+        "}",
+        "REGISTER_IMPL_TO_DISPATCHER(MulOutFn, mul_out_dispatcher, Backend::kFlagGems, MulOutFlagGems)",
+        "} // namespace at::native::flagos",
+        "#endif",
+    ]
+    lines.append("// END GENERATED FLAGGEMS OUT ADAPTERS")
     return "\n".join(lines) + "\n"
 
 
@@ -1921,8 +2452,19 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
     ):
         if header not in refreshed:
             refreshed = refreshed.replace(include, include + "\n" + header, 1)
+    for native_include in (
+        "#include <ATen/ScalarOps.h>",
+        "#include <ATen/ops/constant_pad_nd_native.h>",
+        "#include <ATen/ops/full_native.h>",
+        "#include <ATen/ops/result_type.h>",
+    ):
+        if native_include not in refreshed:
+            refreshed = refreshed.replace(
+                '#include "ops.h"', '#include "ops.h"\n' + native_include, 1
+            )
     for op, category, keywords in (
         ("add.Tensor", "functional_pure", {"alpha"}),
+        ("div.Tensor", "functional_pure", set()),
         ("addmm", "functional_pure", {"beta", "alpha"}),
         ("addmm.out", "out_variant_gemskwout", {"beta", "alpha", "out"}),
         ("constant_pad_nd", "functional_pure", set()),
@@ -1933,8 +2475,19 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         ("scatter_add_", "inplace", set()),
         ("mul.Tensor", "functional_pure", set()),
         ("sort.stable", "tuple_return", {"stable", "dim", "descending"}),
+        ("add_.Tensor", "inplace", {"alpha"}),
+        ("sub.Tensor", "functional_pure", {"alpha"}),
+        ("sum.dim_IntList", "functional_pure", {"dtype"}),
         ("cat", "tensorlist_dim", set()),
+        ("mm", "functional_pure", set()),
+        ("bmm", "functional_pure", set()),
         ("pow.Tensor_Scalar", "functional_pure", set()),
+        ("full", "factory", {"size", "fill_value"}),
+        ("index_copy_", "inplace", set()),
+        ("nll_loss_backward", "functional_pure", set()),
+        ("_log_softmax_backward_data", "functional_pure", {"input_dtype"}),
+        ("slice_backward", "functional_pure", set()),
+        ("where.self", "functional_pure", set()),
         *((op, "functional_pure", set()) for op in FLAGGEMS_HCU_METADATA_ADAPTERS),
         ("argmin", "functional_pure", set()),
         ("max.dim", "tuple_return", set()),
@@ -1956,6 +2509,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
             "flag_gems."
             + {
                 "add.Tensor": "add",
+                "div.Tensor": "true_divide",
                 "addmm": "addmm",
                 "addmm.out": "addmm_out",
                 "constant_pad_nd": "constant_pad_nd",
@@ -1966,8 +2520,19 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "scatter_add_": "scatter_add_",
                 "mul.Tensor": "mul",
                 "sort.stable": "sort_stable",
+                "add_.Tensor": "add_",
+                "sub.Tensor": "sub",
+                "sum.dim_IntList": "sum_dim",
                 "cat": "cat",
+                "mm": "mm",
+                "bmm": "bmm",
                 "pow.Tensor_Scalar": "pow_tensor_scalar",
+                "full": "full",
+                "index_copy_": "index_copy_",
+                "nll_loss_backward": "nll_loss_backward",
+                "_log_softmax_backward_data": "log_softmax_backward",
+                "slice_backward": "slice_backward",
+                "where.self": "where_self",
                 "_unsafe_view": "_unsafe_view",
                 "transpose.int": "transpose",
                 "unsqueeze": "unsqueeze",
@@ -1979,14 +2544,30 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
             op, fn_type, result, args, host, category, func, kwargs, typed=True
         )
         pattern = rf"(?:static TypedSourceSlot {fn_type}Source\([^\n]+\);\n)?{re.escape(result)} {fn_type[:-2]}KernelPython\([^\n]*\) \{{.*?\n\}}"
+        if op == "nll_loss_backward":
+            declaration = f"{result} NllLossMeanBackwardNvidia({args_decl(args)});"
+            guard = f"#if defined(FLAGOS_ACCEL_CUDA)\n{declaration}\n#endif\n"
+            pattern = "(?:" + re.escape(guard) + ")?" + pattern
         refreshed, count = re.subn(pattern, lambda match: kernel, refreshed, flags=re.S)
         if count != 1:
-            raise ValueError(f"cannot uniquely refresh the FlagGems adapter for {op}")
-    expected = (
-        refreshed.split(_OUT_ADAPTER_MARKER, 1)[0].rstrip()
-        + "\n\n"
-        + gen_flaggems_out_adapters(funcs)
-    )
+            raise ValueError(f"cannot uniquely refresh generated source route: {op}")
+    prefix = refreshed.split(_OUT_ADAPTER_MARKER, 1)[0].rstrip()
+    for op in (
+        "_log_softmax_backward_data.out",
+        "_softmax_backward_data.out",
+        "sum.IntList_out",
+    ):
+        fn, dispatcher = schema_to_cpp_name(op)
+        registration = (
+            f"REGISTER_IMPL_TO_DISPATCHER({fn}, {dispatcher}, Backend::kFlagGems, "
+            f"{fn[:-2]}KernelPython)"
+        )
+        guarded = f"#if !defined(FLAGOS_ACCEL_CUDA)\n{registration}\n#endif"
+        if guarded not in prefix:
+            if prefix.count(registration) != 1:
+                raise ValueError(f"cannot uniquely guard existing out route: {op}")
+            prefix = prefix.replace(registration, guarded)
+    expected = prefix + "\n\n" + gen_flaggems_out_adapters(funcs)
     if check and current != expected:
         raise SystemExit("stale FlagGems out adapters")
     if not check and current != expected:
@@ -2566,11 +3147,27 @@ def main():
     )
     funcs = {str(f.func.name): f for f in nf.native_functions}
     if "--out-adapters-only" in sys.argv or "--check-out-adapters" in sys.argv:
+        check = "--check-out-adapters" in sys.argv
         update_flaggems_out_adapters(
             out_dir / "flaggems_python_kernels.cc",
             funcs,
-            check="--check-out-adapters" in sys.argv,
+            check=check,
         )
+        conf = repo_root / "torch_fl/configs/backends_nvidia.conf"
+        current = conf.read_text()
+        expected = current
+        for op in NVIDIA_NATIVE_TRAINING_ADAPTERS:
+            expected, count = re.subn(
+                rf"(?m)^{re.escape(op)} = (?:none|flaggems)(?=[ \t]*(?:;|#|$))",
+                f"{op} = flaggems",
+                expected,
+            )
+            if count != 1:
+                raise ValueError(f"cannot uniquely refresh NVIDIA training route: {op}")
+        if current != expected:
+            if check:
+                raise SystemExit("stale NVIDIA out routes")
+            conf.write_text(expected)
         return
 
     # Ops the templates cannot compile yet; skipped -> fall through to cpu_fallback.
@@ -2759,6 +3356,9 @@ def main():
         '#include "../device_boxing.h"',
         '#include "../backends/flagos/python_op_caller.h"',
         '#include "../backends/flagos/typed_source_host.h"',
+        "#if defined(FLAGOS_NATIVE_THEAD_VENDOR)",
+        '#include "../backends/flagos/thead_vendor_guards.h"',
+        "#endif",
         "",
         "namespace at::native::flagos {",
         "namespace {",
@@ -3042,7 +3642,6 @@ def main():
             "lcm",
             "lcm_",
             "prod.dim_int",
-            "sum.IntList_out",
             "sum.dim_IntList",
             # Unbounded recursion (flag_gems falls back to torch.<op>).
             "unique_consecutive",
@@ -3050,8 +3649,6 @@ def main():
             # failure: wrong out dtype, missing out argument, destroyed CUDA
             # context, unsupported order range, malformed reverse-layout shape.
             "_cdist_backward",
-            "_log_softmax_backward_data.out",
-            "_softmax_backward_data.out",
             "cosh.out",
             "dequantize.self",
             "elu_backward",
@@ -3143,7 +3740,7 @@ def main():
         for op in sorted(config_ops):
             if op == "scaled_dot_product_attention":
                 backend = fallback_key
-            elif op in NVIDIA_OUT_ADAPTERS:
+            elif op in NVIDIA_NATIVE_TRAINING_ADAPTERS:
                 backend = "flaggems"
             elif op in metadata_route_overrides:
                 backend = fallback_key

@@ -16,6 +16,7 @@
 
 import torch
 
+from ... import _env
 from ..._platform import platform_for
 from . import runtime
 
@@ -64,7 +65,8 @@ def launch_patches_apply(accelerator: str):
     cheaper.
     """
     return (
-        platform_for(accelerator) in _FLAGGEMS_LAUNCH_PATCH_BUILDS
+        not _env.flag("FLAGOS_NATIVE_HOST_REQUIRE_DEVICE_ARTIFACTS")
+        and platform_for(accelerator) in _FLAGGEMS_LAUNCH_PATCH_BUILDS
         and runtime.routes_to_flaggems()
     )
 

@@ -19,8 +19,15 @@
 #include <c10/core/DeviceGuard.h>
 #include <flagos.h>
 
+#include <cstdint>
 #include <optional>
 #include "device_boxing.h"
+#if defined(FLAGOS_NATIVE_HOSTS) && ( \
+    defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_PPU) || defined(USE_DCU) || \
+    defined(USE_KUNLUNXIN) || defined(USE_ILUVATAR))
+#define FLAGOS_ASYNC_CONTIGUOUS_COPY 1
+#include "runtime/allocator/caching_device_allocator.h"
+#endif
 // ascend_copy.h and gcu_copy.h are included unconditionally: the #else
 // branches below cover TsingMicro, GCU and MUSA-without-mudnn as well as
 // Ascend, and these headers supply inline no-op fallbacks for every platform
@@ -28,6 +35,7 @@
 // pulled in only for the platform that defines USE_KUNLUNXIN, matching how
 // contiguous_ops.cc includes it.
 #include "backends/ascend/ascend_copy.h"
+#include "backends/cambricon/cambricon_copy.h"
 #include "backends/enflame/gcu_copy.h"
 #if defined(USE_KUNLUNXIN)
 #include "backends/kunlunxin/kunlunxin_copy.h"
@@ -37,6 +45,9 @@
 #endif
 #if defined(USE_MPS)
 #include "backends/apple/mps_copy.h"
+#endif
+#if defined(FLAGOS_CAMBRICON_KERNEL)
+#include "backends/cambricon/cambricon_common.h"
 #endif
 
 #if defined(FLAGOS_MUSA_KERNEL)
@@ -79,7 +90,6 @@
 #define FLAGOS_COPY_CUDA_ABI 0
 #endif
 
-
 #if defined(FLAGOS_GEMS_DEVICE_COPY)
 #include "generated/flaggems_source_bridges.h"
 #endif
@@ -119,6 +129,12 @@ static bool MayOverlapForGemsCopy(const at::Tensor& src, const at::Tensor& dst) 
   return true;
 #endif
 }
+
+#if defined(USE_TSINGMICRO)
+static bool TsingMicroGemsCast(at::ScalarType source, at::ScalarType target) {
+  return source == at::kLong && target == at::kFloat;
+}
+#endif
 #endif
 
 bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
@@ -131,6 +147,15 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
       MayOverlapForGemsCopy(src, dst)) return false;
   const auto src_type = src.scalar_type();
   const auto dst_type = dst.scalar_type();
+#if defined(USE_TSINGMICRO)
+  if (!TsingMicroGemsCast(src_type, dst_type) || !src.is_contiguous() ||
+      !dst.is_contiguous() || !src.sizes().equals(dst.sizes())) {
+    return false;
+  }
+#endif
+#if defined(FLAGOS_ACCEL_ILUVATAR)
+  if (src_type != dst_type) return false;
+#endif
   auto storage_type = src_type;
   if (src_type == dst_type) {
     // A same-dtype copy can use a supported view of identical-width storage.
@@ -177,6 +202,40 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
 }
 
 namespace {
+
+#if defined(FLAGOS_ASYNC_CONTIGUOUS_COPY)
+bool TryAsyncContiguousCopy(
+    const at::Tensor& dst, const at::Tensor& src, size_t nbytes) {
+  if (dst.device() != src.device() || dst.is_alias_of(src) ||
+      !c10::flagos::CachingDeviceAllocator::is_enabled()) {
+    return false;
+  }
+  auto* allocator = c10::flagos::GetCachingAllocator();
+  const auto& input = src.storage().data_ptr();
+  const auto& output = dst.storage().data_ptr();
+  if (!allocator->owns_data_ptr(input) || !allocator->owns_data_ptr(output)) {
+    return false;
+  }
+  c10::impl::VirtualGuardImpl impl(c10::kPrivateUse1);
+  c10::OptionalDeviceGuard guard;
+  if (impl.getDevice() != src.device()) guard.reset_device(src.device());
+  auto stream = ::GetCurrentStreamForDevice(src.device().index());
+  if (!stream) return false;
+  TORCH_CHECK(
+      ::MemcpyAsync(dst.data_ptr(), src.data_ptr(), nbytes, MemcpyDeviceToDevice,
+                    stream) == Success,
+      "flagos: asynchronous device-to-device copy failed");
+  try {
+    allocator->record_stream(input, stream);
+    allocator->record_stream(output, stream);
+  } catch (...) {
+    // Keep both buffers alive until the already submitted copy completes.
+    ::StreamSynchronize(stream);
+    throw;
+  }
+  return true;
+}
+#endif
 
 #if defined(USE_MPS)
 // An MPS tensor's data_ptr() is not guaranteed to expose host-readable bytes,
@@ -246,7 +305,19 @@ class BlockingCopyGuard {
 
  private:
   void DrainCurrentQueue() {
-#if   defined(USE_DCU)
+#if defined(USE_ASCEND) || (defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS))
+    // Blocking ACL copies drain the default queue. CUDA's blocking copies
+    // are ordered on the legacy default queue used by the NVIDIA native host.
+    // Wait on a selected side stream before transferring its bytes.
+    int device = -1;
+    if (::GetDevice(&device) == Success) {
+      auto stream = ::GetCurrentStreamForDevice(device);
+      if (stream && stream != ::GetDefaultStreamForDevice(device)) {
+        TORCH_CHECK(::StreamSynchronize(stream) == Success,
+                    "flagos: failed to synchronize the copy stream");
+      }
+    }
+#elif defined(USE_DCU)
     // DCU shares the vendor's streams, so it needs this barrier just as much as
     // the other CUDA-family backends -- but it cannot ask which stream is
     // current (no c10::cuda symbols in a hipified wheel; see the guard above).
@@ -282,13 +353,11 @@ class BlockingCopyGuard {
                 "flagos: could not resolve the device for a blocking copy");
     TORCH_CHECK(::StreamSynchronize(GetCurrentStreamForDevice(device)) == Success,
                 "flagos: could not synchronize the current copy stream");
-#elif defined(USE_ILUVATAR)
-    // iluvatar owns its streams, so the queue every producer submits to is
-    // reachable directly. The guard above selected *this tensor's* device
-    // before this runs, so the current device is the one to ask about -- the
-    // same assumption the MUSA arm makes about its current stream. Waiting
-    // on that stream is what the CUDA arm gets from c10::cuda's current stream.
-    // Only reached on the blocking-copy paths.
+#elif defined(USE_ILUVATAR) || defined(USE_CAMBRICON)
+    // These runtimes own the device queues used by native operators. Cambricon
+    // creates an explicit CNRT queue even for its default FlagOS stream, so a
+    // blocking cnrtMemcpy can read a scalar before that queue has produced it.
+    // The guard above selected the tensor's device before the stream lookup.
     int device = 0;
     if (::GetDevice(&device) == Success) {
       Stream_t stream = GetCurrentStreamForDevice(device);
@@ -438,7 +507,10 @@ bool cast_needs_cpu_roundtrip(c10::ScalarType src, c10::ScalarType dst) {
 void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
   if (TryGemsDeviceCopy(src, dst)) return;
   TORCH_CHECK(CpuFallbackAllowed(),
-              "native FlagGems hosts do not permit CPU fallback: device copy/cast");
+              "native FlagGems hosts do not permit CPU fallback: device copy/cast ",
+              src.scalar_type(), " sizes=", src.sizes(), " strides=", src.strides(),
+              " to ", dst.scalar_type(), " sizes=", dst.sizes(),
+              " strides=", dst.strides());
   at::Tensor src_contig = src.is_contiguous()
       ? src
       : at::native::flagos::contiguous(src, c10::MemoryFormat::Contiguous);
@@ -524,7 +596,12 @@ void BlockingMemcpy(
 void CopySameDevice(const at::Tensor& src, const at::Tensor& dst) {
   const size_t nbytes = src.numel() * src.element_size();
   if (nbytes == 0) return;
-#if defined(FLAGOS_ACCEL_CUDA) || defined(USE_DCU) || defined(USE_MUSA)
+#if defined(USE_ASCEND)
+  if (ascend::TryAsyncContiguousCopy(dst, src, nbytes)) return;
+#elif defined(FLAGOS_ASYNC_CONTIGUOUS_COPY)
+  if (TryAsyncContiguousCopy(dst, src, nbytes)) return;
+#endif
+#if defined(USE_DCU) || defined(USE_MUSA)
   // The synchronous runtime spelling can enqueue D2D work on the legacy queue.
   // Put the copy between its producer and consumer on the tensor's stream.
   const c10::DeviceGuard guard(src.device());
@@ -591,16 +668,23 @@ at::Tensor _copy_from(
 
   // Both flagos tensors: copy on-device.
   if (self.is_privateuseone() && dst.is_privateuseone()) {
+    if (self.is_same(dst)) return dst;
 #if defined(USE_DCU)
-    // The published copy host orders against the current HCU stream. Prefer it
-    // for same-device copies, including contiguous copies, before the blocking
-    // memcpy path drains the whole device.
+    // The published copy host is ordered on the current stream. Same-device
+    // copies can submit there directly without draining the whole device.
     if (TryGemsDeviceCopy(self, dst)) return dst;
 #endif
-    if (self.is_contiguous() && dst.is_contiguous() &&
+    bool same_physical_order = self.is_contiguous() && dst.is_contiguous();
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+    same_physical_order = same_physical_order ||
+        (self.device() == dst.device() && self.is_non_overlapping_and_dense() &&
+         self.strides() == dst.strides() && !self.is_alias_of(dst) &&
+         !dst.is_conj() && !dst.is_neg());
+#endif
+    if (same_physical_order &&
         self.sizes().equals(dst.sizes()) &&
         self.scalar_type() == dst.scalar_type()) {
-      // Fast path: both contiguous, same shape and dtype → direct memcpy.
+      // Matching physical layouts, shape and dtype permit a direct memcpy.
       if (self.device() == dst.device()) {
         CopySameDevice(self, dst);
       } else if (self.numel() > 0) {
@@ -609,7 +693,7 @@ at::Tensor _copy_from(
             self.numel() * self.element_size(), self, dst);
       }
     } else {
-#if defined(FLAGOS_ACCEL_CUDA)
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
       if (TryGemsDeviceCopy(self, dst)) return dst;
 #endif
 #if defined(FLAGOS_MUSA_KERNEL)
@@ -660,13 +744,11 @@ at::Tensor _copy_from(
       const bool copied_on_device = gcu::StridedCopy(dst, self);
 #elif defined(USE_KUNLUNXIN)
       const bool copied_on_device = kunlunxin::StridedCopy(dst, self);
-#elif defined(USE_CAMBRICON)
-      // Cambricon has no CNNL strided-copy kernel yet (there is no native .inc --
-      // see the USE_CAMBRICON arm in register.cc), so there is nothing to call
-      // on device: report false and let the CPU round-trip below serve the copy.
-      // Correct but slow; it is the same starting point every native backend
-      // used before its copy kernel landed.
-      const bool copied_on_device = false;
+#elif defined(USE_ILUVATAR)
+      const bool copied_on_device = TryGemsDeviceCopy(self, dst);
+#elif defined(FLAGOS_CAMBRICON_KERNEL)
+      const bool copied_on_device = cambricon::StridedCopy(dst, self) ||
+          cambricon::DtypeCast(self, dst.scalar_type(), dst).defined();
 #else
       const bool copied_on_device = ascend::StridedCopy(dst, self);
 #endif
@@ -886,14 +968,38 @@ at::Tensor _to_copy(
     return empty_for_copy(self, self.options().device(device).dtype(dtype), memory_format);
   }
 
-#if (defined(USE_DCU) || defined(FLAGOS_ACCEL_CUDA)) && defined(FLAGOS_GEMS_DEVICE_COPY)
-  if (self.is_privateuseone() && device == self.device() && dtype != self.scalar_type() &&
+#if defined(FLAGOS_GEMS_DEVICE_COPY) && (defined(USE_DCU) || defined(USE_TSINGMICRO) || \
+    (defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)))
+#if defined(USE_TSINGMICRO)
+  const bool direct_gems_cast = self.is_contiguous() && TsingMicroGemsCast(self.scalar_type(), dtype);
+  const bool supported_copy_format = direct_gems_cast &&
+      (memory_format == c10::MemoryFormat::Preserve ||
+       memory_format == c10::MemoryFormat::Contiguous);
+#else
+  constexpr bool supported_copy_format = true;
+#endif
+  if (supported_copy_format &&
+      self.is_privateuseone() && device == self.device() && dtype != self.scalar_type() &&
       !self.is_conj() && !self.is_neg() && !self.has_names() &&
       self.numel() > 0 && self.numel() <= INT32_MAX &&
       GemsCopyTypes(self.scalar_type(), dtype)) {
-    // Allocate once, retaining ATen's Preserve/explicit-format rules, then
-    // launch the original copy host on the source strides without a gather.
-    at::Tensor converted = memory_format == c10::MemoryFormat::Preserve &&
+    // Match empty_like's dense Preserve case directly. Let empty_like infer
+    // the strides of gapped views and validate explicit formats.
+    auto converted = memory_format == c10::MemoryFormat::Preserve &&
+            self.is_non_overlapping_and_dense()
+        ? at::native::flagos::empty_strided(
+              self.sizes(), self.strides(), dtype, self.layout(), device, false)
+        : at::empty_like(self, self.options().dtype(dtype), memory_format);
+    if (TryGemsDeviceCopy(self, converted)) return converted;
+  }
+#endif
+
+#if defined(USE_ASCEND) && defined(FLAGOS_NATIVE_HOSTS)
+  if (self.is_privateuseone() && self.device() == device && !self.is_contiguous() &&
+      !self.is_neg() && !self.is_conj() && !self.has_names() && self.dim() <= 8 &&
+      ((self.scalar_type() == at::kBFloat16 && dtype == at::kFloat) ||
+       (self.scalar_type() == at::kFloat && dtype == at::kBFloat16))) {
+    auto converted = memory_format == c10::MemoryFormat::Preserve &&
             self.is_non_overlapping_and_dense()
         ? at::native::flagos::empty_strided(self.sizes(), self.strides(), dtype,
               self.layout(), device, false)
@@ -901,7 +1007,7 @@ at::Tensor _to_copy(
               self.layout(), device, false,
               memory_format == c10::MemoryFormat::Preserve
                   ? c10::MemoryFormat::Contiguous : memory_format);
-    if (TryGemsDeviceCopy(self, converted)) return converted;
+    if (ascend::StridedCopy(converted, self)) return converted;
   }
 #endif
 
@@ -974,10 +1080,7 @@ at::Tensor _to_copy(
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
     defined(USE_ILUVATAR) || defined(USE_MPS) || defined(USE_CAMBRICON)
-      // No CUDA runtime on these backends, so the CUDA TensorIterator cast
-      // below is unavailable. Cambricon takes the CPU round-trip arm below: it
-      // has no CNNL cast kernel yet, which is the same starting point TsingMicro
-      // and BPU are on.
+      // Backends without the CUDA runtime use their device cast entry points.
 #ifdef USE_ASCEND
       // Ascend casts on-device via aclnnCast, avoiding the D2H->CPU->H2D
       // round-trip that dominated HF RMSNorm (two fp16<->fp32 casts per layer).
@@ -1004,6 +1107,12 @@ at::Tensor _to_copy(
       // declines pairs its kernel was measured wrong for, and those keep the
       // CPU round trip below.
       result = iluvatar::DtypeCast(self_contig, dtype);
+#endif
+#ifdef USE_MPS
+      result = mps::CastFloatTensor(self_contig, dtype);
+#endif
+#ifdef FLAGOS_CAMBRICON_KERNEL
+      result = cambricon::DtypeCast(self_contig, dtype);
 #endif
 #ifdef FLAGOS_MUSA_KERNEL
       // MUSA casts on-device through mudnn's Unary::CAST. That mode maps a

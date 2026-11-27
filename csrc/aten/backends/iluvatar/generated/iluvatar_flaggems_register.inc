@@ -122,7 +122,7 @@
 //   - view_as_real
 //   - where.self_out
 //
-// Total: 585 ops registered here, 9 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 589 ops registered here, 9 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -187,6 +187,7 @@
   m.impl("adaptive_max_pool2d_backward", WrapperAdaptiveMaxPool2dBackward);
   m.impl("adaptive_max_pool3d", WrapperAdaptiveMaxPool3d);
   m.impl("add.Tensor", WrapperAddTensor);
+  m.impl("add.out", WrapperAddOut);
   m.impl("addbmm", WrapperAddbmm);
   m.impl("addbmm_", WrapperAddbmmInplace);
   m.impl("addcdiv", WrapperAddcdiv);
@@ -317,6 +318,7 @@
   m.impl("elu_", WrapperEluInplace);
   m.impl("elu_backward", WrapperEluBackward);
   m.impl("embedding", WrapperEmbedding);
+  m.impl("embedding_dense_backward", WrapperEmbeddingDenseBackward);
   m.impl("embedding_renorm_", WrapperEmbeddingRenormInplace);
   m.impl("empty_permuted", WrapperEmptyPermuted);
   m.impl("eq.Scalar", WrapperEqScalar);
@@ -508,6 +510,7 @@
   m.impl("max_pool3d_with_indices_backward", WrapperMaxPool3dWithIndicesBackward);
   m.impl("max_unpool2d", WrapperMaxUnpool2d);
   m.impl("mean", WrapperMean);
+  m.impl("mean.out", WrapperMeanOut);
   m.impl("median", WrapperMedian);
   m.impl("median.dim", WrapperMedianDim);
   m.impl("min", WrapperMin);
@@ -519,6 +522,7 @@
   m.impl("mode", WrapperMode);
   m.impl("mse_loss", WrapperMseLoss);
   m.impl("mul.Tensor", WrapperMulTensor);
+  m.impl("mul.out", WrapperMulOut);
   m.impl("multinomial", WrapperMultinomial);
   m.impl("mv", WrapperMv);
   m.impl("nan_to_num", WrapperNanToNum);

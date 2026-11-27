@@ -27,6 +27,9 @@ struct Block {
   Block* next;           // next block in segment (for merging)
 
   int event_count;       // number of outstanding events (stream safety)
+#if defined(USE_MPS)
+  Event_t mps_default_snapshot = nullptr;
+#endif
 
   Block(int device, Stream_t stream, size_t size, BlockPool* pool, void* ptr)
       : device(device),

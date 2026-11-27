@@ -280,6 +280,12 @@ per-operator kernels.
   - `@pytest.mark.ascend` - Ascend NPU specific
   - `@pytest.mark.flaggems` - FlagGems backend required
 
+Use shared cases for new operator and runtime regressions across chips.
+Parameterize inputs, dtypes, layouts, and launch ABI data in the shared test.
+Place eager operator checks in `tests/integration/test_eager_ops.py` and use
+the installed wheel's capabilities to determine applicability. Run the same
+suite on each hardware lane.
+
 ### Verification Before Completion
 
 After implementing changes:

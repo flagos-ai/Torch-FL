@@ -88,17 +88,51 @@ def test_committed_bridges_match_their_catalog_and_faithful_schemas(functions):
 
 def test_out_adapters_preserve_storage_and_use_configured_functional_routes(functions):
     source = codegen.gen_flaggems_out_adapters(functions)
-    assert source.count("resize_output(") == 4
-    assert source.count("assert_no_internal_overlap(") == 4
-    assert "assert_no_overlap(out, input)" in source
-    for call in (
-        "add_tensor_dispatcher(self, other, alpha)",
-        "mul_tensor_dispatcher(self, other)",
-        "mean_dim_dispatcher(self, dim, keepdim, dtype.value_or(out.scalar_type()))",
-        "cat_dispatcher(tensors, dim)",
+    adapters = dict(
+        re.findall(r"^at::Tensor & (\w+)\([^\n]*\) \{\n(.*?)^\}", source, re.M | re.S)
+    )
+    for name, call in (
+        ("AddOutAdapter", "add_tensor_dispatcher(self, other, alpha)"),
+        ("SubOutAdapter", "sub_tensor_dispatcher(self, other, alpha)"),
+        ("MulOutAdapter", "mul_tensor_dispatcher(self, other)"),
+        (
+            "MeanOutAdapter",
+            "mean_dim_dispatcher(self, dim, keepdim, dtype.value_or(out.scalar_type()))",
+        ),
+        ("CatOutAdapter", "cat_dispatcher(tensors, dim)"),
     ):
-        assert call in source
+        adapter = adapters[name]
+        assert "at::assert_no_internal_overlap(out);" in adapter
+        assert f"auto result = {call};" in adapter
+        assert (
+            "at::native::resize_output(out, result.sizes());\n"
+            "  out.copy_(result);\n"
+            "  return out;" in adapter
+        )
+    assert "assert_no_overlap(out, input)" in adapters["CatOutAdapter"]
+    for name, output in (
+        ("LogSoftmaxBackwardOutNvidia", "out"),
+        ("SoftmaxBackwardOutNvidia", "grad_input"),
+    ):
+        adapter = adapters[name]
+        assert f"at::assert_no_internal_overlap({output});" in adapter
+        assert (
+            f"at::native::resize_output({output}, buffer.sizes());\n"
+            f"    return {output}.copy_(buffer);" in adapter
+        )
+    sum_adapter = adapters["SumIntlistOutNvidia"]
+    assert (
+        "at::native::resize_reduction_result(out, self, axes, keepdim, output_dtype);"
+        in sum_adapter
+    )
     assert "USE_DCU" in source
+    assert "Backend::kFlagGems, MeanOutIluvatar" in source
+    assert "Backend::kFlagGems, NllLossMeanForwardOutNvidia" in source
+    assert "Backend::kFlagGems, NllLossMeanBackwardOutNvidia" in source
+    assert "Backend::kFlagGems, LogSoftmaxBackwardOutNvidia" in source
+    assert "Backend::kFlagGems, SoftmaxBackwardOutNvidia" in source
+    assert "Backend::kFlagGems, SumIntlistOutNvidia" in source
+    assert "Backend::kFlagGems, MulOutFlagGems" in source
     assert "DeviceBoxingGuard" not in source and "redispatch" not in source
     committed = (ROOT / "csrc/aten/generated/flaggems_python_kernels.cc").read_text()
     assert committed.endswith(source)

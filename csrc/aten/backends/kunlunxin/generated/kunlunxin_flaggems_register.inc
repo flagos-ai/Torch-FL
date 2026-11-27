@@ -20,14 +20,13 @@
 //
 // Do not hand-edit. Regenerate after changing that set:
 //   python3 scripts/codegen/codegen_kunlunxin_flaggems.py
-// Total: 258 ops registered here, 22 further FlagGems ops already claimed by kunlunxin_register.inc.
+// Total: 251 ops registered here, 39 further FlagGems ops already claimed by kunlunxin_register.inc.
 
   m.impl("_linalg_eigvals", WrapperPrivLinalgEigvals);
   m.impl("_prelu_kernel", WrapperPrivPreluKernel);
   m.impl("_unsafe_view", WrapperPrivUnsafeView);
   m.impl("abs", WrapperAbs);
   m.impl("abs_", WrapperAbsInplace);
-  m.impl("add_.Tensor", WrapperAddInplaceTensor);
   m.impl("addcdiv", WrapperAddcdiv);
   m.impl("addcdiv_", WrapperAddcdivInplace);
   m.impl("addcmul", WrapperAddcmul);
@@ -73,7 +72,6 @@
   m.impl("count_nonzero", WrapperCountNonzero);
   m.impl("cumprod", WrapperCumprod);
   m.impl("cumprod_", WrapperCumprodInplace);
-  m.impl("cumsum", WrapperCumsum);
   m.impl("cumsum.out", WrapperCumsumOut);
   m.impl("deg2rad", WrapperDeg2rad);
   m.impl("deg2rad.out", WrapperDeg2radOut);
@@ -88,7 +86,6 @@
   m.impl("div_.Tensor", WrapperDivInplaceTensor);
   m.impl("div_.Tensor_mode", WrapperDivInplaceTensorMode);
   m.impl("eq.Scalar", WrapperEqScalar);
-  m.impl("eq.Tensor", WrapperEqTensor);
   m.impl("eq_.Scalar", WrapperEqInplaceScalar);
   m.impl("eq_.Tensor", WrapperEqInplaceTensor);
   m.impl("erf_", WrapperErfInplace);
@@ -115,7 +112,6 @@
   m.impl("fmod_.Tensor", WrapperFmodInplaceTensor);
   m.impl("frac", WrapperFrac);
   m.impl("frac_", WrapperFracInplace);
-  m.impl("full", WrapperFull);
   m.impl("ge.Scalar", WrapperGeScalar);
   m.impl("ge.Tensor", WrapperGeTensor);
   m.impl("gelu", WrapperGelu);
@@ -143,7 +139,6 @@
   m.impl("isneginf", WrapperIsneginf);
   m.impl("isposinf", WrapperIsposinf);
   m.impl("le.Scalar", WrapperLeScalar);
-  m.impl("le.Tensor", WrapperLeTensor);
   m.impl("le_.Scalar", WrapperLeInplaceScalar);
   m.impl("le_.Tensor", WrapperLeInplaceTensor);
   m.impl("leaky_relu", WrapperLeakyRelu);
@@ -193,14 +188,13 @@
   m.impl("mish", WrapperMish);
   m.impl("mish_", WrapperMishInplace);
   m.impl("mse_loss", WrapperMseLoss);
+  m.impl("mul.out", WrapperMulOut);
   m.impl("ne.Scalar", WrapperNeScalar);
-  m.impl("ne.Tensor", WrapperNeTensor);
   m.impl("neg_", WrapperNegInplace);
   m.impl("new_ones", WrapperNewOnes);
   m.impl("ones", WrapperOnes);
   m.impl("ones_like", WrapperOnesLike);
   m.impl("pow.Scalar", WrapperPowScalar);
-  m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
   m.impl("pow.Tensor_Tensor", WrapperPowTensorTensor);
   m.impl("pow_.Scalar", WrapperPowInplaceScalar);
   m.impl("pow_.Tensor", WrapperPowInplaceTensor);
@@ -234,7 +228,6 @@
   m.impl("signbit", WrapperSignbit);
   m.impl("silu", WrapperSilu);
   m.impl("silu_", WrapperSiluInplace);
-  m.impl("silu_backward", WrapperSiluBackward);
   m.impl("sin", WrapperSin);
   m.impl("sin_", WrapperSinInplace);
   m.impl("sinc", WrapperSinc);

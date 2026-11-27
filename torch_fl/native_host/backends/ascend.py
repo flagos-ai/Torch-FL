@@ -3,13 +3,27 @@
 
 """Launch ABI of the published FlagTree Ascend backend, without torch_npu."""
 
+import hashlib
 import importlib
 import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 from ..backend import BackendConfig, BackendInterface, BuildOptions, LauncherOptions
 from .driver import active_drivers, bind_instances, reject_compilation
+
+
+_PUBLISHED_DRIVER_SHA256 = (
+    "da34b0e53e48056980cb8dfe8e5120f8dd3bae279004ceab730cb6314ec6445d"
+)
+
+
+def _verify_artifact_driver(path: Path) -> None:
+    if hashlib.sha256(path.read_bytes()).hexdigest() != _PUBLISHED_DRIVER_SHA256:
+        raise RuntimeError(
+            "strict Ascend device artifacts require the verified FlagTree driver"
+        )
 
 
 def _signature(value):
@@ -90,6 +104,39 @@ class Backend(BackendInterface):
         from torch_fl import flagos
 
         flagos.init()
+
+    def record_device_artifact_data(self, triton_root: Path) -> dict:
+        """Record the published compiler's static target capability at build time."""
+        driver = triton_root / "backends/ascend/driver.py"
+        _verify_artifact_driver(driver)
+        utils = importlib.import_module("triton.backends.ascend.utils")
+        targets = subprocess.check_output(
+            [utils._get_bisheng_path(), "-print-targets"], text=True
+        ).split()
+        if "hiipu64" not in targets:
+            raise RuntimeError("the Ascend build compiler does not support hiipu64")
+        return {
+            "driver_source_sha256": _PUBLISHED_DRIVER_SHA256,
+            "supports_hiipu64": True,
+        }
+
+    def install_device_artifact_data(self, data: dict) -> None:
+        """Use the attested eligibility rule for strict device artifacts."""
+        if (
+            not isinstance(data, dict)
+            or data.get("driver_source_sha256") != _PUBLISHED_DRIVER_SHA256
+            or data.get("supports_hiipu64") is not True
+        ):
+            raise RuntimeError(
+                "strict Ascend device artifacts require a build-time hiipu64 record"
+            )
+        driver = importlib.import_module("triton.backends.ascend.driver")
+        _verify_artifact_driver(Path(driver.__file__))
+        from torch_fl import flagos
+
+        # The verified driver's eligibility probe only checks compiler targets.
+        # Device availability and the active target are determined at runtime.
+        driver.NPUDriver.is_active = classmethod(lambda cls: flagos.is_available())
 
     def extension_options(self, driver: Path, source_dir: Path) -> BuildOptions:
         cann = Path(

@@ -79,8 +79,8 @@ _CHILD_SRC = textwrap.dedent(
             b = _randn(1, (4, 4)).half()
             return (aten.add.Tensor(a.to(_DEVICE), b.to(_DEVICE)), aten.add.Tensor(a, b))
         if op == "mul.Tensor":
-            a = _randn(2, (4, 4)).half()
-            b = _randn(3, (4, 4)).half()
+            a = _randn(2, (4, 4)).to(torch.float16)
+            b = _randn(3, (4, 4)).to(torch.float16)
             return (aten.mul.Tensor(a.to(_DEVICE), b.to(_DEVICE)), aten.mul.Tensor(a, b))
         if op == "mm":
             a = _randn(4, (8, 8))
@@ -91,8 +91,8 @@ _CHILD_SRC = textwrap.dedent(
             b = _randn(7, (4, 8, 8)).half()
             return (aten.bmm(a.to(_DEVICE), b.to(_DEVICE)), aten.bmm(a, b))
         if op == "cat":
-            a = _randn(8, (4, 4)).half()
-            b = _randn(9, (4, 4)).half()
+            a = _randn(8, (4, 4)).to(torch.float16)
+            b = _randn(9, (4, 4)).to(torch.float16)
             return (
                 aten.cat([a.to(_DEVICE), b.to(_DEVICE)], 0),
                 aten.cat([a, b], 0),
@@ -101,7 +101,7 @@ _CHILD_SRC = textwrap.dedent(
             a = _randn(10, (4, 4))
             return (aten.neg(a.to(_DEVICE)), aten.neg(a))
         if op == "sum.dim_IntList":
-            a = _randn(11, (4, 4))
+            a = _randn(11, (4, 4)).to(torch.float16)
             return (
                 aten.sum.dim_IntList(a.to(_DEVICE), [1], False),
                 aten.sum.dim_IntList(a, [1], False),

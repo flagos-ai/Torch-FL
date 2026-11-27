@@ -8,6 +8,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 namespace at::native::flagos {
 namespace {
@@ -20,14 +21,17 @@ struct VendorEntry {
   uintptr_t address = 0;
 };
 
-#if defined(FLAGOS_NATIVE_METAX_VENDOR)
-#define NATIVE_VENDOR_BACKEND Backend::kMetax
-#else
-#define NATIVE_VENDOR_BACKEND Backend::kNvidia
-#endif
+Backend NativeVendorBackend(std::string_view vendor) {
+  if (vendor == "nvidia") return Backend::kNvidia;
+  if (vendor == "hygon") return Backend::kHygon;
+  if (vendor == "metax") return Backend::kMetax;
+  TORCH_INTERNAL_ASSERT(vendor == "thead");
+  return Backend::kThead;
+}
+
 #define NATIVE_VENDOR_ENTRY(vendor, op, abi, catalog, type, dispatcher) \
-  {vendor, op, abi, catalog, [](uintptr_t address) {                         \
-     dispatcher.RegisterKernel(std::string(vendor) == "hygon" ? Backend::kHygon : NATIVE_VENDOR_BACKEND, reinterpret_cast<type>(address)); \
+  {vendor, op, abi, catalog, [](uintptr_t address) {                              \
+     dispatcher.RegisterKernel(NativeVendorBackend(vendor), reinterpret_cast<type>(address)); \
    }},
 VendorEntry entries[] = {
 #if defined(FLAGOS_NATIVE_METAX_VENDOR)
@@ -35,10 +39,12 @@ VendorEntry entries[] = {
 #else
 #include "../../generated/native_vendor_entries.inc"
 #include "../../generated/native_vendor_hygon_entries.inc"
+#if defined(FLAGOS_NATIVE_THEAD_VENDOR)
+#include "../../generated/native_vendor_thead_entries.inc"
+#endif
 #endif
 };
 #undef NATIVE_VENDOR_ENTRY
-#undef NATIVE_VENDOR_BACKEND
 
 std::mutex& RegistryMutex() {
   static auto* mutex = new std::mutex;

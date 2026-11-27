@@ -126,7 +126,7 @@ def test_copy_from_arm_boxes_only_when_libtorch_cuda_is_linked():
     same way the dtype cast did.
     """
     src = _read(COPY_OPS)
-    branch = src.find("// Fast path: both contiguous, same shape and dtype")
+    branch = src.find("CopySameDevice(self, dst);")
     assert branch != -1, "the same-device flagos copy fast path is gone"
     start = src.find("// CUDA platform without the boxing kernels", branch)
     assert start != -1, "the non-boxing _copy_from arm is gone"

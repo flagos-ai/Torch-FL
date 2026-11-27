@@ -282,14 +282,10 @@ steps:
   # in the dispatch log -- which is the only coverage of the override reaching a
   # specific op rather than the route the conf already chose.
   #
-  # Byte-identical on every platform for the same reason `flaggems_ops` is: each
-  # case asks override_is_logged() whether this wheel compiled the FlagGems
-  # kernels *and* its conf routes that op to a FlagGems slot, and skips itself
-  # when either half is missing. So the group measures each platform against its
-  # own conf, and the count differs per lane rather than per command: of the 27,
-  # the vendor builds run 25 on TsingMicro, 24 on MUSA, 23 on Ascend/NVIDIA/PPU,
-  # 21 on MetaX, 20 on Hygon/Iluvatar, 3 on GCU, and 0 on Kunlunxin and MPS,
-  # which route nothing through FlagGems.
+  # Every platform runs the same command. Cases use override_is_logged() to
+  # check whether the wheel can select a FlagGems override for the operator.
+  # NLL forward and backward also check the configured vendor route when the
+  # override is unavailable.
   #
   # Each case spawns a subprocess that imports torch_fl, so the group is sized
   # like `flaggems_ops` rather than like a kernel sweep.
@@ -676,11 +672,22 @@ steps:
     name: Common regression
     command: python -m pytest tests/integration/common -v --tb=short
 
+  - id: eager_ops_regression
+    name: Eager operator regression
+    min_passed: 1
+    command: >-
+      CUBLAS_WORKSPACE_CONFIG=:4096:8
+      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
+      python -m pytest tests/integration/test_eager_ops.py -v --tb=short
+
   - id: native_source_hosts
     name: Native FlagGems host conformance
     platforms: [ascend]
     min_passed: 94
+    # The common regression groups use the wheel's default routes. Exercise
+    # the packaged FlagGems hosts here for operators that default to ACLNN.
     command: >-
+      FLAGOS_OP_cos=flaggems FLAGOS_OP_mean__dim=flaggems FLAGOS_OP_cat=flaggems
       PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
       python -m pytest tests/integration/ops/test_native_ascend_hosts.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"
@@ -688,7 +695,7 @@ steps:
   - id: native_source_hosts_metax
     name: Native MetaX FlagGems host conformance
     platforms: [metax]
-    min_passed: 86
+    min_passed: 72
     command: >-
       PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
       python -m pytest tests/integration/ops/test_native_metax_hosts.py

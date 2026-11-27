@@ -107,8 +107,18 @@ def _stream_api():
     lib.GetCurrentStream.restype = ctypes.c_void_p
     lib.SetCurrentStream.argtypes = [ctypes.c_int, ctypes.c_void_p]
     lib.SetCurrentStream.restype = None
+    flush = getattr(lib, "FlagosAscendFlushHostSubmissions", None)
+    if flush is not None:
+        flush.argtypes = []
+        flush.restype = ctypes.c_int
     _stream_api_cache.append(lib)
     return lib
+
+
+def _flush_host_submissions() -> None:
+    flush = getattr(_stream_api(), "FlagosAscendFlushHostSubmissions", None)
+    if flush is not None:
+        _check(flush(), "Ascend host submission")
 
 
 class AclEvent:
@@ -141,6 +151,7 @@ class AclEvent:
             from torch_fl.flagos import current_stream
 
             stream = current_stream()
+        _flush_host_submissions()
         _check(
             _acl.aclrtRecordEvent(self._handle, _handle(stream)),
             "aclrtRecordEvent",
@@ -152,6 +163,7 @@ class AclEvent:
             from torch_fl.flagos import current_stream
 
             stream = current_stream()
+        _flush_host_submissions()
         _check(
             _acl.aclrtStreamWaitEvent(_handle(stream), self._handle),
             "aclrtStreamWaitEvent",
@@ -243,6 +255,7 @@ class AclStream:
 
     def synchronize(self):
         if self._handle:
+            _flush_host_submissions()
             _check(
                 _acl.aclrtSynchronizeStream(_handle(self)),
                 "aclrtSynchronizeStream",
@@ -251,6 +264,7 @@ class AclStream:
     def query(self) -> bool:
         if not self._handle:
             return True
+        _flush_host_submissions()
         status = ctypes.c_int()
         _check(
             _acl.aclrtStreamQuery(_handle(self), ctypes.byref(status)),

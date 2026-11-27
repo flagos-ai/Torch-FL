@@ -252,7 +252,7 @@ def _install_musa_flaggems_compat(flagos) -> None:
         sys.modules["torch_musa"].distributed = distributed
 
 
-def _install_tsingmicro_flaggems_compat(flagos) -> None:
+def install_tsingmicro_runtime_alias(flagos) -> None:
     """Expose the ``torch.txda`` surface FlagGems' TSINGMICRO backend needs.
 
     Only built for a TsingMicro wheel that routes at least one op to FlagGems
@@ -273,6 +273,9 @@ def _install_tsingmicro_flaggems_compat(flagos) -> None:
     import importlib.machinery
     import types
 
+    installed = getattr(torch, "txda", None)
+    if getattr(getattr(installed, "__spec__", None), "origin", None) == "torch_fl_shim":
+        return
     txda = types.ModuleType("torch.txda")
 
     # Straight proxies to the flagos device module.
@@ -337,6 +340,10 @@ def _install_tsingmicro_flaggems_compat(flagos) -> None:
         name="torch.txda", loader=None, origin="torch_fl_shim"
     )
     torch.txda = txda
+
+
+def _install_tsingmicro_flaggems_compat(flagos) -> None:
+    install_tsingmicro_runtime_alias(flagos)
 
     # Qwen-Image-2.1's rope puts a complex64 operand on the device, and FlagGems'
     # Triton kernels have no complex pointer type for the cat/mul it feeds. Patch

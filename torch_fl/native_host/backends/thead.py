@@ -6,7 +6,14 @@
 import os
 from pathlib import Path
 
-from ..backend import BackendConfig, BackendInterface, BuildOptions, LauncherOptions
+from ..backend import (
+    BackendConfig,
+    BackendInterface,
+    BuildOptions,
+    LauncherOptions,
+    align_published_embedding_device,
+    align_published_mul_device,
+)
 
 
 class Backend(BackendInterface):
@@ -22,6 +29,10 @@ class Backend(BackendInterface):
         scratch_alignment=256,
         shared_headers=("launch_params.h",),
     )
+
+    def initialize_runtime(self) -> None:
+        align_published_embedding_device("cuda")
+        align_published_mul_device("cuda")
 
     def extension_options(self, driver: Path, source_dir: Path) -> BuildOptions:
         sdk = Path(

@@ -35,6 +35,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
 
@@ -90,9 +91,16 @@ class MemoryManager {
       *ptr = nullptr;
       return ErrorMemoryAllocation;
     }
-    // MTLBuffer requires a non-zero length; a zero-byte request still needs a
-    // unique, freeable pointer. One byte is enough to hand back and never read.
-    const NSUInteger length = size ? static_cast<NSUInteger>(size) : 1;
+    // MPSNDArray can read the final vector of a sub-16-byte tensor from its
+    // backing buffer. Keep the registered allocation size exact and pad the
+    // Metal buffer so scalar tensors also work with the cache disabled.
+    constexpr NSUInteger alignment = 16;
+    if (size > std::numeric_limits<NSUInteger>::max() - (alignment - 1)) {
+      *ptr = nullptr;
+      return ErrorMemoryAllocation;
+    }
+    const NSUInteger length = size ? (size + alignment - 1) & ~(alignment - 1)
+                                   : alignment;
     id<MTLBuffer> buffer =
         [metalDevice newBufferWithLength:length
                                  options:MTLResourceStorageModeShared];

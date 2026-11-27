@@ -98,6 +98,20 @@ CI preflights the AOT wheel and installs it in a separate import directory.
 The common `test_compiled_stream_chain` exercises eager, Inductor and native
 host submissions on one non-default stream from that installation.
 
+### Native Host for eager execution
+
+Build with the official PyTorch 2.10.0 CPU wheel and the pinned PPU FlagTree
+and FlagGems wheels. Set `FLAGOS_BUILD_NATIVE_HOST=1` and
+`FLAGOS_VENDOR_TORCH_LIB` to the `torch/lib` directory of the validated T-Head
+PyTorch 2.10.0 distribution. The build verifies the vendor wheel's revision,
+CUDA ABI and device libraries before packaging `libc10_cuda.so` and
+`libtorch_cuda.so` under `native_host/_generated/thead_vendor`. The installed
+wheel uses the official CPU PyTorch core.
+
+Set `FLAGOS_NATIVE_HOST_DEVICE_BUNDLE` to the directory of prebuilt device
+kernels at build time. Use `FLAGOS_NATIVE_HOST_REQUIRE_DEVICE_ARTIFACTS=1`
+when running eager workloads to require those artifacts for FlagGems launches.
+
 ### AMP and GradScaler
 
 Use `flagos` as the AMP device name. The supported autocast dtypes are

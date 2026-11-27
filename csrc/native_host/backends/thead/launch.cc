@@ -4,6 +4,7 @@
 #include "launch_params.h"
 
 #include <hggc.h>
+#include <torch/library.h>
 
 namespace py = pybind11;
 
@@ -15,6 +16,23 @@ void Check(HGresult status) {
   const char* error = nullptr;
   hgGetErrorString(status, &error);
   throw std::runtime_error(error ? error : "HGGC driver operation failed");
+}
+
+int64_t DeviceAttribute(HGdevice_attribute attribute) {
+  HGdevice device;
+  Check(hgCtxGetDevice(&device));
+  int value;
+  Check(hgDeviceGetAttribute(&value, attribute, device));
+  return value;
+}
+
+TORCH_LIBRARY_FRAGMENT(flagos_source_native, m) {
+  m.def("get_sm_count() -> int",
+        [] { return DeviceAttribute(HG_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT); });
+  m.def("compute_capability_major() -> int",
+        [] { return DeviceAttribute(HG_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR); });
+  m.def("compute_capability_minor() -> int",
+        [] { return DeviceAttribute(HG_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR); });
 }
 
 class PpuKernel final : public WarpKernel {
