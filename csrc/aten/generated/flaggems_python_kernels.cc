@@ -4,6 +4,9 @@
 #ifdef FLAGOS_FLAGGEMS_PYTHON
 
 #include "ops.h"
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+#include "native_host/backends/nvidia/linalg.h"
+#endif
 #include <ATen/ScalarOps.h>
 #include <ATen/ops/full_native.h>
 #include <ATen/ops/result_type.h>
@@ -1264,6 +1267,10 @@ at::Tensor BmmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
   at::Tensor self_dotpad = self;
   at::Tensor mat2_dotpad = mat2;
   at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = ::flagos::nvidia::TryMatrixProduct(self, mat2); result.defined())
+    return result;
+#endif
   auto result = BmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm", {self_dotpad, mat2_dotpad}); }, static_cast<const at::Tensor&>(self_dotpad), static_cast<const at::Tensor&>(mat2_dotpad));
   UnboxToFlagos(result);
   return result;
@@ -1276,6 +1283,10 @@ at::Tensor & BmmOutKernelPython(const at::Tensor & self, const at::Tensor & mat2
   at::Tensor self_dotpad = self;
   at::Tensor mat2_dotpad = mat2;
   at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = ::flagos::nvidia::TryMatrixProduct(self, mat2, &out); result.defined())
+    return out;
+#endif
   BmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm_out", {self_dotpad, mat2_dotpad, out}); }, static_cast<const at::Tensor&>(self_dotpad), static_cast<const at::Tensor&>(mat2_dotpad), static_cast<const at::Tensor&>(out));
   return out;
 }
@@ -3377,6 +3388,10 @@ at::Tensor MmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
   at::Tensor self_dotpad = self;
   at::Tensor mat2_dotpad = mat2;
   at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = ::flagos::nvidia::TryMatrixProduct(self, mat2); result.defined())
+    return result;
+#endif
   auto result = MmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mm", {self_dotpad, mat2_dotpad}); }, static_cast<const at::Tensor&>(self_dotpad), static_cast<const at::Tensor&>(mat2_dotpad));
   UnboxToFlagos(result);
   return result;
@@ -3384,6 +3399,10 @@ at::Tensor MmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
 
 static TypedSourceSlot MmOutFnSource("aten::mm.out", "flag_gems.mm_out", "8e42adb0b8e70779d3aff9fa45f4efadf8a6c3b998096f8f477ff84304ba1b3b", "{\"abi\": \"8e42adb0b8e70779d3aff9fa45f4efadf8a6c3b998096f8f477ff84304ba1b3b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mm_out\", \"op\": \"aten::mm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & MmOutKernelPython(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = ::flagos::nvidia::TryMatrixProduct(self, mat2, &out); result.defined())
+    return out;
+#endif
   MmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.mm_out", {self, mat2}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2), static_cast<const at::Tensor&>(out));
   return out;
 }
@@ -3776,9 +3795,10 @@ static TypedSourceSlot PowTensorScalarFnSource("aten::pow.Tensor_Scalar", "flag_
 at::Tensor PowTensorScalarKernelPython(const at::Tensor & self, const at::Scalar & exponent) {
 #if defined(FLAGOS_NATIVE_HOSTS)
   if (self.scalar_type() == at::kFloat &&
-      (exponent.isIntegral(false) || exponent.isFloatingPoint()) &&
-      exponent.toDouble() == 3.0 && MulTensorFnSource.Available()) {
-    return at::mul(at::mul(self, self), self);
+      (exponent.isIntegral(false) || exponent.isFloatingPoint()) && MulTensorFnSource.Available()) {
+    const auto power = exponent.toDouble();
+    if (power == 2.0) return at::mul(self, self);
+    if (power == 3.0) return at::mul(at::mul(self, self), self);
   }
 #endif
 #if defined(USE_DCU)

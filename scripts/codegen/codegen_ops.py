@@ -1358,7 +1358,16 @@ def gen_flaggems_python_kernel(
                 f"  return at::native::flagos::{target}({', '.join(n for _, n in args)});\n"
                 "#endif\n"
             )
-        if op == "add.Tensor":
+        if op in ("mm", "mm.out", "bmm", "bmm.out"):
+            out_arg = ", &out" if op.endswith(".out") else ""
+            returned = "out" if out_arg else "result"
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                f"  if (auto result = ::flagos::nvidia::TryMatrixProduct(self, mat2{out_arg}); result.defined())\n"
+                f"    return {returned};\n"
+                "#endif\n"
+            )
+        elif op == "add.Tensor":
             prelude += (
                 "#if defined(USE_DCU)\n"
                 "  if (!alpha.isIntegral(false))\n"
@@ -1553,14 +1562,15 @@ def gen_flaggems_python_kernel(
                 "#endif\n"
             )
         elif typed and op == "pow.Tensor_Scalar":
-            # PyTorch's FP32 cube uses two multiplications. The general pow
-            # kernel can round these exact products in the device math library.
+            # Small integer powers can use the original FlagGems multiply
+            # kernel and retain the exact FP32 arithmetic.
             prelude += (
                 "#if defined(FLAGOS_NATIVE_HOSTS)\n"
                 "  if (self.scalar_type() == at::kFloat &&\n"
-                "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) &&\n"
-                "      exponent.toDouble() == 3.0 && MulTensorFnSource.Available()) {\n"
-                "    return at::mul(at::mul(self, self), self);\n"
+                "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) && MulTensorFnSource.Available()) {\n"
+                "    const auto power = exponent.toDouble();\n"
+                "    if (power == 2.0) return at::mul(self, self);\n"
+                "    if (power == 3.0) return at::mul(at::mul(self, self), self);\n"
                 "  }\n"
                 "#endif\n"
                 "#if defined(USE_DCU)\n"
@@ -2443,6 +2453,15 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         refreshed = refreshed.replace(
             '#include "ops.h"', '#include "ops.h"\n' + metadata_include, 1
         )
+    nvidia_blas_include = (
+        "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+        '#include "native_host/backends/nvidia/linalg.h"\n'
+        "#endif"
+    )
+    if nvidia_blas_include not in refreshed:
+        refreshed = refreshed.replace(
+            '#include "ops.h"', '#include "ops.h"\n' + nvidia_blas_include, 1
+        )
     for header in (
         "#include <ATen/ExpandUtils.h>",
         "#include <ATen/native/CPUFallback.h>",
@@ -2481,6 +2500,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         ("cat", "tensorlist_dim", set()),
         ("mm", "functional_pure", set()),
         ("bmm", "functional_pure", set()),
+        ("bmm.out", "out_variant_gemsout", set()),
         ("pow.Tensor_Scalar", "functional_pure", set()),
         ("full", "factory", {"size", "fill_value"}),
         ("index_copy_", "inplace", set()),
@@ -2526,6 +2546,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "cat": "cat",
                 "mm": "mm",
                 "bmm": "bmm",
+                "bmm.out": "bmm_out",
                 "pow.Tensor_Scalar": "pow_tensor_scalar",
                 "full": "full",
                 "index_copy_": "index_copy_",
