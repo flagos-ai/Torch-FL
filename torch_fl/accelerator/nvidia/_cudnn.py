@@ -97,7 +97,7 @@ def _attention_plan(
     try:
         if _compile_graph(cudnn, graph, deterministic):
             return graph, q, k, v, result, graph.get_workspace_size()
-    except ValueError:
+    except (RuntimeError, ValueError):
         return None
     return None
 
@@ -124,6 +124,10 @@ def _device_plans(cudnn, device):
 
 def attention(query, key, value, is_causal, scale, enable_gqa):
     shape = query.shape
+    # Keep single-query attention on the existing GPU composition. Fused
+    # decode and multi-query plans use different accumulation orders.
+    if query.ndim != 4 or shape[2] == 1:
+        return None
     if (
         any(
             t.ndim != 4
