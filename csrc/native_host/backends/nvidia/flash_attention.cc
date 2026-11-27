@@ -2,15 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <aten/cuda_tensor_view.h>
+#include <ATen/Context.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_strided.h>
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <c10/core/DefaultDtype.h>
-#include <c10/cuda/CUDACachingAllocator.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/StreamGuard.h>
+#include <c10/core/impl/VirtualGuardImpl.h>
 #include <c10/util/SmallVector.h>
+#include <cuda_runtime_api.h>
 #include <flagos.h>
+#include <pybind11/pybind11.h>
 #include <runtime/allocator/caching_device_allocator.h>
 #include <torch/library.h>
 
@@ -19,11 +21,35 @@
 namespace flagos::nvidia {
 namespace {
 
+namespace py = pybind11;
 using torch::jit::Stack;
 using at::native::flagos::FlagosToCudaView;
 
 constexpr auto forward_name = "flash_attn_3::_flash_attn_forward";
 constexpr auto raw_forward_name = "flash_attn_3::fwd";
+
+void CheckCuda(cudaError_t result) {
+  TORCH_CHECK(result == cudaSuccess, "FlashAttention 3 CUDA stream: ",
+              cudaGetErrorString(result));
+}
+
+c10::Stream ExternalStream(cudaStream_t queue, c10::Device device) {
+  if (queue == nullptr) return c10::Stream(c10::Stream::DEFAULT, device);
+  // The optional provider supplies CUDA PyTorch's public stream constructor.
+  // Cache its stream identity so repeated launches on a queue stay in C++.
+  static thread_local cudaStream_t previous_queue = nullptr;
+  static thread_local std::optional<c10::Stream> previous_stream;
+  if (queue != previous_queue || !previous_stream ||
+      previous_stream->device() != device) {
+    const py::gil_scoped_acquire gil;
+    const auto stream = py::module_::import("torch.cuda").attr("ExternalStream")(
+        reinterpret_cast<uintptr_t>(queue), py::arg("device") = device.index());
+    previous_stream = c10::Stream::unpack3(
+        stream.attr("stream_id").cast<c10::StreamId>(), device.index(), device.type());
+    previous_queue = queue;
+  }
+  return *previous_stream;
+}
 
 bool MatchesVendorSchema(const c10::FunctionSchema& forward,
                          const c10::FunctionSchema& raw) {
@@ -66,20 +92,19 @@ void Forward(const c10::OperatorHandle& forward, Stack* stack) {
               "FlashAttention 3 on FlagOS supports read-only forward without an "
               "output buffer, KV-cache updates, or external scheduler metadata");
 
-  static const auto device_count = [] {
-    const auto count = c10::cuda::device_count();
-    c10::cuda::CUDACachingAllocator::init(count);
-    return count;
-  }();
+  at::globalContext().lazyInitDevice(c10::kCUDA);
+  static const c10::impl::VirtualGuardImpl cuda_guard(c10::kCUDA);
+  static const auto device_count = cuda_guard.deviceCount();
   const auto stream = GetCurrentStreamForDevice(device.index());
   const auto queue = reinterpret_cast<cudaStream_t>(stream);
-  const auto cuda_stream = c10::cuda::getStreamFromExternal(queue, device.index());
-  std::optional<c10::cuda::CUDAStreamGuard> guard;
-  if ((device_count > 1 && c10::cuda::current_device() != device.index()) ||
-      c10::cuda::getCurrentCUDAStream(device.index()).stream() != queue)
+  const auto cuda_device = c10::Device(c10::kCUDA, device.index());
+  const auto cuda_stream = ExternalStream(queue, cuda_device);
+  std::optional<c10::StreamGuard> guard;
+  if ((device_count > 1 && cuda_guard.getDevice() != cuda_device) ||
+      cuda_guard.getStream(cuda_device) != cuda_stream)
     guard.emplace(cuda_stream);
   cudaStreamCaptureStatus capture_status;
-  C10_CUDA_CHECK(cudaStreamIsCapturing(queue, &capture_status));
+  CheckCuda(cudaStreamIsCapturing(queue, &capture_status));
   TORCH_CHECK(capture_status == cudaStreamCaptureStatusNone,
               "FlashAttention 3 on FlagOS requires an uncaptured stream");
 
@@ -116,7 +141,7 @@ void Forward(const c10::OperatorHandle& forward, Stack* stack) {
         ordered &= allocator->record_stream(tensor.storage().data_ptr(), stream);
       }
     }
-    if (!ordered) C10_CUDA_CHECK(cudaStreamSynchronize(queue));
+    if (!ordered) CheckCuda(cudaStreamSynchronize(queue));
   };
 
   Stack outputs;

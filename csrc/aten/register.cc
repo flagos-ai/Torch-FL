@@ -34,9 +34,6 @@
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
 #include "backends/flagos/python_op_caller.h"
 #endif
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-#include "backends/nvidia/aten_ops.h"
-#endif
 // TsingMicro's RNG kernels are claimed directly below rather than through a
 // generated list, so their declarations have to be visible here.
 #if defined(USE_TSINGMICRO)
@@ -266,10 +263,6 @@ at::Tensor& WrapperIndexPut_(
     const c10::List<::std::optional<at::Tensor>>& indices,
     const at::Tensor& values,
     bool accumulate) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-  return at::native::flagos::vendor::NvidiaIndexPut(
-      self, indices, values, accumulate, false);
-#else
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
   if (!at::native::flagos::CpuFallbackAllowed()) {
     at::native::flagos::CallPythonOp_Generic(
@@ -293,7 +286,6 @@ at::Tensor& WrapperIndexPut_(
   at::index_put_(self_cpu, indices_cpu, values_cpu, accumulate);
   self.copy_(self_cpu);
   return self;
-#endif
 }
 
 at::Tensor& WrapperIndexPutImpl_(
@@ -302,13 +294,8 @@ at::Tensor& WrapperIndexPutImpl_(
     const at::Tensor& values,
     bool accumulate,
     bool unsafe) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-  return at::native::flagos::vendor::NvidiaIndexPut(
-      self, indices, values, accumulate, unsafe);
-#else
   (void)unsafe;
   return WrapperIndexPut_(self, indices, values, accumulate);
-#endif
 }
 
 void WrapperRecordStream(at::Tensor& self, at::Stream s) {
@@ -331,7 +318,6 @@ void WrapperRecordStream(at::Tensor& self, at::Stream s) {
 }
 
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
-#if !defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
 std::optional<float> NvidiaScalarReciprocal(const at::Tensor& self,
                                              const at::Scalar& divisor,
                                              const char* op) {
@@ -358,50 +344,33 @@ std::optional<float> NvidiaScalarReciprocal(const at::Tensor& self,
   }
   return NvidiaScalarReciprocal(self, divisor.item(), op);
 }
-#endif
 
 at::Tensor FlagosNvidiaDivScalar(const at::Tensor& self, const at::Scalar& divisor) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-  return at::native::flagos::vendor::NvidiaDiv(self, divisor);
-#else
   if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div.Scalar")) {
     return at::mul(self, at::Scalar(*reciprocal));
   }
   return at::native::flagos::div_scalar_dispatcher(self, divisor);
-#endif
 }
 
 at::Tensor FlagosNvidiaDivTensor(const at::Tensor& self, const at::Tensor& divisor) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-  return at::native::flagos::vendor::NvidiaDiv(self, divisor);
-#else
   if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div.Tensor")) {
     return at::mul(self, at::Scalar(*reciprocal));
   }
   return at::native::flagos::div_tensor_dispatcher(self, divisor);
-#endif
 }
 
 at::Tensor& FlagosNvidiaDivInplaceScalar(at::Tensor& self, const at::Scalar& divisor) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-  return at::native::flagos::vendor::NvidiaDivInplace(self, divisor);
-#else
   if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div_.Scalar")) {
     return self.copy_(at::mul(self, at::Scalar(*reciprocal)));
   }
   return at::native::flagos::div_inplace_scalar_dispatcher(self, divisor);
-#endif
 }
 
 at::Tensor& FlagosNvidiaDivInplaceTensor(at::Tensor& self, const at::Tensor& divisor) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-  return at::native::flagos::vendor::NvidiaDivInplace(self, divisor);
-#else
   if (const auto reciprocal = NvidiaScalarReciprocal(self, divisor, "div_.Tensor")) {
     return self.copy_(at::mul(self, at::Scalar(*reciprocal)));
   }
   return at::native::flagos::div_inplace_tensor_dispatcher(self, divisor);
-#endif
 }
 #endif
 
@@ -504,15 +473,6 @@ at::Tensor FlagosNvidiaConvolutionOverrideable(
       input.dim() <= 5 && input.dim() == weight.dim() && input.numel() && weight.numel() &&
       input.layout() == at::kStrided && weight.layout() == at::kStrided &&
       input.device() == weight.device() && dtype == weight.scalar_type()) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-    if ((dtype == at::kFloat || dtype == at::kBFloat16) &&
-        at::globalContext().userEnabledCuDNN()) {
-      return at::native::flagos::vendor::NvidiaConvolution(
-          input, weight, bias, C10_AS_INTARRAYREF_SLOW(stride),
-          C10_AS_INTARRAYREF_SLOW(padding), C10_AS_INTARRAYREF_SLOW(dilation),
-          groups.expect_int());
-    }
-#endif
     return at::native::flagos::convolution_overrideable_dispatcher(
         input, weight, bias, C10_AS_INTARRAYREF_SLOW(stride),
         C10_AS_INTARRAYREF_SLOW(padding), C10_AS_INTARRAYREF_SLOW(dilation),

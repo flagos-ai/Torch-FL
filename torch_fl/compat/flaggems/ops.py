@@ -639,10 +639,6 @@ def patch_index_put(accelerator: str):
     here, not broken, so this must not be able to take down device init.
     """
     try:
-        if accelerator == "nvidia" and hasattr(
-            torch.ops.flagos, "_activate_native_nvidia"
-        ):
-            return
         if not launch_patches_apply(accelerator):
             return
         import flag_gems

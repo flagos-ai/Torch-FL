@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../../generated/ops.h"
-#include "../../native_vendor.h"
-#include "../../nvidia_sdpa.h"
 
 #include <torch/library.h>
 
@@ -48,24 +46,6 @@ std::mutex& RegistryMutex() {
 }
 }  // namespace
 
-void RegisterNativeVendorKernel(const std::string& vendor, const std::string& op,
-                                const std::string& abi, uintptr_t address) {
-  std::lock_guard<std::mutex> lock(RegistryMutex());
-  for (auto& entry : entries) {
-    if (vendor != entry.vendor || op != entry.op) continue;
-    TORCH_CHECK(address != 0 && abi == entry.abi,
-                "native vendor ABI mismatch: ", vendor, ":", op);
-    TORCH_CHECK(entry.address == 0 || entry.address == address,
-                "native vendor entry already registered: ", op);
-    if (!entry.address) {
-      entry.install(address);
-      entry.address = address;
-    }
-    return;
-  }
-  TORCH_CHECK(false, "unknown native vendor entry: ", vendor, ":", op);
-}
-
 TORCH_LIBRARY_FRAGMENT(flagos, m) {
   m.def("native_vendor_catalog(str vendor=\"nvidia\") -> str", [](const std::string& vendor) {
     std::string result = "[";
@@ -79,10 +59,21 @@ TORCH_LIBRARY_FRAGMENT(flagos, m) {
   m.def("native_vendor_register(str vendor, str op, str abi, int address) -> ()",
         [](const std::string& vendor, const std::string& op,
            const std::string& abi, int64_t address) {
-          RegisterNativeVendorKernel(vendor, op, abi, static_cast<uintptr_t>(address));
-        });
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-  m.def("_activate_native_nvidia() -> ()", &vendor::ActivateNvidiaVendor);
-#endif
+    std::lock_guard<std::mutex> lock(RegistryMutex());
+    for (auto& entry : entries) {
+      if (vendor != entry.vendor || op != entry.op) continue;
+      TORCH_CHECK(address != 0 && abi == entry.abi,
+                  "native vendor ABI mismatch: ", vendor, ":", op);
+      const auto pointer = static_cast<uintptr_t>(address);
+      TORCH_CHECK(entry.address == 0 || entry.address == pointer,
+                  "native vendor entry already registered: ", op);
+      if (!entry.address) {
+        entry.install(pointer);
+        entry.address = pointer;
+      }
+      return;
+    }
+    TORCH_CHECK(false, "unknown native vendor entry: ", vendor, ":", op);
+  });
 }
 }  // namespace at::native::flagos

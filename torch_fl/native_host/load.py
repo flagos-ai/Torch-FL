@@ -25,6 +25,25 @@ _launcher_module = None
 _inductor_autotuner = ContextVar("inductor_autotuner", default=None)
 
 
+def _same_torch_cohort(manifest, torch):
+    built_version = manifest["torch"]
+    if built_version == torch.__version__:
+        return True
+    # An optional CUDA extension can use the same release of PyTorch as a
+    # CPU-built NVIDIA wheel when both the source revision and C++ ABI match.
+    built_release, _, built_variant = built_version.partition("+")
+    revision = manifest.get("torch_git_version")
+    return (
+        manifest.get("backend", {}).get("vendor") == "nvidia"
+        and built_variant == "cpu"
+        and torch.version.cuda is not None
+        and built_release == torch.__version__.partition("+")[0]
+        and bool(revision)
+        and revision == torch.version.git_version
+        and manifest.get("torch_cxx11_abi") is torch.compiled_with_cxx11_abi()
+    )
+
+
 def audit_native_compilers(event, values):
     if event != "subprocess.Popen":
         return
@@ -193,7 +212,7 @@ class Hosts:
             if hasattr(flag_gems, name)
         }
         if (
-            self.manifest["torch"] != torch.__version__
+            not _same_torch_cohort(self.manifest, torch)
             or self.manifest["triton"] != triton.__version__
         ):
             raise RuntimeError(
@@ -454,17 +473,15 @@ class Hosts:
         import torch
         from torch_fl import _build_config
 
-        linked_nvidia = _build_config.ACCELERATOR == "nvidia" and hasattr(
-            torch.ops.flagos, "_activate_native_nvidia"
-        )
+        matched_cpu_build = self.manifest["torch"].endswith(
+            "+cpu"
+        ) and _same_torch_cohort(self.manifest, torch)
         if (
             torch.version.cuda is not None
-            and not linked_nvidia
+            and not matched_cpu_build
             or "boxing" in _build_config.KERNELS
         ):
-            raise RuntimeError(
-                "native hosts require CPU Torch or the linked NVIDIA CUDA build"
-            )
+            raise RuntimeError("native hosts require the recorded CPU Torch cohort")
         if getattr(_build_config, "NATIVE_HOSTS", False):
             torch.ops.flagos.strict_host_routes(True)
         for name in self.manifest["ops"]:

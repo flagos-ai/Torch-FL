@@ -1382,32 +1382,11 @@ def gen_flaggems_python_kernel(
                 '  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
                 "#endif\n"
             )
-        elif op == "linalg_vector_norm":
-            prelude += (
-                "#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)\n"
-                "  if (self.scalar_type() == at::kFloat || self.scalar_type() == at::kBFloat16)\n"
-                "    return vendor::NvidiaVectorNorm(self, ord, dim, keepdim, dtype);\n"
-                "#endif\n"
-            )
-        elif op == "mm.out":
-            prelude += (
-                "#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)\n"
-                "  if (self.scalar_type() == at::kFloat || self.scalar_type() == at::kBFloat16)\n"
-                "    return vendor::NvidiaMmOut(self, mat2, out);\n"
-                "#endif\n"
-            )
         elif op in ("scatter_add", "scatter_add_"):
             # The FlagGems 2-D kernel reads indices linearly, even when strided.
-            name = (
-                "NvidiaScatterAdd" if op == "scatter_add" else "NvidiaScatterAddInplace"
-            )
             prelude += (
                 "  if (index.dim() == 2 && !index.is_contiguous()) {\n"
-                "#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)\n"
-                f"    return vendor::{name}(self, dim, index, src);\n"
-                "#else\n"
                 f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{op}>::call(self, dim, index, src);\n"
-                "#endif\n"
                 "  }\n"
             )
         elif op == "mul.Tensor":
@@ -1422,16 +1401,12 @@ def gen_flaggems_python_kernel(
                 "      (tensor.scalar_type() == at::kHalf || tensor.scalar_type() == at::kBFloat16) &&\n"
                 "      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point() &&\n"
                 "      (!scalar.unsafeGetTensorImpl()->is_wrapped_number() || !tensor.is_contiguous())) {\n"
-                "#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)\n"
-                "    return vendor::NvidiaMul(self, other);\n"
-                "#else\n"
                 "    auto result = at::native::call_fallback_fn<&cpu_fallback, at::_ops::mul_Tensor>::call(tensor, scalar);\n"
                 "    const auto strides = at::infer_dense_strides(tensor.sizes(), tensor.strides());\n"
                 "    if (result.strides().equals(strides)) return result;\n"
                 "    auto strided = at::empty_strided(result.sizes(), strides, result.options());\n"
                 "    strided.copy_(result);\n"
                 "    return strided;\n"
-                "#endif\n"
                 "  }\n"
             )
         elif op == "sort.stable":
@@ -1779,11 +1754,6 @@ FLAGGEMS_REDUCTION_ADAPTERS = {
 }
 
 _OUT_ADAPTER_MARKER = "// BEGIN GENERATED FLAGGEMS OUT ADAPTERS"
-_NVIDIA_ATEN_INCLUDE = (
-    "#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)\n"
-    '#include "backends/nvidia/aten_ops.h"\n'
-    "#endif"
-)
 
 
 def gen_flaggems_out_adapters(funcs):
@@ -1865,10 +1835,6 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
     if metadata_include not in refreshed:
         refreshed = refreshed.replace(
             '#include "ops.h"', '#include "ops.h"\n' + metadata_include, 1
-        )
-    if _NVIDIA_ATEN_INCLUDE not in refreshed:
-        refreshed = refreshed.replace(
-            '#include "ops.h"', '#include "ops.h"\n' + _NVIDIA_ATEN_INCLUDE, 1
         )
     for header in (
         "#include <ATen/ExpandUtils.h>",
@@ -2705,7 +2671,6 @@ def main():
         "#ifdef FLAGOS_FLAGGEMS_PYTHON",
         "",
         '#include "ops.h"',
-        _NVIDIA_ATEN_INCLUDE,
         "#include <ATen/ExpandUtils.h>",
         '#include "../device_boxing.h"',
         '#include "../backends/flagos/python_op_caller.h"',

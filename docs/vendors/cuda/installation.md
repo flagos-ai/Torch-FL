@@ -72,14 +72,16 @@ record — see [Testing](../../development/testing.md).
 
 ### FlashAttention 3 inference
 
-On NVIDIA with a CUDA PyTorch wheel and a compatible FlashAttention 3 package,
-the extension's dense and packed variable-length forward APIs accept FlagOS
-tensors. Torch-FL adds the PrivateUse1 kernel at the PyTorch dispatcher and
-checks that the extension's registered forward and CUDA schemas match. Use the
-installed package's usual Python API with tensors on `flagos`.
+The optional FlashAttention 3 package supplies the CUDA forward operator and
+its CUDA PyTorch runtime dependencies. Torch-FL can be built with CPU PyTorch.
+The CUDA PyTorch used with such a wheel must share the build's PyTorch release,
+source revision, and C++ ABI.
+The dispatcher bridges the package's dense and packed variable-length forward
+APIs on FlagOS tensors after checking its registered forward and CUDA schemas.
+Use the installed package's usual Python API with tensors on `flagos`.
 
-H100 parity tests cover FP16 and BF16, causal and non-causal attention, and the
-default and a separate FlagOS stream. The forward route runs the CUDA kernel on
+The parity suite exercises FP16 and BF16, causal and non-causal attention, and
+the default and a separate FlagOS stream. The forward route runs the CUDA kernel on
 the active FlagOS stream and copies its results into FlagOS-owned storage before
 returning. The supported scope is eager forward inference with read-only inputs.
 The vendor kernel supplies the packed variable-length FlashAttention 3 ABI and

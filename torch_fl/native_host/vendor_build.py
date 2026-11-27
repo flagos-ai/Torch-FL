@@ -255,14 +255,6 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
     target = package / "native_host/_generated" / (spec.module + ".so")
     shutil.copy2(module.__file__, target)
     artifacts[str(target.relative_to(package))] = digest(target)
-    sources = [
-        Path("scripts/codegen/native_host_policy.py"),
-        Path("scripts/codegen") / spec.catalog[0],
-        source,
-        header,
-    ]
-    if vendor == "nvidia":
-        sources.append(native_dir / "backends/nvidia/sdpa.h")
     manifest = {
         "schema_version": 1,
         "vendor": vendor,
@@ -278,7 +270,15 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
         "numerical_libraries": {
             name: digest(path) for name, path in module.libraries().items()
         },
-        "sources": {path.as_posix(): digest(source_root / path) for path in sources},
+        "sources": {
+            path.as_posix(): digest(source_root / path)
+            for path in (
+                Path("scripts/codegen/native_host_policy.py"),
+                Path("scripts/codegen") / spec.catalog[0],
+                source,
+                header,
+            )
+        },
     }
     if cohort["host_headers"]:
         manifest["published_host_headers"] = {

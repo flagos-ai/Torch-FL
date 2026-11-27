@@ -80,6 +80,28 @@ def test_nvidia_manifest_records_the_imported_upstream_triton(tmp_path, monkeypa
     backend.validate_record(record, adapter, triton_root, native_dir=NATIVE_SOURCE)
 
 
+def test_cpu_built_nvidia_hosts_accept_a_matching_cuda_torch_release():
+    loader = import_native_host("load")
+    manifest = {
+        "backend": {"vendor": "nvidia"},
+        "torch": "2.10.0+cpu",
+        "torch_git_version": "same-source",
+        "torch_cxx11_abi": True,
+    }
+    torch = SimpleNamespace(
+        __version__="2.10.0+cu130",
+        version=SimpleNamespace(cuda="13.0", git_version="same-source"),
+        compiled_with_cxx11_abi=lambda: True,
+    )
+    assert loader._same_torch_cohort(manifest, torch)
+    assert not loader._same_torch_cohort({**manifest, "torch": "2.10.1+cpu"}, torch)
+    assert not loader._same_torch_cohort(
+        {**manifest, "torch_git_version": "different-source"}, torch
+    )
+    assert not loader._same_torch_cohort({**manifest, "torch_cxx11_abi": False}, torch)
+    assert not loader._same_torch_cohort({**manifest, "backend": {}}, torch)
+
+
 @pytest.mark.parametrize("vendor", ["unregistered", "gcu", "cuda", "../nvidia"])
 def test_unvalidated_backend_never_inherits_a_cuda_shaped_abi(vendor):
     with pytest.raises(RuntimeError, match="no validated native-host launch adapter"):

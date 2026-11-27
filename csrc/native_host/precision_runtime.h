@@ -138,41 +138,16 @@ inline c10::cuda::CUDAStream VendorStream(const at::Tensor& input) {
       reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device)), device);
 }
 
-inline bool VendorDeviceIsCurrent(c10::DeviceIndex device) {
-  static const bool single_visible_device = c10::cuda::device_count() == 1;
-  return (device == 0 && single_visible_device) ||
-      c10::cuda::current_device() == device;
-}
-
 struct VendorScope {
-  std::optional<c10::cuda::CUDAGuard> device_guard;
-  std::optional<c10::cuda::CUDAStream> previous_stream;
-
-  explicit VendorScope(const at::Tensor& input) {
-    const auto stream = VendorStream(input);
-    const auto device = stream.device_index();
-    if (!VendorDeviceIsCurrent(device)) device_guard.emplace(device);
-    const auto current = c10::cuda::getCurrentCUDAStream(device);
-    // Default and external stream IDs can refer to the same CUDA handle.
-    if (current.stream() != stream.stream()) {
-      previous_stream = current;
-      c10::cuda::setCurrentCUDAStream(stream);
-    }
-  }
-
-  ~VendorScope() {
-    if (previous_stream) c10::cuda::setCurrentCUDAStream(*previous_stream);
-  }
+  c10::cuda::CUDAStreamGuard guard;
+  explicit VendorScope(const at::Tensor& input) : guard(VendorStream(input)) {}
 };
 
 struct VendorDeviceScope {
   // BLAS receives the FlagOS stream explicitly through its owned handle. It
   // needs the correct device, but does not consult ATen's CUDA stream registry.
-  std::optional<c10::cuda::CUDAGuard> guard;
-  explicit VendorDeviceScope(const at::Tensor& input) {
-    const auto device = VendorDevice(input);
-    if (!VendorDeviceIsCurrent(device)) guard.emplace(device);
-  }
+  c10::cuda::CUDAGuard guard;
+  explicit VendorDeviceScope(const at::Tensor& input) : guard(VendorDevice(input)) {}
 };
 
 #endif
@@ -183,7 +158,6 @@ inline void DescribeCudaMemory(at::TensorIteratorBase& iterator) {
   // PrivateUse1. The original vendor kernel checks these descriptors.
   for (int i = 0; i < iterator.ntensors(); ++i) {
     const auto device = iterator.tensor(i).device();
-    if (device.is_cpu() && iterator.is_cpu_scalar(i)) continue;
     TORCH_CHECK(device.is_privateuseone(), "unexpected native vendor operand device");
     iterator.operand(i).device = c10::Device(c10::DeviceType::CUDA, device.index());
   }

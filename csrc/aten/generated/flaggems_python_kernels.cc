@@ -4,9 +4,6 @@
 #ifdef FLAGOS_FLAGGEMS_PYTHON
 
 #include "ops.h"
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-#include "backends/nvidia/aten_ops.h"
-#endif
 #include "../strided_ops.h"
 #include <ATen/native/BinaryOps.h>
 #include <ATen/ExpandUtils.h>
@@ -2751,10 +2748,6 @@ at::Tensor & LinalgSolveTriangularOutKernelPython(const at::Tensor & self, const
 
 static TypedSourceSlot LinalgVectorNormFnSource("aten::linalg_vector_norm", "flag_gems.vector_norm", "19ae56bffce8523f631ab32f1215fa207a0d8e8f0903421aec5e55f13699f646", "{\"abi\": \"19ae56bffce8523f631ab32f1215fa207a0d8e8f0903421aec5e55f13699f646\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.vector_norm\", \"op\": \"aten::linalg_vector_norm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LinalgVectorNormKernelPython(const at::Tensor & self, const at::Scalar & ord, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-  if (self.scalar_type() == at::kFloat || self.scalar_type() == at::kBFloat16)
-    return vendor::NvidiaVectorNorm(self, ord, dim, keepdim, dtype);
-#endif
   auto result = LinalgVectorNormFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.vector_norm", {self, ord, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(ord), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
@@ -3268,10 +3261,6 @@ at::Tensor MmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
 
 static TypedSourceSlot MmOutFnSource("aten::mm.out", "flag_gems.mm_out", "8e42adb0b8e70779d3aff9fa45f4efadf8a6c3b998096f8f477ff84304ba1b3b", "{\"abi\": \"8e42adb0b8e70779d3aff9fa45f4efadf8a6c3b998096f8f477ff84304ba1b3b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mm_out\", \"op\": \"aten::mm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & MmOutKernelPython(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-  if (self.scalar_type() == at::kFloat || self.scalar_type() == at::kBFloat16)
-    return vendor::NvidiaMmOut(self, mat2, out);
-#endif
   MmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.mm_out", {self, mat2}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2), static_cast<const at::Tensor&>(out));
   return out;
 }
@@ -3306,16 +3295,12 @@ at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & oth
       (tensor.scalar_type() == at::kHalf || tensor.scalar_type() == at::kBFloat16) &&
       scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point() &&
       (!scalar.unsafeGetTensorImpl()->is_wrapped_number() || !tensor.is_contiguous())) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-    return vendor::NvidiaMul(self, other);
-#else
     auto result = at::native::call_fallback_fn<&cpu_fallback, at::_ops::mul_Tensor>::call(tensor, scalar);
     const auto strides = at::infer_dense_strides(tensor.sizes(), tensor.strides());
     if (result.strides().equals(strides)) return result;
     auto strided = at::empty_strided(result.sizes(), strides, result.options());
     strided.copy_(result);
     return strided;
-#endif
   }
   auto result = MulTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mul", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
@@ -4079,11 +4064,7 @@ at::Tensor & ScatterInplaceSrcKernelPython(at::Tensor & self, int64_t dim, const
 static TypedSourceSlot ScatterAddFnSource("aten::scatter_add", "flag_gems.scatter_add", "279ddf38208195221ada1e161952cd97d8927faf1d2b8c517c697b028c9fabaf", "{\"abi\": \"279ddf38208195221ada1e161952cd97d8927faf1d2b8c517c697b028c9fabaf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.scatter_add\", \"op\": \"aten::scatter_add\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ScatterAddKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
   if (index.dim() == 2 && !index.is_contiguous()) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-    return vendor::NvidiaScatterAdd(self, dim, index, src);
-#else
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::scatter_add>::call(self, dim, index, src);
-#endif
   }
   auto result = ScatterAddFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter_add", {self, dim, index, src}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src));
   UnboxToFlagos(result);
@@ -4093,11 +4074,7 @@ at::Tensor ScatterAddKernelPython(const at::Tensor & self, int64_t dim, const at
 static TypedSourceSlot ScatterAddInplaceFnSource("aten::scatter_add_", "flag_gems.scatter_add_", "577b4d62d45b26437fbf27c5f461a528c2f93240ba68e804a3e90bb69ae47dd1", "{\"abi\": \"577b4d62d45b26437fbf27c5f461a528c2f93240ba68e804a3e90bb69ae47dd1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.scatter_add_\", \"op\": \"aten::scatter_add_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ScatterAddInplaceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
   if (index.dim() == 2 && !index.is_contiguous()) {
-#if defined(FLAGOS_BUILTIN_NVIDIA_PRECISION)
-    return vendor::NvidiaScatterAddInplace(self, dim, index, src);
-#else
     return at::native::call_fallback_fn<&cpu_fallback, at::_ops::scatter_add_>::call(self, dim, index, src);
-#endif
   }
   auto result = ScatterAddInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter_add_", {self, dim, index, src}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src));
   self.copy_(result);

@@ -840,6 +840,8 @@ def main():
     manifest = {
         "package": namespace,
         "torch": torch.__version__,
+        "torch_git_version": torch.version.git_version,
+        "torch_cxx11_abi": torch.compiled_with_cxx11_abi(),
         "triton": triton.__version__,
         "backend": backend_record,
         "modules": {},
