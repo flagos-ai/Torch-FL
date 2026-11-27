@@ -12,6 +12,7 @@
 #include <ATen/native/Resize.h>
 #include <ATen/EmptyTensor.h>
 #include <ATen/MemoryOverlap.h>
+#include <ATen/TensorIterator.h>
 #include <ATen/ops/_pin_memory.h>
 #include <ATen/ops/_to_copy.h>
 #include <ATen/ops/view_as_real_native.h>
@@ -201,6 +202,29 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
     CopyInplaceSourceHost(promoted, src, /*non_blocking=*/false);
     CopyInplaceSourceHost(dst, promoted, /*non_blocking=*/false);
     return true;
+  }
+#endif
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  // The copy visits TensorIterator's physical dimensions. Collapsing adjacent
+  // strides lets the native FlagGems host launch its lower-rank copy kernel.
+  if (destination.dim() > 1 && !source.has_names() && !destination.has_names()) {
+    const auto iterator = at::TensorIteratorConfig()
+        .set_check_mem_overlap(false)
+        .resize_outputs(false)
+        .check_all_same_dtype(false)
+        .add_output(destination)
+        .add_const_input(source)
+        .build();
+    if (iterator.ndim() > 0 && iterator.ndim() < destination.dim()) {
+      c10::SmallVector<int64_t, 5> sizes, src_strides, dst_strides;
+      for (int dim = iterator.ndim() - 1; dim >= 0; --dim) {
+        sizes.push_back(iterator.shape()[dim]);
+        src_strides.push_back(iterator.strides(1)[dim] / source.element_size());
+        dst_strides.push_back(iterator.strides(0)[dim] / destination.element_size());
+      }
+      source = source.as_strided(sizes, src_strides);
+      destination = destination.as_strided(sizes, dst_strides);
+    }
   }
 #endif
   CopyInplaceSourceHost(destination, source, /*non_blocking=*/false);
