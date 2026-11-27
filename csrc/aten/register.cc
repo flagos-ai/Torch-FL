@@ -396,7 +396,7 @@ at::Tensor SelectDevicePositions(const at::Tensor& self, int64_t dim,
   }
   auto result = at::native::flagos::CallPythonOp_Generic(
       "flag_gems.index_select", {self, dim, positions.contiguous()});
-  at::native::flagos::UnboxToFlagos(result);
+  TORCH_CHECK(result.device() == self.device(), "index_select(): FlagGems changed the device");
   return result;
 }
 
