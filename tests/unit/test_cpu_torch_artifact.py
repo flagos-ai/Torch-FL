@@ -23,6 +23,10 @@ SPEC.loader.exec_module(CPU)
 VERSION = "2.10.0"
 INDEX = "https://download.pytorch.org/whl/cpu"
 TORCH = "torch-2.10.0+cpu-cp311-cp311-linux_aarch64.whl"
+CONSUMERS = [
+    ("integration-tests.yml", "integration-tests"),
+    ("build-wheel-common.yml", "build"),
+]
 
 
 def _cohort(directory):
@@ -254,13 +258,7 @@ def test_install_uses_only_verified_delivery_without_index_probes(tmp_path, chan
         )
 
 
-@pytest.mark.parametrize(
-    "workflow,job",
-    [
-        ("integration-tests.yml", "integration-tests"),
-        ("build-wheel-common.yml", "build"),
-    ],
-)
+@pytest.mark.parametrize("workflow,job", CONSUMERS)
 def test_only_ascend_prefetches_and_other_hardware_lanes_still_run(workflow, job):
     data = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())
     jobs = data["jobs"]
@@ -269,19 +267,32 @@ def test_only_ascend_prefetches_and_other_hardware_lanes_still_run(workflow, job
     assert "needs.cpu-torch.result == 'skipped'" in consumer["if"]
     assert "!cancelled()" in consumer["if"]
     steps = consumer["steps"]
-    receive = next(
-        i
-        for i, step in enumerate(steps)
-        if step.get("uses") == "actions/download-artifact@v4"
-    )
+    delivery = [step for step in steps if "id" in step]
     setup = next(
-        i
-        for i, step in enumerate(steps)
-        if "TORCH_FL_CPU_TORCH_WHEELHOUSE" in step.get("env", {})
+        step for step in steps if "TORCH_FL_CPU_TORCH_WHEELHOUSE" in step.get("env", {})
     )
-    assert receive < setup
-    assert all(
-        "TORCH_FL_CPU_TORCH_WHEELHOUSE" not in step.get("run", "") for step in steps
+    receive, retry, verify = (
+        next(step for step in delivery if step["id"] == step_id)
+        for step_id in ("receive-wheels", "retry-wheels", "verify-wheelhouse")
+    )
+    assert steps.index(receive) < steps.index(retry) < steps.index(verify)
+    assert steps.index(verify) < steps.index(setup)
+    assert receive["uses"] == retry["uses"] == "actions/download-artifact@v4"
+    assert receive["with"]["name"] == retry["with"]["name"]
+    assert receive["with"]["path"] == "${{ steps.wheelhouse.outputs.path }}"
+    assert retry["with"]["path"] == "${{ steps.wheelhouse.outputs.retry-path }}"
+    assert retry["timeout-minutes"] < receive["timeout-minutes"]
+    assert retry["if"] == (
+        "needs.cpu-torch.outputs.artifact_name != '' && "
+        "steps.receive-wheels.outputs.download-path == ''"
+    )
+    assert verify["if"] == "needs.cpu-torch.result == 'success'"
+    assert verify["env"]["WHEELHOUSE_PATH"] == (
+        "${{ steps.receive-wheels.outputs.download-path || "
+        "steps.retry-wheels.outputs.download-path }}"
+    )
+    assert setup["env"]["TORCH_FL_CPU_TORCH_WHEELHOUSE"] == (
+        "${{ steps.verify-wheelhouse.outputs.path }}"
     )
     assert "--check-build-env" in next(
         step["run"]
@@ -290,13 +301,7 @@ def test_only_ascend_prefetches_and_other_hardware_lanes_still_run(workflow, job
     )
 
 
-@pytest.mark.parametrize(
-    "workflow,job",
-    [
-        ("integration-tests.yml", "integration-tests"),
-        ("build-wheel-common.yml", "build"),
-    ],
-)
+@pytest.mark.parametrize("workflow,job", CONSUMERS)
 def test_delivery_does_not_reuse_a_previous_jobs_wheels(tmp_path, workflow, job):
     data = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())
     steps = data["jobs"][job]["steps"]
@@ -319,18 +324,87 @@ def test_delivery_does_not_reuse_a_previous_jobs_wheels(tmp_path, workflow, job)
             capture_output=True,
             timeout=10,
         )
-        path = Path(output.read_text().strip().removeprefix("path="))
-        assert path.parent == tmp_path
-        assert list(path.iterdir()) == []
-        directories.append(path)
-    assert directories[0] != directories[1]
+        paths = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        initial, retry = Path(paths["path"]), Path(paths["retry-path"])
+        assert initial.parent == retry.parent
+        assert initial.parent.parent == tmp_path
+        for path in (initial, retry):
+            assert list(path.iterdir()) == []
+            (path / "partial.whl").touch()
+            directories.append(path)
+    assert len(set(directories)) == 4
     assert (old / "old-release.whl").read_bytes() == b"previous cohort"
-    receive = next(
-        step for step in steps if step.get("uses") == "actions/download-artifact@v4"
+
+
+@pytest.mark.parametrize("workflow,job", CONSUMERS)
+@pytest.mark.parametrize(
+    "damage,message",
+    [
+        (None, "Verified CPU Torch artifact"),
+        ("no-output", "No completed download of the pinned Ascend wheelhouse"),
+        ("missing", "file set differs from its manifest"),
+        ("checksum", "CPU wheelhouse checksum mismatch"),
+        ("vendor-pin", "Published wheel differs from the pinned artifact"),
+    ],
+)
+def test_only_verified_delivery_is_passed_to_setup(
+    tmp_path, workflow, job, damage, message
+):
+    data = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())
+    verify = next(
+        step
+        for step in data["jobs"][job]["steps"]
+        if step.get("id") == "verify-wheelhouse"
     )
-    setup = next(
-        step for step in steps if "TORCH_FL_CPU_TORCH_WHEELHOUSE" in step.get("env", {})
+    wheelhouse = tmp_path / "received wheels"
+    wheelhouse.mkdir()
+    pins = {
+        "CPU_TORCH_VERSION_DEFAULT": VERSION,
+        "CPU_TORCH_INDEX_URL_DEFAULT": INDEX,
+        "CPU_TORCH_WHEEL_SHA256_ascend": _cohort(wheelhouse),
+    }
+    manifest = wheelhouse / "cohort.json"
+    record = json.loads(manifest.read_text())
+    for package in ("FLAGTREE", "FLAGGEMS", "FLAGCX"):
+        name = f"{package.lower()}-1.0-py3-none-any.whl"
+        payload = package.encode()
+        checksum = hashlib.sha256(payload).hexdigest()
+        (wheelhouse / name).write_bytes(payload)
+        record["files"][name] = checksum
+        pins[f"{package}_WHEEL_ascend"] = name
+        pins[f"{package}_WHEEL_SHA256_ascend"] = checksum
+    manifest.write_text(json.dumps(record))
+    if damage == "missing":
+        (wheelhouse / TORCH).unlink()
+    elif damage == "checksum":
+        (wheelhouse / TORCH).write_bytes(b"truncated")
+    elif damage == "vendor-pin":
+        pins["FLAGCX_WHEEL_SHA256_ascend"] = "0" * 64
+
+    scripts = tmp_path / ".github/scripts"
+    scripts.mkdir(parents=True)
+    (scripts / SCRIPT.name).symlink_to(SCRIPT)
+    (scripts.parent / "version-pins.env").write_text(
+        "".join(f"{name}={value}\n" for name, value in pins.items())
     )
-    expected = "${{ steps.wheelhouse.outputs.path }}"
-    assert receive["with"]["path"] == expected
-    assert setup["env"]["TORCH_FL_CPU_TORCH_WHEELHOUSE"] == expected
+    output = tmp_path / "github-output"
+    output.touch()
+    done = subprocess.run(
+        ["bash", "-c", verify["run"]],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "WHEELHOUSE_PATH": "" if damage == "no-output" else str(wheelhouse),
+            "GITHUB_OUTPUT": str(output),
+        },
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert message in done.stdout + done.stderr
+    if damage:
+        assert done.returncode != 0
+        assert not output.read_text()
+    else:
+        assert done.returncode == 0, done.stderr
+        assert output.read_text() == f"path={wheelhouse}\n"

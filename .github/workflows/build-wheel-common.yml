@@ -160,15 +160,17 @@ jobs:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
 
-      - name: Prepare isolated published-wheel directory
+      - name: Prepare isolated published-wheel directories
         id: wheelhouse
         if: needs.cpu-torch.outputs.artifact_name != ''
         run: |
           set -euo pipefail
           directory="$(mktemp -d "$RUNNER_TEMP/published-wheels.XXXXXX")"
-          printf 'path=%s\n' "$directory" >> "$GITHUB_OUTPUT"
+          mkdir "$directory/initial" "$directory/retry"
+          printf 'path=%s/initial\nretry-path=%s/retry\n' "$directory" "$directory" >> "$GITHUB_OUTPUT"
 
-      - name: Receive verified published wheels
+      - name: Receive published wheels
+        id: receive-wheels
         if: needs.cpu-torch.outputs.artifact_name != ''
         uses: actions/download-artifact@v4
         timeout-minutes: 45
@@ -176,10 +178,41 @@ jobs:
           name: ${{ needs.cpu-torch.outputs.artifact_name }}
           path: ${{ steps.wheelhouse.outputs.path }}
 
+      # Keep the same completion and verification checks as integration-tests.yml.
+      - name: Retry unfinished published-wheel download
+        id: retry-wheels
+        if: needs.cpu-torch.outputs.artifact_name != '' && steps.receive-wheels.outputs.download-path == ''
+        uses: actions/download-artifact@v4
+        timeout-minutes: 15
+        with:
+          name: ${{ needs.cpu-torch.outputs.artifact_name }}
+          path: ${{ steps.wheelhouse.outputs.retry-path }}
+
+      - name: Verify published wheel delivery
+        id: verify-wheelhouse
+        if: needs.cpu-torch.result == 'success'
+        env:
+          WHEELHOUSE_PATH: ${{ steps.receive-wheels.outputs.download-path || steps.retry-wheels.outputs.download-path }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$WHEELHOUSE_PATH" ]]; then
+            echo "::error::No completed download of the pinned Ascend wheelhouse."
+            exit 1
+          fi
+          source .github/version-pins.env
+          python3 .github/scripts/prepare_cpu_torch.py verify \
+            --directory "$WHEELHOUSE_PATH" \
+            --version "$CPU_TORCH_VERSION_DEFAULT" --index-url "$CPU_TORCH_INDEX_URL_DEFAULT" \
+            --sha256 "$CPU_TORCH_WHEEL_SHA256_ascend" \
+            --pinned-wheel "$FLAGTREE_WHEEL_ascend" "$FLAGTREE_WHEEL_SHA256_ascend" \
+            --pinned-wheel "$FLAGGEMS_WHEEL_ascend" "$FLAGGEMS_WHEEL_SHA256_ascend" \
+            --pinned-wheel "$FLAGCX_WHEEL_ascend" "$FLAGCX_WHEEL_SHA256_ascend"
+          printf 'path=%s\n' "$WHEELHOUSE_PATH" >> "$GITHUB_OUTPUT"
+
       - name: Prepare platform environment
         env:
           CI_STAGE: build
-          TORCH_FL_CPU_TORCH_WHEELHOUSE: ${{ steps.wheelhouse.outputs.path }}
+          TORCH_FL_CPU_TORCH_WHEELHOUSE: ${{ steps.verify-wheelhouse.outputs.path }}
         run: bash "${{ inputs.setup_script }}" --platform "${{ inputs.setup_platform }}"
 
       - name: Install build tools
