@@ -163,7 +163,7 @@ at::Tensor TryCuDnnAttention(const at::Tensor& query, const at::Tensor& key,
   pointers[kValue] = const_cast<void*>(value.const_data_ptr());
   pointers[kOutput] = output.mutable_data_ptr();
   pointers[kScale] = &factor;
-  const auto status = compiled.graph.execute(
+  auto status = compiled.graph.execute(
       state.handle, pointers, workspace.defined() ? workspace.mutable_data_ptr() : nullptr);
   TORCH_CHECK(status.is_good(), "cuDNN attention failed: ", status.get_message());
   return output;
