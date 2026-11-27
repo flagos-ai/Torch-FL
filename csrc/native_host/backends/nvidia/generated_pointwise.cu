@@ -14,6 +14,78 @@ namespace {
 
 namespace cg = cooperative_groups;
 
+constexpr int kNormThreads = 128;
+constexpr int kNormVectorWidth = 4;
+struct alignas(8) NormVector { __nv_bfloat16 values[kNormVectorWidth]; };
+struct NormMoments { float mean, squared_delta, samples; };
+
+__device__ NormMoments CombineMoments(NormMoments current, NormMoments incoming) {
+  const float count = current.samples + incoming.samples;
+  if (!count) return {};
+  const float inverse = 1.0f / count;
+  const float incoming_weight = incoming.samples * inverse;
+  const float current_weight = current.samples * inverse;
+  const float delta = current.mean - incoming.mean;
+  return {incoming_weight * incoming.mean + current_weight * current.mean,
+          incoming.squared_delta + current.squared_delta +
+              delta * delta * incoming.samples * current_weight,
+          count};
+}
+
+__global__ void LayerNorm(const NormVector* input, const NormVector* weight,
+                          const NormVector* bias, NormVector* output, float* mean,
+                          float* rstd, int width, float epsilon) {
+  const auto warp = cg::tiled_partition<32>(cg::this_thread_block());
+  const int vectors = width / kNormVectorWidth;
+  const auto base = int64_t(blockIdx.x) * vectors;
+  NormMoments moments{};
+  for (int index = threadIdx.x; index < vectors; index += kNormThreads) {
+    const auto items = input[base + index];
+    #pragma unroll
+    for (const auto item : items.values) {
+      const float value = __bfloat162float(item);
+      const float delta = value - moments.mean;
+      moments.samples += 1.0f;
+      moments.mean += delta * (1.0f / moments.samples);
+      moments.squared_delta += delta * (value - moments.mean);
+    }
+  }
+  for (int offset = 16; offset; offset /= 2) {
+    moments = CombineMoments(moments,
+        {warp.shfl_down(moments.mean, offset), warp.shfl_down(moments.squared_delta, offset),
+         warp.shfl_down(moments.samples, offset)});
+  }
+  __shared__ NormMoments partials[kNormThreads / 32];
+  if (!warp.thread_rank()) partials[threadIdx.x / 32] = moments;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    // Preserve the two-stage warp reduction used for aligned CUDA rows.
+    const auto row = CombineMoments(CombineMoments(partials[0], partials[2]),
+                                    CombineMoments(partials[1], partials[3]));
+    partials[0].mean = row.mean;
+    partials[0].squared_delta = rsqrtf(row.squared_delta / float(width) + epsilon);
+    mean[blockIdx.x] = partials[0].mean;
+    rstd[blockIdx.x] = partials[0].squared_delta;
+  }
+  __syncthreads();
+  const auto stats = partials[0];
+  for (int index = threadIdx.x; index < vectors; index += kNormThreads) {
+    const auto values = input[base + index];
+    const auto weights = weight[index];
+    const auto offsets = bias[index];
+    NormVector result;
+    #pragma unroll
+    for (int element = 0; element < kNormVectorWidth; ++element) {
+      const float value = __bfloat162float(values.values[element]);
+      const float normalized = stats.squared_delta * (value - stats.mean);
+      result.values[element] = __float2bfloat16_rn(fmaf(
+          __bfloat162float(weights.values[element]), normalized,
+          __bfloat162float(offsets.values[element])));
+    }
+    output[base + index] = result;
+  }
+}
+
 template <PointwiseOp Op>
 __device__ float Evaluate(float value, float scalar) {
   if constexpr (Op == PointwiseOp::PowScalar) return powf(scalar, value);
@@ -182,6 +254,16 @@ cudaError_t LaunchMeanLastDim(const float* input, float* output, int rows, int w
                               int lanes, int rows_per_block, float scale, cudaStream_t stream) {
   MeanLastDim<<<(rows + rows_per_block - 1) / rows_per_block, dim3(lanes, rows_per_block), 0, stream>>>(
       reinterpret_cast<const float4*>(input), output, rows, width / 4, scale);
+  return cudaGetLastError();
+}
+
+cudaError_t LaunchLayerNorm(const void* input, const void* weight, const void* bias,
+                            void* output, float* mean, float* rstd, int rows,
+                            int width, float epsilon, cudaStream_t stream) {
+  LayerNorm<<<rows, kNormThreads, 0, stream>>>(
+      static_cast<const NormVector*>(input), static_cast<const NormVector*>(weight),
+      static_cast<const NormVector*>(bias), static_cast<NormVector*>(output),
+      mean, rstd, width, epsilon);
   return cudaGetLastError();
 }
 

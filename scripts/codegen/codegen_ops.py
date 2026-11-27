@@ -1504,6 +1504,15 @@ def gen_flaggems_python_kernel(
                 "  }\n"
                 "#endif\n"
             )
+        elif op == "native_layer_norm":
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (weight && bias) {\n"
+                "    auto result = ::flagos::nvidia::TryLayerNorm(input, normalized_shape, *weight, *bias, eps);\n"
+                "    if (std::get<0>(result).defined()) return result;\n"
+                "  }\n"
+                "#endif\n"
+            )
         elif op == "constant_pad_nd":
             # The published kernel specializes source at runtime for each rank.
             # ATen's shape/fill/copy composition keeps the data on-device.
@@ -2576,6 +2585,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         ("scatter_add", "functional_pure", set()),
         ("scatter_add_", "inplace", set()),
         ("mul.Tensor", "functional_pure", set()),
+        ("native_layer_norm", "tuple_return", set()),
         ("sort.stable", "tuple_return", {"stable", "dim", "descending"}),
         ("add_.Tensor", "inplace", {"alpha"}),
         ("sub.Tensor", "functional_pure", {"alpha"}),
@@ -2627,6 +2637,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "scatter_add": "scatter_add",
                 "scatter_add_": "scatter_add_",
                 "mul.Tensor": "mul",
+                "native_layer_norm": "native_layer_norm",
                 "sort.stable": "sort_stable",
                 "add_.Tensor": "add_",
                 "sub.Tensor": "sub",

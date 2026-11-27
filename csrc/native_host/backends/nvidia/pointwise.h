@@ -4,8 +4,10 @@
 #pragma once
 
 #include <cstdint>
+#include <tuple>
 
 namespace at { class Tensor; }
+namespace c10 { template <typename T> class ArrayRef; }
 
 namespace flagos::nvidia {
 
@@ -16,6 +18,9 @@ at::Tensor TryPointwise(PointwiseOp op, const at::Tensor& input,
 at::Tensor TryDivide(const at::Tensor& left, const at::Tensor& right);
 at::Tensor TryMeanLastDim(const at::Tensor& input, bool keepdim);
 at::Tensor TryChannelNorm(const at::Tensor& input, bool keepdim);
+std::tuple<at::Tensor, at::Tensor, at::Tensor> TryLayerNorm(
+    const at::Tensor& input, c10::ArrayRef<int64_t> normalized_shape,
+    const at::Tensor& weight, const at::Tensor& bias, double epsilon);
 
 struct DivisionLayout {
   static constexpr int max_dimensions = 8;

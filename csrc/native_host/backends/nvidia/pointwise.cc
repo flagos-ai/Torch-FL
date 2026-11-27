@@ -4,6 +4,8 @@
 #include "pointwise.h"
 
 #include <ATen/TensorIterator.h>
+#include <ATen/core/grad_mode.h>
+#include <ATen/native/layer_norm.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_like.h>
 #include <c10/core/DeviceGuard.h>
@@ -22,6 +24,9 @@ cudaError_t LaunchDivide(const float* left, const float* right, float* out,
                          int64_t size, DivisionLayout layout, cudaStream_t stream);
 cudaError_t LaunchMeanLastDim(const float* input, float* output, int rows, int width,
                               int lanes, int rows_per_block, float scale, cudaStream_t stream);
+cudaError_t LaunchLayerNorm(const void* input, const void* weight, const void* bias,
+                            void* output, float* mean, float* rstd, int rows,
+                            int width, float epsilon, cudaStream_t stream);
 cudaError_t LaunchChannelNorm(const void* input, void* output, int groups,
                               int channels, int cells, float* partials, int partitions,
                               cudaStream_t stream);
@@ -102,6 +107,46 @@ at::Tensor TryMeanLastDim(const at::Tensor& input, bool keepdim) {
   TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK mean launch failed: ",
               cudaGetErrorString(status));
   return result;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> TryLayerNorm(
+    const at::Tensor& input, at::IntArrayRef normalized_shape,
+    const at::Tensor& weight, const at::Tensor& bias, double epsilon) {
+  const auto device = input.device();
+  if (!device.is_privateuseone()) return {};
+  for (const auto* tensor : {&input, &weight, &bias}) {
+    if (!tensor->defined() || tensor->device() != device ||
+        tensor->scalar_type() != at::kBFloat16 || tensor->layout() != at::kStrided ||
+        !tensor->is_contiguous() ||
+        !tensor->numel() || tensor->is_neg() || tensor->has_names() ||
+        reinterpret_cast<uintptr_t>(tensor->const_data_ptr()) % 8) {
+      return {};
+    }
+  }
+  if (at::GradMode::is_enabled() &&
+      (input.requires_grad() || weight.requires_grad() || bias.requires_grad())) {
+    return {};
+  }
+  const auto [rows, width] =
+      at::native::_check_layer_norm_inputs(input, normalized_shape, weight, bias);
+  if (width % 4 || width > (1 << std::numeric_limits<float>::digits) ||
+      rows > std::numeric_limits<int>::max()) {
+    return {};
+  }
+  auto stats_shape = input.sizes().vec();
+  std::fill(stats_shape.end() - normalized_shape.size(), stats_shape.end(), 1);
+  const c10::OptionalDeviceGuard guard(device);
+  auto output = at::empty(input.sizes(), input.options());
+  auto mean = at::empty(stats_shape, input.options().dtype(at::kFloat));
+  auto rstd = at::empty(stats_shape, input.options().dtype(at::kFloat));
+  const auto queue = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device.index()));
+  const auto status = LaunchLayerNorm(
+      input.const_data_ptr(), weight.const_data_ptr(), bias.const_data_ptr(),
+      output.mutable_data_ptr(), mean.mutable_data_ptr<float>(), rstd.mutable_data_ptr<float>(),
+      rows, width, epsilon, queue);
+  TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK layer norm failed: ",
+              cudaGetErrorString(status));
+  return {output, mean, rstd};
 }
 
 at::Tensor TryChannelNorm(const at::Tensor& input, bool keepdim) {

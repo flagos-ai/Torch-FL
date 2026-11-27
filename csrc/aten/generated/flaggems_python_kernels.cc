@@ -3630,6 +3630,12 @@ static TypedSourceSlot NativeGroupNormBackwardFnSource("aten::native_group_norm_
 
 static TypedSourceSlot NativeLayerNormFnSource("aten::native_layer_norm", "flag_gems.native_layer_norm", "95743593c99762af62cdf694b89a49df0ec3bfd396851fd5ec28c23b17b140dd", "{\"abi\": \"95743593c99762af62cdf694b89a49df0ec3bfd396851fd5ec28c23b17b140dd\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.native_layer_norm\", \"op\": \"aten::native_layer_norm\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeLayerNormKernelPython(const at::Tensor & input, at::IntArrayRef normalized_shape, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, double eps) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (weight && bias) {
+    auto result = ::flagos::nvidia::TryLayerNorm(input, normalized_shape, *weight, *bias, eps);
+    if (std::get<0>(result).defined()) return result;
+  }
+#endif
   auto result = NativeLayerNormFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.native_layer_norm", {input, normalized_shape, weight, bias, eps}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const at::IntArrayRef&>(normalized_shape), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const double&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
