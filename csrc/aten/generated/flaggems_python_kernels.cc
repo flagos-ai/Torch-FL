@@ -676,6 +676,15 @@ at::Tensor & AddcmulInplaceKernelPython(at::Tensor & self, const at::Tensor & te
 
 static TypedSourceSlot AddmmFnSource("aten::addmm", "flag_gems.addmm", "b3c7331b92ae21c60eb406f10f1905182dbab0e9790ae3e32f48783ddeec21c8", "{\"abi\": \"b3c7331b92ae21c60eb406f10f1905182dbab0e9790ae3e32f48783ddeec21c8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addmm\", \"op\": \"aten::addmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AddmmKernelPython(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, const at::Scalar & beta, const at::Scalar & alpha) {
+#if defined(FLAGOS_ACCEL_CUDA)
+  if (mat1.dim() == 2 && mat2.dim() == 2 && mat1.size(1) > 0 &&
+      mat1.size(1) < 16 && mat1.size(1) == mat2.size(0)) {
+    const auto padding = 16 - mat1.size(1);
+    auto left = at::constant_pad_nd(mat1, {0, padding}, 0);
+    auto right = at::constant_pad_nd(mat2, {0, 0, 0, padding}, 0);
+    return at::addmm(self, left, right, beta, alpha);
+  }
+#endif
   auto result = AddmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmm", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat1), static_cast<const at::Tensor&>(mat2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
@@ -694,10 +703,18 @@ at::Tensor & AddmmDtypeOutKernelPython(const at::Tensor & self, const at::Tensor
   return out;
 }
 
-static TypedSourceSlot AddmmOutFnSource("aten::addmm.out", "flag_gems.addmm_out", "b9ea5f42a92b62393d110b7a0da433283115509893cbd2968b7c622fc85397e9", "{\"abi\": \"b9ea5f42a92b62393d110b7a0da433283115509893cbd2968b7c622fc85397e9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addmm_out\", \"op\": \"aten::addmm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
+static TypedSourceSlot AddmmOutFnSource("aten::addmm.out", "flag_gems.addmm_out", "4257693c5335f198b661abcb47fa76c20e6ecead68d1c55a3ce8ed475d1d68b7", "{\"abi\": \"4257693c5335f198b661abcb47fa76c20e6ecead68d1c55a3ce8ed475d1d68b7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.addmm_out\", \"op\": \"aten::addmm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddmmOutKernelPython(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, const at::Scalar & beta, const at::Scalar & alpha, at::Tensor & out) {
-  auto result = AddmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmm_out", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat1), static_cast<const at::Tensor&>(mat2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
-  out.copy_(result);
+#if defined(FLAGOS_ACCEL_CUDA)
+  if (mat1.dim() == 2 && mat2.dim() == 2 && mat1.size(1) > 0 &&
+      mat1.size(1) < 16 && mat1.size(1) == mat2.size(0)) {
+    const auto padding = 16 - mat1.size(1);
+    auto left = at::constant_pad_nd(mat1, {0, padding}, 0);
+    auto right = at::constant_pad_nd(mat2, {0, 0, 0, padding}, 0);
+    return at::addmm_out(out, self, left, right, beta, alpha);
+  }
+#endif
+  AddmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmm_out", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}, PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat1), static_cast<const at::Tensor&>(mat2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha), static_cast<const at::Tensor&>(out));
   return out;
 }
 

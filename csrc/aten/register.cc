@@ -263,6 +263,12 @@ at::Tensor WrapperToCopy(
       self, dtype, layout, device, pin_memory, non_blocking, memory_format);
 }
 
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+at::Tensor& DeviceAdvancedIndexPut(
+    at::Tensor& self, const c10::List<std::optional<at::Tensor>>& indices,
+    const at::Tensor& values, bool accumulate);
+#endif
+
 at::Tensor& WrapperIndexPut_(
     at::Tensor& self,
     const c10::List<::std::optional<at::Tensor>>& indices,
@@ -270,9 +276,7 @@ at::Tensor& WrapperIndexPut_(
     bool accumulate) {
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
   if (!at::native::flagos::CpuFallbackAllowed()) {
-    at::native::flagos::CallPythonOp_Generic(
-        "flag_gems.index_put_", {self, indices, values, accumulate});
-    return self;
+    return DeviceAdvancedIndexPut(self, indices, values, accumulate);
   }
 #endif
   TORCH_CHECK(at::native::flagos::CpuFallbackAllowed(),
@@ -423,20 +427,24 @@ at::Tensor DeviceIndexSelect(const at::Tensor& self, int64_t dim,
       self, dim, NormalizeDeviceIndex(index, self.size(dim), false));
 }
 
-at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
-                                   const c10::List<std::optional<at::Tensor>>& raw,
-                                   at::Tensor& out) {
-  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == self.scalar_type(),
-              "index(): output must match input device and dtype");
-  at::assert_no_internal_overlap(out);
-  at::assert_no_overlap(out, self);
+struct IndexedAxes {
+  at::Tensor input;
+  at::Tensor flattened;
+  at::Tensor positions;
+  int64_t axis;
+  std::vector<int64_t> output_shape;
+};
+
+IndexedAxes PrepareDeviceIndices(
+    const at::Tensor& self, const c10::List<std::optional<at::Tensor>>& raw,
+    const at::Tensor& destination) {
   auto indices_ref = at::IOptTensorListRef(raw);
   at::native::checkIndexTensorTypes(indices_ref, /*allow_int=*/true);
   for (const auto& index : indices_ref) {
     if (!index || !index->defined()) continue;
     TORCH_CHECK_INDEX(index->is_cpu() || index->device() == self.device(),
                       "index(): indices must be on the CPU or input device");
-    at::assert_no_overlap(out, *index);
+    at::assert_no_overlap(destination, *index);
   }
   auto indices = at::native::expandTensors(
       self, indices_ref, /*ensure_same_device=*/true);
@@ -451,8 +459,7 @@ at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
   auto first = std::find_if(indices.begin(), indices.end(),
                             [](const auto& tensor) { return tensor.defined(); });
   if (first == indices.end()) {
-    at::native::resize_output(out, input.sizes());
-    return out.copy_(input);
+    return {input, input, {}, 0, input.sizes().vec()};
   }
   auto before = std::distance(indices.begin(), first);
   auto end = before;
@@ -466,12 +473,69 @@ at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
   // One gather along the flattened indexed axes also covers indices with
   // different broadcast shapes and separates them from untouched axes.
   auto flattened = input.flatten(before, end - 1);
-  auto selected = SelectDevicePositions(flattened, before, linear.flatten());
   auto shape = input.sizes().slice(0, before).vec();
   shape.insert(shape.end(), linear.sizes().begin(), linear.sizes().end());
   shape.insert(shape.end(), input.sizes().begin() + end, input.sizes().end());
-  at::native::resize_output(out, shape);
-  return out.copy_(selected.reshape(shape));
+  return {std::move(input), std::move(flattened), linear.flatten(), before,
+          std::move(shape)};
+}
+
+at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
+                                   const c10::List<std::optional<at::Tensor>>& raw,
+                                   at::Tensor& out) {
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == self.scalar_type(),
+              "index(): output must match input device and dtype");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  auto plan = PrepareDeviceIndices(self, raw, out);
+  at::native::resize_output(out, plan.output_shape);
+  if (!plan.positions.defined()) return out.copy_(plan.input);
+  auto selected = SelectDevicePositions(plan.flattened, plan.axis, plan.positions);
+  return out.copy_(selected.reshape(plan.output_shape));
+}
+
+at::Tensor& DeviceAdvancedIndexPut(
+    at::Tensor& self, const c10::List<std::optional<at::Tensor>>& raw,
+    const at::Tensor& values, bool accumulate) {
+  TORCH_CHECK(values.scalar_type() == self.scalar_type(),
+              "index_put(): input and assigned values must have the same dtype");
+  TORCH_CHECK(values.device() == self.device() ||
+              (values.is_cpu() && values.dim() == 0),
+              "index_put(): values must be on the input device or a CPU scalar");
+  at::assert_no_internal_overlap(self);
+  at::assert_no_overlap(self, values);
+  auto plan = PrepareDeviceIndices(self, raw, self);
+  auto expanded = values.to(self.device()).expand(plan.output_shape);
+  if (!plan.positions.defined()) {
+    return accumulate ? self.add_(expanded) : self.copy_(expanded);
+  }
+  auto update_shape = plan.flattened.sizes().vec();
+  update_shape[plan.axis] = plan.positions.numel();
+  auto updates = expanded.reshape(update_shape);
+  if (!updates.numel()) return self;
+
+  std::vector<int64_t> index_shape(plan.flattened.dim(), 1);
+  at::Tensor result;
+  if (accumulate) {
+    index_shape[plan.axis] = plan.positions.numel();
+    auto scatter_indices = plan.positions.reshape(index_shape).expand(update_shape);
+    result = at::native::flagos::CallPythonOp_Generic(
+        "flag_gems.scatter_reduce",
+        {plan.flattened, plan.axis, scatter_indices.contiguous(), updates, "sum"});
+  } else {
+    // Pick the last value for repeated positions using an integer max. The
+    // remaining operations only gather or copy the original value bits.
+    auto extent = plan.flattened.size(plan.axis);
+    auto ordinals = at::arange(plan.positions.numel(), plan.positions.options());
+    auto missing = at::full({extent}, -1, plan.positions.options());
+    auto mapping = at::native::flagos::CallPythonOp_Generic(
+        "flag_gems.scatter_reduce", {missing, 0, plan.positions, ordinals, "amax"});
+    auto selected = SelectDevicePositions(updates, plan.axis, mapping.clamp_min(0));
+    index_shape[plan.axis] = extent;
+    result = at::where(mapping.ge(0).reshape(index_shape), selected, plan.flattened);
+  }
+  plan.input.copy_(result.reshape(plan.input.sizes()));
+  return self;
 }
 
 at::Tensor& DeviceUpsampleNearestExact2dOut(

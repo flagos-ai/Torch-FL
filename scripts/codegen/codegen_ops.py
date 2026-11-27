@@ -1371,6 +1371,23 @@ def gen_flaggems_python_kernel(
                 "    at::native::alpha_check(at::result_type(self, other), alpha);\n"
                 "#endif\n"
             )
+        elif op in ("addmm", "addmm.out"):
+            # Keep the contracting tile legal with FlagTree's small-block
+            # autotuning. This also serves the registered out overload.
+            call = "at::addmm(self, left, right, beta, alpha)"
+            if op == "addmm.out":
+                call = "at::addmm_out(out, self, left, right, beta, alpha)"
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA)\n"
+                "  if (mat1.dim() == 2 && mat2.dim() == 2 && mat1.size(1) > 0 &&\n"
+                "      mat1.size(1) < 16 && mat1.size(1) == mat2.size(0)) {\n"
+                "    const auto padding = 16 - mat1.size(1);\n"
+                "    auto left = at::constant_pad_nd(mat1, {0, padding}, 0);\n"
+                "    auto right = at::constant_pad_nd(mat2, {0, 0, 0, padding}, 0);\n"
+                f"    return {call};\n"
+                "  }\n"
+                "#endif\n"
+            )
         elif op == "mean.dim":
             # FlagGems reduces by dividing by the outer extent, which may be zero.
             prelude += (
@@ -1862,6 +1879,8 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
             refreshed = refreshed.replace(include, include + "\n" + header, 1)
     for op, category, keywords in (
         ("add.Tensor", "functional_pure", {"alpha"}),
+        ("addmm", "functional_pure", {"beta", "alpha"}),
+        ("addmm.out", "out_variant_gemskwout", {"beta", "alpha", "out"}),
         ("constant_pad_nd", "functional_pure", set()),
         ("mean.dim", "functional_pure", {"dtype"}),
         ("linalg_vector_norm", "functional_pure", {"dtype"}),
@@ -1893,6 +1912,8 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
             "flag_gems."
             + {
                 "add.Tensor": "add",
+                "addmm": "addmm",
+                "addmm.out": "addmm_out",
                 "constant_pad_nd": "constant_pad_nd",
                 "mean.dim": "mean_dim",
                 "linalg_vector_norm": "vector_norm",
@@ -2892,10 +2913,8 @@ def main():
             # which no numerics comparison can see.
             "_unsafe_view",
             # compile: FlagTree AABS shrinks tl.dot's K tile below 16 (see above)
-            "addmm",
             "addmm.dtype",
             "addmm.dtype_out",
-            "addmm.out",
             "addmm_",
         }
 

@@ -79,11 +79,36 @@ def test_index_selection_and_advanced_indexing_without_cpu_fallback():
     try:
         result = source[rows.to(source.device), :, columns.to(source.device)]
         selected = source.index_select(1, torch.tensor([3, 1]).to(source.device))
+        values = torch.arange(16).reshape(2, 2, 4) - 32
+        source[rows.to(source.device), :, columns.to(source.device)] = values.to(
+            source.device
+        )
     finally:
         torch.ops.flagos.strict_host_routes(not was_allowed)
     torch.testing.assert_close(result.cpu(), host[rows, :, columns])
     torch.testing.assert_close(
         selected.cpu(), host.index_select(1, torch.tensor([3, 1]))
+    )
+    host[rows, :, columns] = values
+    torch.testing.assert_close(source.cpu(), host)
+
+
+@pytest.mark.nvidia
+@pytest.mark.flaggems_python
+def test_small_addmm_writes_to_the_supplied_output_on_device():
+    bias = torch.arange(4, dtype=torch.bfloat16)
+    left = torch.arange(12, dtype=torch.bfloat16).reshape(4, 3)
+    right = torch.arange(12, dtype=torch.bfloat16).reshape(3, 4)
+    arguments = [tensor.to("flagos:0") for tensor in (bias, left, right)]
+    out = torch.empty((4, 4), device="flagos:0", dtype=bias.dtype)
+    was_allowed = torch.ops.flagos.cpu_fallback_allowed()
+    torch.ops.flagos.strict_host_routes(True)
+    try:
+        assert torch.addmm(*arguments, out=out) is out
+    finally:
+        torch.ops.flagos.strict_host_routes(not was_allowed)
+    torch.testing.assert_close(
+        out.cpu(), torch.addmm(bias, left, right), rtol=0, atol=0
     )
 
 

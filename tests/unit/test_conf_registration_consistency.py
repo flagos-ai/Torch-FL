@@ -684,7 +684,7 @@ def test_conf_route_counts_are_stable():
         # trips per forward on the OCR-RM value head -- reach the FlagGems route
         # instead of cpu_fallback. The generated mul.out adapter uses the
         # same functional route and writes into the caller's output tensor.
-        "nvidia": {"flaggems": 552, "none": 1483},
+        "nvidia": {"flaggems": 554, "none": 1481},
         # dcu/metax/ppu are CUDA-ABI platforms with no vendor kernel of their
         # own on this tree, and a default conf never routes boxing (AGENTS.md,
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each
