@@ -36,6 +36,7 @@
 #include <ATen/NamedTensorUtils.h>
 #include <ATen/native/IndexingUtils.h>
 #include <ATen/native/Resize.h>
+#include <ATen/native/UpSample.h>
 #include "backends/flagos/python_op_caller.h"
 #endif
 // TsingMicro's RNG kernels are claimed directly below rather than through a
@@ -327,8 +328,9 @@ bool WrapperEqual(const at::Tensor& self, const at::Tensor& other) {
                                          other.unsafeGetTensorImpl())) {
     return false;
   }
-  TORCH_CHECK(self.device() == other.device(), "Cannot compare tensors on different devices: ",
-              self.device(), " and ", other.device());
+  TORCH_CHECK(self.device() == other.device(),
+              "Cannot compare tensors on different devices: ", self.device(),
+              " and ", other.device());
   if (!self.sizes().equals(other.sizes())) return false;
   if (self.numel() == 0) return true;
   at::NoNamesGuard guard;
@@ -337,7 +339,8 @@ bool WrapperEqual(const at::Tensor& self, const at::Tensor& other) {
 
 at::Tensor& DeviceProdDimOut(const at::Tensor& self, int64_t dim, bool keepdim,
                             std::optional<at::ScalarType> dtype, at::Tensor& out) {
-  TORCH_CHECK(self.device() == out.device(), "prod(): output device must match the input");
+  TORCH_CHECK(self.device() == out.device(),
+              "prod(): output device must match the input");
   TORCH_CHECK(!dtype || *dtype == out.scalar_type(),
               "prod(): dtype must match the output tensor");
   at::assert_no_internal_overlap(out);
@@ -396,23 +399,28 @@ at::Tensor SelectDevicePositions(const at::Tensor& self, int64_t dim,
   }
   auto result = at::native::flagos::CallPythonOp_Generic(
       "flag_gems.index_select", {self, dim, positions.contiguous()});
-  TORCH_CHECK(result.device() == self.device(), "index_select(): FlagGems changed the device");
+  TORCH_CHECK(result.device() == self.device(),
+              "index_select(): FlagGems changed the device");
   return result;
 }
 
 at::Tensor DeviceIndexSelect(const at::Tensor& self, int64_t dim,
                              const at::Tensor& index) {
-  TORCH_CHECK(index.device() == self.device(), "index_select(): index device must match input");
-  TORCH_CHECK_INDEX(index.dim() <= 1 &&
-                    (index.scalar_type() == at::kInt || index.scalar_type() == at::kLong),
-                    "index_select(): expected a vector of int32 or int64 indices");
+  TORCH_CHECK(index.device() == self.device(),
+              "index_select(): index device must match input");
+  const auto index_type = index.scalar_type();
+  TORCH_CHECK_INDEX(
+      index.dim() <= 1 && (index_type == at::kInt || index_type == at::kLong),
+      "index_select(): expected a vector of int32 or int64 indices");
   dim = at::maybe_wrap_dim(dim, self.dim());
   if (self.dim() == 0) {
-    TORCH_CHECK_INDEX(index.numel() == 1, "index_select(): scalar input requires one index");
+    TORCH_CHECK_INDEX(index.numel() == 1,
+                      "index_select(): scalar input requires one index");
     NormalizeDeviceIndex(index, 1, false);
     return self.clone();
   }
-  return SelectDevicePositions(self, dim, NormalizeDeviceIndex(index, self.size(dim), false));
+  return SelectDevicePositions(
+      self, dim, NormalizeDeviceIndex(index, self.size(dim), false));
 }
 
 at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
@@ -430,7 +438,8 @@ at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
                       "index(): indices must be on the CPU or input device");
     at::assert_no_overlap(out, *index);
   }
-  auto indices = at::native::expandTensors(self, indices_ref, /*ensure_same_device=*/true);
+  auto indices = at::native::expandTensors(
+      self, indices_ref, /*ensure_same_device=*/true);
   TORCH_CHECK_INDEX(static_cast<int64_t>(indices.size()) <= self.dim(),
                     "too many indices for tensor of dimension ", self.dim());
   indices = at::expand_outplace(indices);
@@ -454,6 +463,8 @@ at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
     linear = linear.defined() ? linear.mul(extent).add(current) : current;
     ++end;
   }
+  // One gather along the flattened indexed axes also covers indices with
+  // different broadcast shapes and separates them from untouched axes.
   auto flattened = input.flatten(before, end - 1);
   auto selected = SelectDevicePositions(flattened, before, linear.flatten());
   auto shape = input.sizes().slice(0, before).vec();
@@ -461,6 +472,32 @@ at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
   shape.insert(shape.end(), input.sizes().begin() + end, input.sizes().end());
   at::native::resize_output(out, shape);
   return out.copy_(selected.reshape(shape));
+}
+
+at::Tensor& DeviceUpsampleNearestExact2dOut(
+    const at::Tensor& self, at::IntArrayRef size,
+    std::optional<double> scale_h, std::optional<double> scale_w, at::Tensor& out) {
+  const auto shape = at::native::upsample_2d_common_check(self.sizes(), size);
+  TORCH_CHECK(self.size(1) > 0,
+              "nearest-exact: input must have a nonempty channel dimension");
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == self.scalar_type(),
+              "nearest-exact: output must match input device and dtype");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  auto result = self;
+  const auto resize_axis = [&](int64_t axis, std::optional<double> scale) {
+    if (shape[axis] == self.size(axis)) return;
+    const auto ratio = at::native::compute_scales_value<float>(
+        scale, self.size(axis), shape[axis]);
+    auto positions = at::arange(shape[axis], self.options().dtype(at::kFloat));
+    positions = positions.add(0.5f).mul(ratio).floor().to(at::kLong);
+    positions.clamp_max_(self.size(axis) - 1);
+    result = SelectDevicePositions(result, axis, positions);
+  };
+  resize_axis(2, scale_h);
+  resize_axis(3, scale_w);
+  at::native::resize_output(out, shape);
+  return out.copy_(result);
 }
 
 std::optional<float> NvidiaScalarReciprocal(const at::Tensor& self,
@@ -1015,6 +1052,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
       FlagosWrapperConvolutionBackwardOverrideable);
 #endif
 #if defined(FLAGOS_ACCEL_CUDA)
+  m.impl("_upsample_nearest_exact2d.out", DeviceUpsampleNearestExact2dOut);
   m.impl("equal", WrapperEqual);
   m.impl("index.Tensor_out", DeviceAdvancedIndexOut);
   m.impl("index_select", DeviceIndexSelect);

@@ -85,3 +85,20 @@ def test_index_selection_and_advanced_indexing_without_cpu_fallback():
     torch.testing.assert_close(
         selected.cpu(), host.index_select(1, torch.tensor([3, 1]))
     )
+
+
+@pytest.mark.nvidia
+@pytest.mark.flaggems_python
+@pytest.mark.parametrize("layout", [torch.contiguous_format, torch.channels_last])
+def test_nearest_exact_uses_device_indices(layout):
+    host = torch.arange(30, dtype=torch.bfloat16).reshape(1, 2, 3, 5)
+    host = host.contiguous(memory_format=layout)
+    source = host.to("flagos:0")
+    was_allowed = torch.ops.flagos.cpu_fallback_allowed()
+    torch.ops.flagos.strict_host_routes(True)
+    try:
+        result = F.interpolate(source, scale_factor=(2.0, 1.5), mode="nearest-exact")
+    finally:
+        torch.ops.flagos.strict_host_routes(not was_allowed)
+    expected = F.interpolate(host, scale_factor=(2.0, 1.5), mode="nearest-exact")
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
