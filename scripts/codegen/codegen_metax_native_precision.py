@@ -118,17 +118,20 @@ __global__ void MeanLastDim(const float4* input, float* output, int rows, int ve
   }
 }
 
+template <bool KeepPartials>
 __global__ void ChannelNorm(const __nv_bfloat16* input, __nv_bfloat16* output,
-                             int channels, int cells) {
+                             float* partials, int channels, int cells) {
   const auto group = cg::tiled_partition<4>(cg::this_thread_block());
   const int cell = blockIdx.x * (blockDim.x / 4) + threadIdx.x / 4;
   if (cell >= cells) return;
+  const auto index = int64_t(blockIdx.y) * cells + cell;
   const auto* data = input + int64_t(blockIdx.y) * channels * cells + cell;
+  const int step = group.size() * gridDim.z;
   float squares[4]{};
-  for (int c = group.thread_rank(); c < channels; c += 16) {
+  for (int c = blockIdx.z * group.size() + group.thread_rank(); c < channels; c += 4 * step) {
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
-      const int channel = c + 4 * j;
+      const int channel = c + step * j;
       if (channel < channels) {
         const float value = __bfloat162float(data[int64_t(channel) * cells]);
         squares[j] = fmaf(value, value, squares[j]);
@@ -137,8 +140,28 @@ __global__ void ChannelNorm(const __nv_bfloat16* input, __nv_bfloat16* output,
   }
   const auto sum = cg::reduce(
       group, ((squares[0] + squares[1]) + squares[2]) + squares[3], cg::plus<float>());
-  if (group.thread_rank() == 0)
-    output[int64_t(blockIdx.y) * cells + cell] = __float2bfloat16_rn(sqrtf(sum));
+  if (group.thread_rank() == 0) {
+    if constexpr (KeepPartials) {
+      partials[int64_t(blockIdx.z) * gridDim.y * cells + index] = sum;
+    } else {
+      output[index] = __float2bfloat16_rn(sqrtf(sum));
+    }
+  }
+}
+
+__global__ void FinishChannelNorm(const float* partials, __nv_bfloat16* output,
+                                  int partitions, int cells) {
+  const auto group = cg::tiled_partition<4>(cg::this_thread_block());
+  const int cell = blockIdx.x * (blockDim.x / 4) + threadIdx.x / 4;
+  if (cell >= cells) return;
+  const auto index = int64_t(blockIdx.y) * cells + cell;
+  const auto stride = int64_t(gridDim.y) * cells;
+  float value = 0;
+  for (int part = group.thread_rank(); part < partitions; part += group.size()) {
+    value += partials[part * stride + index];
+  }
+  const auto sum = cg::reduce(group, value, cg::plus<float>());
+  if (group.thread_rank() == 0) output[index] = __float2bfloat16_rn(sqrtf(sum));
 }
 
 }  // namespace
@@ -177,12 +200,24 @@ cudaError_t LaunchMeanLastDim(const float* input, float* output, int rows, int w
 }
 
 cudaError_t LaunchChannelNorm(const void* input, void* output, int groups,
-                              int channels, int cells, cudaStream_t stream) {
+                              int channels, int cells, float* partials, int partitions,
+                              cudaStream_t stream) {
   constexpr int cells_per_block = 32;
   const dim3 grid((cells + cells_per_block - 1) / cells_per_block, groups);
-  ChannelNorm<<<grid, cells_per_block * 4, 0, stream>>>(
-      static_cast<const __nv_bfloat16*>(input), static_cast<__nv_bfloat16*>(output),
-      channels, cells);
+  const auto* source = static_cast<const __nv_bfloat16*>(input);
+  auto* result = static_cast<__nv_bfloat16*>(output);
+  if (partitions == 1) {
+    ChannelNorm<false><<<grid, cells_per_block * 4, 0, stream>>>(
+        source, result, nullptr, channels, cells);
+  } else {
+    const dim3 partial_grid(grid.x, grid.y, partitions);
+    ChannelNorm<true><<<partial_grid, cells_per_block * 4, 0, stream>>>(
+        source, nullptr, partials, channels, cells);
+    const auto status = cudaGetLastError();
+    if (status != cudaSuccess) return status;
+    FinishChannelNorm<<<grid, cells_per_block * 4, 0, stream>>>(
+        partials, result, partitions, cells);
+  }
   return cudaGetLastError();
 }
 

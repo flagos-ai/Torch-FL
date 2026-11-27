@@ -23,7 +23,8 @@ cudaError_t LaunchDivide(const float* left, const float* right, float* out,
 cudaError_t LaunchMeanLastDim(const float* input, float* output, int rows, int width,
                               int lanes, int rows_per_block, float scale, cudaStream_t stream);
 cudaError_t LaunchChannelNorm(const void* input, void* output, int groups,
-                              int channels, int cells, cudaStream_t stream);
+                              int channels, int cells, float* partials, int partitions,
+                              cudaStream_t stream);
 
 at::Tensor TryPointwise(PointwiseOp op, const at::Tensor& input, float scalar) {
   const auto dtype = input.scalar_type();
@@ -109,7 +110,7 @@ at::Tensor TryChannelNorm(const at::Tensor& input, bool keepdim) {
       input.is_neg() || input.has_names()) return {};
   const auto channels = input.size(1), cells = input.stride(1);
   if (cells < 128 || cells > std::numeric_limits<int>::max() - 31 || cells % 4 ||
-      channels < 64 || channels > 1020 ||
+      channels < 64 || input.numel() > std::numeric_limits<int>::max() / 2 ||
       reinterpret_cast<uintptr_t>(input.const_data_ptr()) % 8) return {};
   const auto groups = input.numel() / (channels * cells);
   if (groups < 1 || groups > 65535) return {};
@@ -126,10 +127,35 @@ at::Tensor TryChannelNorm(const at::Tensor& input, bool keepdim) {
   else
     shape.erase(shape.begin() + 1);
   const c10::OptionalDeviceGuard guard(input.device());
+  int64_t partitions = 1;
+  const auto values_per_lane = (channels + 3) / 4;
+  if (values_per_lane >= 256) {
+    // The CUDA reduction splits wide channel planes across blocks when
+    // their output tiles alone would leave multiprocessors underoccupied.
+    const auto output_tiles = (groups * cells + 127) / 128;
+    const auto device = input.device().index();
+    int multiprocessors = 0, threads_per_mp = 0;
+    if (cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount, device) != cudaSuccess ||
+        cudaDeviceGetAttribute(&threads_per_mp, cudaDevAttrMaxThreadsPerMultiProcessor, device) != cudaSuccess)
+      return {};
+    const int64_t target_tiles = int64_t(multiprocessors) * (threads_per_mp / 128);
+    if (output_tiles <= target_tiles) {
+      partitions = std::max(std::min((target_tiles + output_tiles - 1) / output_tiles,
+                                     (values_per_lane + 15) / 16),
+                            (values_per_lane + 255) / 256);
+      if (partitions > 65535) return {};
+    }
+  }
   auto result = at::empty(shape, input.options());
+  at::Tensor storage;
+  float* partials = nullptr;
+  if (partitions > 1) {
+    storage = at::empty({partitions, result.numel()}, input.options().dtype(at::kFloat));
+    partials = storage.mutable_data_ptr<float>();
+  }
   const auto queue = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(input.device().index()));
   const auto status = LaunchChannelNorm(input.const_data_ptr(), result.mutable_data_ptr(),
-                                        groups, channels, cells, queue);
+                                        groups, channels, cells, partials, partitions, queue);
   TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK channel norm launch failed: ",
               cudaGetErrorString(status));
   return result;
