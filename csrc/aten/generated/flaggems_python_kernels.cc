@@ -3370,21 +3370,16 @@ at::Tensor MseLossBackwardKernelPython(const at::Tensor & grad_output, const at:
 static TypedSourceSlot MulTensorFnSource("aten::mul.Tensor", "flag_gems.mul", "8101128c7200897c8e10a3deebc523678c14898916831d2b4c3af03763d0f1a2", "{\"abi\": \"8101128c7200897c8e10a3deebc523678c14898916831d2b4c3af03763d0f1a2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mul\", \"op\": \"aten::mul.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
 #if defined(FLAGOS_NATIVE_HOSTS)
-  if ((self.is_cpu() || other.is_cpu()) && MulTensorFnSource.Available()) {
+  if (self.is_cpu() || other.is_cpu()) {
     const auto& tensor = self.is_cpu() ? other : self;
     const auto& scalar = self.is_cpu() ? self : other;
     // The compiled scalar path takes a device tensor followed by a wrapped number.
     if (tensor.is_privateuseone() && scalar.dim() == 0 &&
         !scalar.unsafeGetTensorImpl()->is_wrapped_number() &&
         tensor.is_floating_point() && scalar.is_floating_point() &&
-        at::result_type(tensor, scalar) == tensor.scalar_type()) {
-      auto value = scalar.item();
-#if defined(USE_DCU)
-      // HCU Torch rounds a leading host scalar before a BF16 product.
-      if (self.is_cpu() && tensor.scalar_type() == at::kBFloat16)
-        value = at::Scalar(value.toBFloat16());
-#endif
-      return MulTensorKernelPython(tensor, at::native::wrapped_scalar_tensor(value));
+        at::result_type(tensor, scalar) == tensor.scalar_type() &&
+        MulTensorFnSource.Available()) {
+      return MulTensorKernelPython(tensor, at::native::wrapped_scalar_tensor(scalar.item()));
     }
   }
 #endif
