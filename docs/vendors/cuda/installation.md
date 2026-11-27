@@ -81,6 +81,10 @@ memory-efficient attention algorithm for aligned wide BF16 heads. The kernel
 is instantiated at build time from the published CUTLASS headers and the CPU
 PyTorch wheel's attention template.
 
+The Native Host build without vendor PyTorch kernels serves single-rank
+collectives on local device buffers. Multi-rank FlagOS groups in this build
+require FlagCX.
+
 The optional FlashAttention 3 package supplies the CUDA forward
 operator and its CUDA PyTorch runtime dependencies.
 The CUDA PyTorch used with such a wheel must share the build's PyTorch release,

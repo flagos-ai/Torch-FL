@@ -71,7 +71,7 @@ import torch
 import torch.distributed as dist
 from torch._C import _distributed_c10d as _c10d
 
-from torch_fl import _env
+from torch_fl import _env, _platform
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +302,117 @@ def _completed_work(result=None):
     future = torch.futures.Future()
     future.set_result(result)
     return _c10d._create_work_from_future(future)
+
+
+class _SingleRankCollectives:
+    """Single-rank collectives over the caller's tensors and device streams."""
+
+    def __init__(self, store, timeout):
+        # c10d uses this backend for the group name and store identity.
+        self.c10d_backend = (
+            dist.ProcessGroupGloo(store, 0, 1)
+            if timeout is None
+            else dist.ProcessGroupGloo(store, 0, 1, timeout=timeout)
+        )
+
+    @staticmethod
+    @torch.no_grad()
+    def _copy(outputs, inputs):
+        devices = set()
+        for output, source in zip(outputs, inputs, strict=True):
+            if (
+                output.device != source.device
+                or output.dtype != source.dtype
+                or output.numel() != source.numel()
+            ):
+                raise RuntimeError("single-rank collective requires matching buffers")
+            if output is not source:
+                output.copy_(source.reshape(output.shape))
+            if output.device.type in _HOST_STAGED_TYPES:
+                devices.add(output.device)
+        for device in devices:
+            torch.accelerator.synchronize(device)
+        return _completed_work(outputs)
+
+    @staticmethod
+    def _check_reduction(opts):
+        operation = getattr(opts.reduceOp, "op", opts.reduceOp)
+        if operation == dist.ReduceOp.PREMUL_SUM:
+            raise NotImplementedError("single-rank PREMUL_SUM is unsupported")
+
+    @staticmethod
+    def _check_root(opts):
+        if opts.rootRank != 0:
+            raise ValueError("single-rank collective requires root rank 0")
+
+    def allreduce(self, tensors, opts):
+        self._check_reduction(opts)
+        return self._copy(tensors, tensors)
+
+    allreduce_coalesced = allreduce
+
+    def reduce(self, tensors, opts):
+        self._check_root(opts)
+        return self.allreduce(tensors, opts)
+
+    def broadcast(self, tensors, opts):
+        self._check_root(opts)
+        if not 0 <= opts.rootTensor < len(tensors):
+            raise ValueError("invalid single-rank broadcast root tensor")
+        return self._copy(tensors, [tensors[opts.rootTensor]] * len(tensors))
+
+    def allgather(self, output_tensors, input_tensors, opts):
+        outputs = [self._one(group) for group in output_tensors]
+        return self._copy(outputs, input_tensors)
+
+    def allgather_coalesced(self, output_tensors, input_tensors, opts):
+        return self._copy(self._one(output_tensors), input_tensors)
+
+    def allgather_into_tensor_coalesced(self, output_tensors, input_tensors, opts):
+        return self._copy(output_tensors, input_tensors)
+
+    def _allgather_base(self, output, source, opts):
+        return self._copy([output], [source])
+
+    alltoall = allgather_into_tensor_coalesced
+
+    def gather(self, output_tensors, input_tensors, opts):
+        self._check_root(opts)
+        return self.allgather(output_tensors, input_tensors, opts)
+
+    def _reduce_scatter_base(self, output, source, opts):
+        self._check_reduction(opts)
+        return self._allgather_base(output, source, opts)
+
+    def reduce_scatter_tensor_coalesced(self, output_tensors, input_tensors, opts):
+        self._check_reduction(opts)
+        return self._copy(output_tensors, input_tensors)
+
+    def reduce_scatter(self, output_tensors, input_tensors, opts):
+        self._check_reduction(opts)
+        return self._copy(output_tensors, [self._one(group) for group in input_tensors])
+
+    def scatter(self, output_tensors, input_tensors, opts):
+        self._check_root(opts)
+        return self._copy(output_tensors, [self._one(group) for group in input_tensors])
+
+    def alltoall_base(self, output, source, output_splits, input_splits, opts):
+        if (output_splits and output_splits != [output.size(0)]) or (
+            input_splits and input_splits != [source.size(0)]
+        ):
+            raise RuntimeError("single-rank all-to-all requires one full split")
+        return self._allgather_base(output, source, opts)
+
+    def barrier(self, opts):
+        for device in opts.device_ids or (None,):
+            torch.accelerator.synchronize(device)
+        return _completed_work()
+
+    @staticmethod
+    def _one(tensors):
+        if len(tensors) != 1:
+            raise RuntimeError("expected a single-rank collective buffer")
+        return tensors[0]
 
 
 def _allgather_into_tensor_coalesced(group, output_tensors, input_tensors, opts):
@@ -550,9 +661,15 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         # _HostStagedGloo is a facade, not a Backend: what has to be registered
         # for the group identity to have somewhere to live is the gloo group it
         # wraps (see its c10d_backend property).
+        single_rank = isinstance(inner, _SingleRankCollectives)
         inner = getattr(inner, "c10d_backend", inner)
         try:
-            device = torch.device("privateuseone", max(torch.cuda.current_device(), 0))
+            index = (
+                torch.accelerator.current_device_index()
+                if single_rank
+                else torch.cuda.current_device()
+            )
+            device = torch.device("privateuseone", max(index, 0))
             self._register_backend(device, dist.ProcessGroup.BackendType.CUSTOM, inner)
         except Exception:  # noqa: BLE001  - never block PG creation on this
             pass
@@ -560,15 +677,23 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
     def _build_inner(self, store, rank, world_size, timeout):
         """Create the inner backend and return the view-conversion function.
 
-        Table-driven by GEMS_VENDOR (see _VENDOR_PROFILES). For every vendor the
-        priority is: FlagCX (heterogeneous unified comm) first, then the vendor's
-        native backend (NCCL / HCCL / MCCL), then host-staged gloo. The returned
+        Table-driven by GEMS_VENDOR (see _VENDOR_PROFILES). An NVIDIA Native Host
+        group uses local device copies at size one and FlagCX at larger sizes.
+        Other builds try FlagCX, the vendor's native backend, then staged gloo. The returned
         callable maps a flagos (privateuseone) tensor to the physical device view
         the chosen inner backend expects; it is the identity for tensors already
         off flagos, and None for the staged tier, which converts operands itself.
         """
         vendor = os.environ.get("GEMS_VENDOR", _DEFAULT_VENDOR)
         prof = _get_profile(vendor)
+        build = _platform.build_info()
+        independent_nvidia = (
+            vendor == "nvidia" and build.native_hosts and "vendor" not in build.kernels
+        )
+
+        if independent_nvidia and world_size == 1:
+            self._inner = _SingleRankCollectives(store, timeout)
+            return None
 
         # --- Try FlagCX first (heterogeneous unified comm) ---
         # FlagCX self-registers the "flagcx" backend for prof.flagcx_dev on
@@ -578,6 +703,9 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         # _DistributedBackendOptions the same way c10d does.
         if self._try_build_flagcx(store, rank, world_size, timeout):
             return self._resolve_view(prof, vendor, backend="flagcx")
+
+        if independent_nvidia:
+            raise RuntimeError("Multi-rank NVIDIA Native Host groups require FlagCX")
 
         # --- Native vendor backend fallback (NCCL / HCCL) ---
         if prof.native is not None:
