@@ -1432,19 +1432,51 @@ def gen_flaggems_python_kernel(
                 "  const auto& scalar = self.device().is_cpu() ? self : other;\n"
                 "  const auto dtype = tensor.scalar_type();\n"
                 "  const bool low_precision = dtype == at::kHalf || dtype == at::kBFloat16;\n"
-                "  if (tensor.device().is_privateuseone() &&\n"
-                "      (low_precision || dtype == at::kFloat) &&\n"
-                "      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point() &&\n"
+                "  const bool host_scalar = tensor.device().is_privateuseone() &&\n"
+                "      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point();\n"
+                "  if (host_scalar && (low_precision || dtype == at::kFloat) &&\n"
                 "      (!scalar.unsafeGetTensorImpl()->is_wrapped_number() ||\n"
                 "       (low_precision && !tensor.is_contiguous()))) {\n"
                 "    const auto output_dtype = at::result_type(tensor, scalar);\n"
                 "    const auto accumulation = output_dtype == at::kDouble ? at::kDouble : at::kFloat;\n"
                 "    auto result = at::mul(tensor.to(accumulation), scalar.item()).to(output_dtype);\n"
-                "    const auto strides = at::infer_dense_strides(tensor.sizes(), tensor.strides());\n"
-                "    if (result.strides().equals(strides)) return result;\n"
-                "    auto strided = at::empty_strided(result.sizes(), strides, result.options());\n"
-                "    strided.copy_(result);\n"
-                "    return strided;\n"
+                "    return RestorePointwiseLayout(tensor, std::move(result));\n"
+                "  }\n"
+            )
+            body = body.replace(
+                "  return result;",
+                "  if (host_scalar) return RestorePointwiseLayout(tensor, std::move(result));\n"
+                "  return result;",
+            )
+        elif op == "sub.Tensor":
+            # Pass the CPU scalar value to the published scalar variants
+            # while preserving alpha and operand order.
+            prelude += (
+                "  const bool cpu_lhs = self.device().is_cpu();\n"
+                "  const auto& tensor = cpu_lhs ? other : self;\n"
+                "  const auto& scalar = cpu_lhs ? self : other;\n"
+                "  if (tensor.device().is_privateuseone() && tensor.is_floating_point() &&\n"
+                "      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point()) {\n"
+                "    const auto dtype = at::result_type(tensor, scalar);\n"
+                "    const auto accumulation = dtype == at::kDouble ? at::kDouble : at::kFloat;\n"
+                "    auto input = tensor.to(accumulation);\n"
+                "    const auto value = scalar.item();\n"
+                '    const std::vector<PyKwarg> kwargs = {{"alpha", alpha}};\n'
+                f'    auto result = cpu_lhs ? CallPythonOp_GenericKw("{gems_func}", {{value, input}}, kwargs)\n'
+                f'                          : CallPythonOp_GenericKw("{gems_func}", {{input, value}}, kwargs);\n'
+                "    return RestorePointwiseLayout(tensor, result.to(dtype));\n"
+                "  }\n"
+            )
+        elif op == "div.Tensor":
+            # Match GPU true division's rounding for a CPU scalar divisor.
+            prelude += (
+                "  if (self.device().is_privateuseone() && self.is_floating_point() &&\n"
+                "      other.device().is_cpu() && other.dim() == 0 && other.is_floating_point()) {\n"
+                "    const auto dtype = at::result_type(self, other);\n"
+                "    const auto accumulation = dtype == at::kDouble ? at::kDouble : at::kFloat;\n"
+                "    const auto reciprocal = 1.0 / other.item<double>();\n"
+                "    auto result = at::mul(self.to(accumulation), reciprocal).to(dtype);\n"
+                "    return RestorePointwiseLayout(self, std::move(result));\n"
                 "  }\n"
             )
         elif op == "sort.stable":

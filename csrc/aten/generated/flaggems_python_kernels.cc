@@ -1617,6 +1617,14 @@ at::Tensor DivScalarModeKernelPython(const at::Tensor & self, const at::Scalar &
 
 static TypedSourceSlot DivTensorFnSource("aten::div.Tensor", "flag_gems.true_divide", "d5196e9829770e9ea743df195e4a82aaf91d1b83d51bf46cb849724582875754", "{\"abi\": \"d5196e9829770e9ea743df195e4a82aaf91d1b83d51bf46cb849724582875754\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.true_divide\", \"op\": \"aten::div.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DivTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
+  if (self.device().is_privateuseone() && self.is_floating_point() &&
+      other.device().is_cpu() && other.dim() == 0 && other.is_floating_point()) {
+    const auto dtype = at::result_type(self, other);
+    const auto accumulation = dtype == at::kDouble ? at::kDouble : at::kFloat;
+    const auto reciprocal = 1.0 / other.item<double>();
+    auto result = at::mul(self.to(accumulation), reciprocal).to(dtype);
+    return RestorePointwiseLayout(self, std::move(result));
+  }
   auto result = DivTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.true_divide", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
@@ -3315,22 +3323,19 @@ at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & oth
   const auto& scalar = self.device().is_cpu() ? self : other;
   const auto dtype = tensor.scalar_type();
   const bool low_precision = dtype == at::kHalf || dtype == at::kBFloat16;
-  if (tensor.device().is_privateuseone() &&
-      (low_precision || dtype == at::kFloat) &&
-      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point() &&
+  const bool host_scalar = tensor.device().is_privateuseone() &&
+      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point();
+  if (host_scalar && (low_precision || dtype == at::kFloat) &&
       (!scalar.unsafeGetTensorImpl()->is_wrapped_number() ||
        (low_precision && !tensor.is_contiguous()))) {
     const auto output_dtype = at::result_type(tensor, scalar);
     const auto accumulation = output_dtype == at::kDouble ? at::kDouble : at::kFloat;
     auto result = at::mul(tensor.to(accumulation), scalar.item()).to(output_dtype);
-    const auto strides = at::infer_dense_strides(tensor.sizes(), tensor.strides());
-    if (result.strides().equals(strides)) return result;
-    auto strided = at::empty_strided(result.sizes(), strides, result.options());
-    strided.copy_(result);
-    return strided;
+    return RestorePointwiseLayout(tensor, std::move(result));
   }
   auto result = MulTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mul", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
+  if (host_scalar) return RestorePointwiseLayout(tensor, std::move(result));
   return result;
 }
 
@@ -4640,6 +4645,20 @@ at::Tensor StdCorrectionKernelPython(const at::Tensor & self, at::OptionalIntArr
 
 static TypedSourceSlot SubTensorFnSource("aten::sub.Tensor", "flag_gems.sub", "91a4775c8b6ade3a6b35d5989964f9ab855c0b029bd262de2334903024b59d97", "{\"abi\": \"91a4775c8b6ade3a6b35d5989964f9ab855c0b029bd262de2334903024b59d97\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.sub\", \"op\": \"aten::sub.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SubTensorKernelPython(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
+  const bool cpu_lhs = self.device().is_cpu();
+  const auto& tensor = cpu_lhs ? other : self;
+  const auto& scalar = cpu_lhs ? self : other;
+  if (tensor.device().is_privateuseone() && tensor.is_floating_point() &&
+      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point()) {
+    const auto dtype = at::result_type(tensor, scalar);
+    const auto accumulation = dtype == at::kDouble ? at::kDouble : at::kFloat;
+    auto input = tensor.to(accumulation);
+    const auto value = scalar.item();
+    const std::vector<PyKwarg> kwargs = {{"alpha", alpha}};
+    auto result = cpu_lhs ? CallPythonOp_GenericKw("flag_gems.sub", {value, input}, kwargs)
+                          : CallPythonOp_GenericKw("flag_gems.sub", {input, value}, kwargs);
+    return RestorePointwiseLayout(tensor, result.to(dtype));
+  }
   auto result = SubTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sub", {self, other}, {PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;

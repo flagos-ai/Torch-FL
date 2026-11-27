@@ -53,6 +53,29 @@ def test_equal_and_mul_out_without_cpu_fallback():
 
 @pytest.mark.nvidia
 @pytest.mark.flaggems_python
+def test_float_arithmetic_accepts_cpu_scalar_tensors():
+    host = torch.linspace(-2, 2, 30).reshape(5, 6)
+    device = host.to("flagos:0").t()
+    host = host.t()
+    scale = torch.tensor(1.01)
+    was_allowed = torch.ops.flagos.cpu_fallback_allowed()
+    torch.ops.flagos.strict_host_routes(True)
+    try:
+        results = (
+            (device - scale, host - scale),
+            (scale - device, scale - host),
+            (device / scale, host * (1 / scale.item())),
+        )
+    finally:
+        torch.ops.flagos.strict_host_routes(not was_allowed)
+    for actual, expected in results:
+        assert actual.device == device.device
+        assert actual.stride() == expected.stride()
+        torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.nvidia
+@pytest.mark.flaggems_python
 def test_prod_preserves_large_long_values_without_cpu_fallback():
     host = torch.tensor([[2**30 + 1, 3, 5], [2**27 + 1, 11, 17]])
     source = host.to("flagos:0")
