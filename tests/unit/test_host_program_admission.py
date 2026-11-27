@@ -142,7 +142,8 @@ def enabled_compiler(compiler, monkeypatch):
     monkeypatch.setitem(sys.modules, "torch_fl", package)
     monkeypatch.setitem(sys.modules, "torch_fl._platform", platform)
     compiler.torch.__version__ = "2.10.0+cpu"
-    compiler.torch.version = SimpleNamespace(cuda=None)
+    compiler.torch._C = SimpleNamespace(_has_cuda=False)
+    compiler.torch.version = SimpleNamespace(cuda="13.0")
     compiler.torch.ops.flagos.host_program_enable = lambda enabled: None
     monkeypatch.setattr(compiler, "_encode", lambda value: [])
     with patch.object(compiler.ctypes, "CDLL"):
