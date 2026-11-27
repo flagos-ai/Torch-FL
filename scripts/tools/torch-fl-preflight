@@ -342,19 +342,24 @@ def check_native_vendor_bundle(manifest, read, exists, vendor):
         or not record.get("artifacts")
     ):
         raise ValueError("Native vendor precision differs from wheel provenance")
-    if vendor == "metax":
+    if vendor in {"metax", "thead"}:
+        display = {"metax": "MetaX", "thead": "T-Head"}[vendor]
         prefix = "native_host/_generated/"
-        expected = {prefix + "_metax_vendor.so"} | {
-            prefix + "metax_vendor/" + name
-            for name in ("libc10_cuda.so", "libtorch_cuda.so")
+        bundle = prefix + f"{vendor}_vendor"
+        expected = {prefix + f"_{vendor}_vendor.so"} | {
+            f"{bundle}/{name}" for name in ("libc10_cuda.so", "libtorch_cuda.so")
         }
         if set(record["artifacts"]) != expected:
             raise ValueError(
-                "MetaX native vendor bundle must contain only admitted GPU assets"
+                f"{display} native vendor bundle must contain only admitted GPU assets"
             )
-        if build["bundle_libdir"] != prefix + "metax_vendor":
+        if build["bundle_libdir"] != bundle:
             raise ValueError(
-                "MetaX native vendor bundle location differs from its manifest"
+                f"{display} native vendor bundle location differs from its manifest"
+            )
+        if vendor == "thead" and exists("torch_fl/lib_thead/libtorch_cuda.so"):
+            raise ValueError(
+                "T-Head native vendor wheel contains a full vendor Torch bundle"
             )
     for relative, checksum in record["artifacts"].items():
         parts = PurePosixPath(relative)

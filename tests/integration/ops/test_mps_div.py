@@ -999,10 +999,12 @@ class TestDivScheduleAndPlanReuse:
 
 
 class TestDivDispatch:
-    """The three overloads are claimed on PrivateUse1, not left to cpu_fallback."""
+    """Check the Metal registrations for division and reciprocal."""
 
     @pytest.mark.main_ops
-    @pytest.mark.parametrize("op", ["div.Tensor", "div.Scalar", "reciprocal"])
+    @pytest.mark.parametrize(
+        "op", ["div.Tensor", "div.Scalar", "div.out", "reciprocal"]
+    )
     def test_conf_routes_op_to_mps(self, op):
         assert routed_backend_or_none(op) == "mps"
 
@@ -1012,7 +1014,6 @@ class TestDivDispatch:
         [
             "div.Tensor_mode",
             "div.Scalar_mode",
-            "div.out",
             "div.out_mode",
             "div.Scalar_out",
             "div.Scalar_mode_out",
@@ -1023,13 +1024,7 @@ class TestDivDispatch:
         ],
     )
     def test_conf_leaves_the_other_spellings_on_the_fallback(self, op):
-        """The `mode` overloads and every `.out`/in-place form are unregistered.
-
-        ``div.Tensor_mode`` / ``div.Scalar_mode`` carry a ``rounding_mode`` that
-        would need a ``floor`` node *after* an exact division -- a composition
-        rather than a keyword -- and the ``.out`` forms write into a tensor the
-        caller owns, like every other ``.out`` here.
-        """
+        """Check fallback for the remaining division and reciprocal overloads."""
         assert routed_backend_or_none(op) is None
 
     @pytest.mark.main_ops
@@ -1052,6 +1047,7 @@ class TestDivDispatch:
                 "b = torch.rand(4, 4, device='flagos:0') + 0.5; "
                 "torch.ops.aten.div.Tensor(a, b); "
                 "torch.ops.aten.div.Scalar(a, 2.0); "
+                "torch.ops.aten.div.out(a, b, out=torch.empty_like(a)); "
                 "torch.ops.aten.reciprocal(a)",
             ],
             env=env,
@@ -1062,6 +1058,7 @@ class TestDivDispatch:
         for line in (
             "[flagos dispatch] div.Tensor -> mps",
             "[flagos dispatch] div.Scalar -> mps",
+            "[flagos dispatch] div.out -> mps",
             "[flagos dispatch] reciprocal -> mps",
         ):
             assert line in result.stderr, result.stderr

@@ -560,7 +560,7 @@ OPS = {
 # View operations update only tensor metadata: sizes, strides and storage
 # offset. Their kernels live in csrc/aten/strided_ops.cc because MPSGraph would
 # copy the operand into new storage. The entries here add the PrivateUse1
-# claims and conf routes, while T_METADATA_VIEW generates one guarded kernel per
+# claims and conf routes, while T_METADATA_VIEW generates one kernel per
 # operation and delegates to those native metadata helpers.
 METADATA_VIEW_OPS = {
     "_unsafe_view": "unsafe_view",
@@ -1672,7 +1672,7 @@ FINISH = {
 # already that wide: a (4, 5) float32 tensor has 20-byte rows, which MPSNDArray
 # reads as 32. See the row-pitch note in mps_common.h.
 # These unary wrappers can use a dense kernel from PyTorch's bundled library.
-METAL_UNARY = {"cos"}
+METAL_UNARY = {"cos", "rsqrt"}
 
 T_UNARY = """\
 at::Tensor {kernel}(const at::Tensor& self) {{
@@ -1756,7 +1756,7 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # operands' own, which the dtype gate above accepted nothing else for.
 T_BINARY = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param}) {{
-  // Evaluate the reference's broadcast and alpha checks before the graph. They
+{scalar_tensor_dispatch}  // Evaluate the reference's broadcast and alpha checks before the graph. They
   // are also needed when the call takes the CPU round-trip below.
   std::vector<int64_t> out_shape;
   try {{
@@ -1776,50 +1776,10 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param}
   if (out.numel() == 0) {{
     return out;
   }}
-  const bool scalar_rhs = other_c.numel() == 1;
-  const std::vector<std::vector<int64_t>> argument_shapes = {{
-      self_c.sizes().vec(),
-      scalar_rhs ? out_shape : other_c.sizes().vec()}};
-  if (self_c.sizes().equals(at::IntArrayRef(out_shape)) || scalar_rhs) {{
-    const std::vector<at::Tensor> inputs =
-        self_c.sizes().equals(at::IntArrayRef(out_shape))
-        ? std::vector<at::Tensor>{{self_c}}
-        : std::vector<at::Tensor>{{self_c, other_c}};
-    const bool ran = mps::MpsRunGraph(
-        mps::MpsGraphKey("{op}"{key_parts}),
-        inputs,
-        out,
-        argument_shapes,
-        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
-          MPSGraphTensor* primary = args[0];
-          MPSGraphTensor* secondary = args.count == 2
-              ? args[1]
-              : mps::MpsConstant(graph, 1, self_c.scalar_type());
-          MPSGraphTensor* other_t = mps::MpsScaledByScalar(
-              graph, secondary, {alpha_operand}, self_c.scalar_type());
-          secondary = nil;
-          if (other_t != nil && !scalar_rhs) {{
-            secondary = [graph broadcastTensor:other_t
-                                       toShape:mps::MpsFlatShape(out.numel())
-                                          name:nil];
-          }} else if (other_t != nil) {{
-            secondary = other_t;
-          }}
-          if (secondary == nil) {{
-            return nil;
-          }}
-          return [graph {call}primary secondaryTensor:secondary name:nil];
-        }});
-    if (!ran) {{
-      return at::{at_op}(self.cpu(), other.cpu(){alpha_arg}).to(self.device());
-    }}
-    return out;
-  }}
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("{op}"{key_parts}),
       {{self_c, other_c}},
       out,
-      argument_shapes,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
         // An alpha MpsConstant cannot express exactly in this width takes the
         // round-trip. Passing a nil operand to the selector aborts MPSGraph.
@@ -1833,6 +1793,134 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param}
   if (!ran) {{
     return at::{at_op}(self.cpu(), other.cpu(){alpha_arg}).to(self.device());
   }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+T_MUL_SCALAR_TENSOR_DISPATCH = """\
+  // A CPU scalar contributes its value while the tensor owns the output device.
+  if (self.device() != other.device()) {
+    const auto& scalar = self.is_cpu() ? self : other;
+    const auto& tensor = self.is_cpu() ? other : self;
+    const auto dtype = tensor.scalar_type();
+    if (scalar.is_cpu() && scalar.dim() == 0 &&
+        tensor.device().type() == at::kPrivateUse1 &&
+        at::result_type(self, other) == dtype) {
+      // ATen keeps the full scalar in the FP32 multiply for reduced dtypes.
+      const auto compute = (dtype == at::kHalf || dtype == at::kBFloat16)
+          ? at::kFloat : dtype;
+      return at::mul(tensor.to(compute), scalar.item()).to(dtype);
+    }
+  }
+"""
+
+OPTIMIZER_BINARY_OUT = {
+    "add.out": "add.Tensor",
+    "div.out": "div.Tensor",
+    "mul.out": "mul.Tensor",
+}
+
+T_BINARY_OUT = """\
+at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param},
+    at::Tensor& out) {{
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  at::assert_no_partial_overlap(out, other);
+  at::Tensor result;
+  if (self.is_cpu() && self.dim() == 0 && other.device() == out.device()) {{
+    result = ({reverse_scalar} && at::result_type(self, other) == other.scalar_type())
+        ? at::{at_op}(other, self.item(){alpha_arg})
+        : at::{at_op}(self, other.cpu(){alpha_arg}).to(out.device());
+  }} else if (other.is_cpu() && other.dim() == 0 && self.device() == out.device()) {{
+    result = at::result_type(self, other) == self.scalar_type()
+        ? at::{at_op}(self, other.item(){alpha_arg})
+        : at::{at_op}(self.cpu(), other{alpha_arg}).to(out.device());
+  }} else {{
+    TORCH_CHECK(self.device() == out.device() && other.device() == out.device(),
+        "{op}: output device mismatch");
+    result = at::{at_op}(self, other{alpha_arg});
+  }}
+  TORCH_CHECK(c10::canCast(result.scalar_type(), out.scalar_type()),
+      "{op}: result type cannot be cast to output");
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+OPTIMIZER_POINTWISE_OUT = {
+    "addcdiv.out": ("value", ("self", "tensor1", "tensor2"), "division"),
+    "addcmul.out": ("value", ("self", "tensor1", "tensor2"), "multiplication"),
+    "lerp.Scalar_out": ("weight", ("self", "end"), None),
+}
+
+T_OPTIMIZER_POINTWISE_GRAPH = """\
+mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}", value.toDouble()),
+      {{{operands}}}, result,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* factor = mps::MpsConstant(graph, value, dtype);
+        if (factor == nil) return nil;
+        MPSGraphTensor* term = [graph {combine}WithPrimaryTensor:args[1]
+            secondaryTensor:args[2] name:nil];
+        MPSGraphTensor* weighted = [graph multiplicationWithPrimaryTensor:term
+            secondaryTensor:factor name:nil];
+        return [graph additionWithPrimaryTensor:args[0] secondaryTensor:weighted name:nil];
+      }}) ||
+      mps::RunMetalFp32ScaledAdd(result, self, tensor1, tensor2, value, "{metal_term}")"""
+
+T_OPTIMIZER_POINTWISE_BF16 = """\
+  if (dtype == at::kBFloat16 && out.is_contiguous() &&
+      self.numel() <= std::numeric_limits<uint32_t>::max()) {{
+    static const mps::MetalKernel kernel(R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      kernel void generated_kernel(device bfloat* out [[buffer(0)]],
+          device const bfloat* self [[buffer(1)]], device const bfloat* lhs [[buffer(2)]],
+          device const bfloat* rhs [[buffer(3)]], constant float& alpha [[buffer(4)]],
+          uint i [[thread_position_in_grid]]) {{
+        float term = float(lhs[i]) {symbol} float(rhs[i]);
+        out[i] = bfloat(fma(term, alpha, float(self[i])));
+      }}
+    )METAL");
+    at::native::resize_output(out, self.sizes());
+    mps::RunMetalTernaryAlpha(kernel, out, self, tensor1, tensor2,
+                             static_cast<float>(value.toBFloat16()));
+    return out;
+  }}
+"""
+
+T_OPTIMIZER_POINTWISE_OUT = """\
+{result} {kernel}({args}) {{
+  auto fallback = [&]() -> at::Tensor& {{
+    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{aten_op}>::call({call_args});
+  }};
+  const auto dtype = self.scalar_type();
+  if (self.dim() == 0 || (dtype != at::kFloat && dtype != at::kHalf && dtype != at::kBFloat16) ||
+      out.scalar_type() != dtype || out.device() != self.device() || {factor}.isComplex()) {{
+    return fallback();
+  }}
+  at::assert_no_internal_overlap(out);
+  for (const at::Tensor& tensor : at::TensorList{{{operands}}}) {{
+    if (tensor.scalar_type() != dtype || tensor.device() != self.device() ||
+        !tensor.sizes().equals(self.sizes()) || !tensor.is_contiguous()) {{
+      return fallback();
+    }}
+    at::assert_no_partial_overlap(out, tensor);
+  }}
+  if (self.numel() == 0) {{
+    at::native::resize_output(out, self.sizes());
+    return out;
+  }}
+{zero_value}{bf16_fast_path}  auto result = at::empty(self.sizes(), self.options());
+  const bool ran = {run};
+  if (!ran) return fallback();
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
   return out;
 }}
 
@@ -3084,6 +3172,19 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   if (out.numel() == 0) {{
     return out;
   }}
+  if (self_c.scalar_type() == at::kFloat && other.equal(2.0)) {{
+    // Stock MPS feeds the exponent at execution time. A constant exponent is
+    // lowered to a multiply and can change the rounding of normalization.
+    auto exponent = at::empty({{1}}, self_c.options());
+    if (mps::MpsInitializeFloatScalar(exponent, other.toFloat()) &&
+        mps::MpsRunGraph(
+            mps::MpsGraphKey("{op}.runtime_exponent"), {{self_c, exponent}}, out,
+            ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+              return [graph powerWithPrimaryTensor:args[0] secondaryTensor:args[1] name:nil];
+            }})) {{
+      return out;
+    }}
+  }}
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("{op}"{key_parts}),
       {{self_c}},
@@ -3840,7 +3941,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   at::Tensor out = at::empty(self_c.sizes(), self_c.options());
   if (out.numel() == 0) {{
     return out;
-  }}
+  }}{metal_unary}
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("{op}"{key_parts}),
       {{self_c}},
@@ -5217,10 +5318,6 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 
 T_METADATA_VIEW = """\
 at::Tensor {kernel}({args}) {{
-  ::torch_fl_mps::DrainAll();
-  // MpsRunGraph hands an operand's storage without an allocation record for
-  // asynchronous graph work. Finish queued work before the returned view can
-  // release the last owner of an operand such as an expanded weight.
   return at::native::flagos::{helper}({call_args});
 }}
 
@@ -5792,12 +5889,9 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 
 # aten's `index.Tensor` receives a list in which every unindexed axis is a full
 # slice. Integer tensors broadcast together into the advanced-index block, and
-# reduced axes are then separated from the retained axes. The checkpoint's
-# coordinates are small, so their values and the result layout are checked by
-# the CPU reference before the graph runs. The host then builds one dense
-# row-major source address per result element. MpsGatherIndex reads the source
-# values at those addresses in an MPSGraph gather; source values are not read on
-# the host.
+# reduced axes are then separated from the retained axes. The host resolves
+# broadcasting and bounds for the integer coordinates and builds row-major
+# addresses for a flattened MPSGraph gather.
 #
 # The addresses also handle negative coordinates. A boolean mask, scalar tensor
 # coordinate, unsupported source width, empty result or metadata failure
@@ -5807,91 +5901,49 @@ T_INDEX = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
     const c10::List<std::optional<at::Tensor>>& indices) {{
-  c10::List<std::optional<at::Tensor>> host_indices;
-  host_indices.reserve(indices.size());
-  for (const std::optional<at::Tensor>& entry : indices) {{
-    host_indices.push_back(
-        entry.has_value() && entry->defined()
-            ? std::optional<at::Tensor>(entry->cpu())
-            : std::nullopt);
-  }}
-  const at::Tensor host_self = self.is_cpu() ? self : self.cpu();
-  const at::Tensor selected = at::index(host_self, host_indices);
-  if (selected.numel() == 0) {{
-    return selected.to(self.device());
+  MPSDataType source_dtype;
+  if (self.layout() != at::kStrided ||
+      !mps::MpsDataTypeOf(self.scalar_type(), &source_dtype) ||
+      self.numel() == 0 ||
+      self.numel() > std::numeric_limits<int32_t>::max() ||
+      indices.size() > static_cast<size_t>(self.dim())) {{
+    return mps::MpsIndexOnHost(self, indices);
   }}
   std::vector<at::Tensor> index_tensors;
-  for (const std::optional<at::Tensor>& entry : indices) {{
-    if (entry.has_value() && entry->defined()) {{
-      // Boolean masks and scalar coordinates have their own indexing rules;
-      // the checked reference above answers both.
-      if (entry->scalar_type() == at::kBool || entry->dim() == 0) {{
-        return selected.to(self.device());
-      }}
-      index_tensors.push_back(entry->to(at::kLong).cpu().reshape(-1));
-    }}
-  }}
-  std::vector<int64_t> block_shape;
-  for (const at::Tensor& index : index_tensors) {{
-    const std::vector<int64_t> sizes = index.sizes().vec();
-    try {{
-      block_shape = block_shape.empty()
-          ? sizes : at::infer_size(block_shape, sizes);
-    }} catch (const std::exception&) {{
-      return selected.to(self.device());
-    }}
-  }}
-  int64_t block_count = 1;
-  for (const int64_t extent : block_shape) {{
-    block_count *= extent;
-  }}
-  if (block_count == 0) {{
-    return selected.to(self.device());
-  }}
-  const std::vector<int64_t> out_shape = selected.sizes().vec();
-  const int64_t block_rank = static_cast<int64_t>(block_shape.size());
   std::vector<int64_t> index_axes;
-  std::vector<int64_t> retained_axes;
+  std::vector<int64_t> retained_axes, retained_shape;
+  std::vector<int64_t> block_shape;
   for (int64_t axis = 0; axis < self.dim(); ++axis) {{
-    if (axis < static_cast<int64_t>(indices.size()) &&
-        indices.get(axis).has_value() &&
-        indices.get(axis)->defined()) {{
-      index_axes.push_back(axis);
-    }} else {{
+    std::optional<at::Tensor> entry =
+        axis < static_cast<int64_t>(indices.size()) ? indices.get(axis) : std::nullopt;
+    if (!entry || !entry->defined()) {{
       retained_axes.push_back(axis);
+      retained_shape.push_back(self.size(axis));
+      continue;
     }}
-  }}
-  std::vector<int64_t> retained_shape;
-  for (const int64_t axis : retained_axes) {{
-    if (self.size(axis) == 0) {{
-      return selected.to(self.device());
+    if ((entry->scalar_type() != at::kLong && entry->scalar_type() != at::kInt) ||
+        entry->dim() == 0 ||
+        (!entry->is_cpu() && entry->device() != self.device())) {{
+      return mps::MpsIndexOnHost(self, indices);
     }}
-    retained_shape.push_back(self.size(axis));
+    block_shape = block_shape.empty()
+        ? entry->sizes().vec() : at::infer_size(block_shape, entry->sizes());
+    index_axes.push_back(axis);
+    index_tensors.push_back(entry->cpu().to(at::kLong));
   }}
-  int64_t retained_count = 1;
-  for (const int64_t extent : retained_shape) {{
-    retained_count *= extent;
+  if (index_axes.empty()) {{
+    return mps::MpsIndexOnHost(self, indices);
   }}
-  // Contiguous indices insert the block where its first axis was; a separated
-  // block moves to the front. The first block extent starts at that offset and
-  // advances through all block extents; every other result axis is retained.
-  const bool adjacent = index_axes.size() == 1 ||
+  // A separated advanced-index block moves to the front of the result.
+  const bool adjacent =
       index_axes.back() - index_axes.front() + 1 ==
       static_cast<int64_t>(index_axes.size());
-  int64_t block_offset = 0;
-  if (adjacent) {{
-    for (const int64_t axis : retained_axes) {{
-      if (axis < index_axes.front()) {{
-        ++block_offset;
-      }}
-    }}
-  }}
-  const int64_t output_count = block_count * retained_count;
-  std::vector<int64_t> block_strides(static_cast<size_t>(block_rank), 1);
-  for (int64_t d = block_rank - 2; d >= 0; --d) {{
-    block_strides[static_cast<size_t>(d)] =
-        block_strides[static_cast<size_t>(d + 1)] *
-        block_shape[static_cast<size_t>(d + 1)];
+  const int64_t block_offset = adjacent ? index_axes.front() : 0;
+  std::vector<int64_t> out_shape = retained_shape;
+  out_shape.insert(out_shape.begin() + block_offset, block_shape.begin(), block_shape.end());
+  at::Tensor out = at::empty(out_shape, self.options());
+  if (out.numel() == 0) {{
+    return mps::MpsIndexOnHost(self, indices);
   }}
   std::vector<int64_t> source_strides(
       static_cast<size_t>(self.dim()), 1);
@@ -5900,71 +5952,42 @@ at::Tensor {kernel}(
         source_strides[static_cast<size_t>(axis + 1)] *
         self.size(axis + 1);
   }}
-  std::vector<int64_t> address_data(
-      static_cast<size_t>(output_count), 0);
-  for (int64_t position = 0; position < output_count; ++position) {{
-    std::vector<int64_t> block_coordinates(static_cast<size_t>(block_rank), 0);
-    std::vector<int64_t> retained_coordinates(retained_axes.size(), 0);
-    int64_t remaining = position;
-    for (int64_t d = static_cast<int64_t>(out_shape.size()) - 1;
-         d >= 0; --d) {{
-      const int64_t digit = remaining % out_shape[static_cast<size_t>(d)];
-      remaining /= out_shape[static_cast<size_t>(d)];
-      if (adjacent && d >= block_offset &&
-          d < block_offset + block_rank) {{
-        block_coordinates[static_cast<size_t>(d - block_offset)] = digit;
-      }} else {{
-        const int64_t retained =
-            block_rank > 0 && d > block_offset + block_rank - 1
-                ? d - block_rank
-                : d;
-        retained_coordinates[static_cast<size_t>(retained)] = digit;
-      }}
-    }}
-    int64_t address = 0;
-    int64_t retained_slot = 0;
-    int64_t index_slot = 0;
-    for (int64_t axis = 0; axis < self.dim(); ++axis) {{
-      if (std::find(index_axes.begin(), index_axes.end(), axis) ==
-          index_axes.end()) {{
-        address += retained_coordinates[static_cast<size_t>(retained_slot++)] *
-            source_strides[static_cast<size_t>(axis)];
-        continue;
-      }}
-      int64_t flat = 0;
-      for (int64_t d = 0; d < block_rank; ++d) {{
-        flat += block_coordinates[static_cast<size_t>(d)] *
-            (d + 1 == block_rank
-                 ? 1
-                 : block_strides[static_cast<size_t>(d)]);
-      }}
-      const int64_t index_count =
-          index_tensors[static_cast<size_t>(index_slot)].numel();
-      int64_t value = index_tensors[static_cast<size_t>(index_slot)]
-          [block_count == index_count ? flat : flat % index_count]
-              .item<int64_t>();
-      if (value < 0) {{
-        value += self.size(axis);
-      }}
-      address += value * source_strides[static_cast<size_t>(axis)];
-      ++index_slot;
-    }}
-    address_data[static_cast<size_t>(position)] = address;
+  int64_t block_count = 1;
+  for (int64_t extent : block_shape) {{
+    block_count *= extent;
   }}
-  at::Tensor out = at::empty(out_shape, self.options());
-  at::Tensor addresses =
-      at::tensor(address_data,
-                 at::TensorOptions().dtype(at::kInt).device(self.device()));
-  std::vector<int64_t> storage_shape = self.sizes().vec();
-  if (adjacent) {{
-    storage_shape[static_cast<size_t>(index_axes.front())] = block_count;
-  }} else {{
-    storage_shape[static_cast<size_t>(index_axes.front())] = block_count;
-    storage_shape.erase(storage_shape.begin() + index_axes.front() + 1,
-                        storage_shape.begin() + index_axes.back() + 1);
+  std::vector<int64_t> indexed_offsets(static_cast<size_t>(block_count), 0);
+  for (size_t i = 0; i < index_axes.size(); ++i) {{
+    const int64_t axis = index_axes[i];
+    const int64_t extent = self.size(axis);
+    const at::Tensor broadcast = index_tensors[i].expand(block_shape).contiguous();
+    const auto* coordinates = broadcast.const_data_ptr<int64_t>();
+    for (int64_t j = 0; j < block_count; ++j) {{
+      const int64_t value = coordinates[j];
+      TORCH_CHECK_INDEX(value >= -extent && value < extent, "index ", value,
+                        " is out of bounds for dimension ", axis, " with size ", extent);
+      indexed_offsets[j] += (value < 0 ? value + extent : value) * source_strides[axis];
+    }}
   }}
-  if (!mps::MpsGatherIndex(out, self, addresses, storage_shape)) {{
-    return selected.to(self.device());
+  int64_t trailing = 1;
+  for (size_t i = static_cast<size_t>(block_offset); i < retained_shape.size(); ++i) {{
+    trailing *= retained_shape[i];
+  }}
+  std::vector<int32_t> address_data(static_cast<size_t>(out.numel()));
+  for (int64_t position = 0; position < out.numel(); ++position) {{
+    const int64_t block_position = position / trailing % block_count;
+    int64_t retained = position / trailing / block_count * trailing + position % trailing;
+    int64_t address = indexed_offsets[block_position];
+    for (auto axis = retained_axes.rbegin(); axis != retained_axes.rend(); ++axis) {{
+      const int64_t extent = self.size(*axis);
+      address += (retained % extent) * source_strides[*axis];
+      retained /= extent;
+    }}
+    address_data[position] = static_cast<int32_t>(address);
+  }}
+  at::Tensor addresses = at::tensor(address_data, self.options().dtype(at::kInt));
+  if (!mps::MpsGatherIndex(out, self, addresses)) {{
+    return mps::MpsIndexOnHost(self, indices);
   }}
   return out;
 }}
@@ -6603,6 +6626,7 @@ FILE_HEADER = """\
 // This file is Objective-C++ and builds without ARC, like the Metal runtime.
 
 #include "../../../generated/ops.h"
+#include "../../../fallback.h"
 #include "../../../strided_ops.h"
 #include <ATen/ExpandUtils.h>
 #include <ATen/TensorIndexing.h>
@@ -6614,6 +6638,11 @@ FILE_HEADER = """\
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/cat.h>
 #include <ATen/ops/cumsum.h>
+#include <ATen/MemoryOverlap.h>
+#include <ATen/native/CPUFallback.h>
+#include <ATen/native/Resize.h>
+#include <ATen/ops/addcdiv_ops.h>
+#include <ATen/ops/addcmul_ops.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/cos.h>
 #include <ATen/ops/div.h>
@@ -6624,6 +6653,7 @@ FILE_HEADER = """\
 #include <ATen/ops/gelu.h>
 #include <ATen/ops/index_select.h>
 #include <ATen/ops/le.h>
+#include <ATen/ops/lerp_ops.h>
 #include <ATen/ops/masked_fill.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
@@ -6648,10 +6678,12 @@ FILE_HEADER = """\
 #include <algorithm>
 #include <array>
 #include <exception>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <vector>
 #include "../mps_common.h"
+#include "../mps_copy.h"
 #include "../metal.h"
 #include "runtime/accelerator/apple/mps_runtime.h"
 
@@ -6665,6 +6697,54 @@ namespace at::native::flagos {
 FILE_FOOTER = "\
 } // namespace at::native::flagos\
 "
+
+COPY_KERNELS = """\
+at::Tensor mps::CastFloatTensor(const at::Tensor& input, at::ScalarType dtype) {
+  const auto source = input.scalar_type();
+  if (!((source == at::kFloat && dtype == at::kBFloat16) ||
+        (source == at::kBFloat16 && dtype == at::kFloat))) {
+    return {};
+  }
+  const auto count = static_cast<uint64_t>(input.numel());
+  if (count > std::numeric_limits<uint32_t>::max()) {
+    return {};
+  }
+  at::Tensor out = at::empty(input.sizes(), input.options().dtype(dtype));
+  if (count == 0) {
+    return out;
+  }
+  // MPSGraph's cast flushes subnormals. Integer loads and stores preserve
+  // signed zero and subnormal bits and match ATen's round-to-nearest-even.
+  if (source == at::kFloat) {
+    static const MetalKernel narrow(R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      kernel void generated_kernel(device ushort* out [[buffer(0)]],
+                                   device const uint* in [[buffer(1)]],
+                                   uint i [[thread_position_in_grid]]) {
+        const uint bits = in[i];
+        const bool nan = (bits & 0x7fffffffu) > 0x7f800000u;
+        const uint bias = 0x7fffu + ((bits >> 16) & 1u);
+        out[i] = nan ? ushort(0x7fc0u) : ushort((bits + bias) >> 16);
+      }
+    )METAL");
+    narrow.run({out, input}, {count, 1, 1}, std::nullopt);
+  } else {
+    static const MetalKernel widen(R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      kernel void generated_kernel(device uint* out [[buffer(0)]],
+                                   device const ushort* in [[buffer(1)]],
+                                   uint i [[thread_position_in_grid]]) {
+        out[i] = uint(in[i]) << 16;
+      }
+    )METAL");
+    widen.run({out, input}, {count, 1, 1}, std::nullopt);
+  }
+  return out;
+}
+
+"""
 
 INC_HEADER = """\
 // Copyright (c) 2026, BAAI. All rights reserved.
@@ -6748,6 +6828,9 @@ def render():
                 alpha_param=alpha_param,
                 alpha_arg=alpha_arg,
                 alpha_operand=alpha_operand,
+                scalar_tensor_dispatch=(
+                    T_MUL_SCALAR_TENSOR_DISPATCH if op == "mul.Tensor" else ""
+                ),
                 finish=FINISH.get(op, ""),
                 largest="true" if op in ("argmax", "max.dim") else "false",
                 key_parts=KEY_PARTS[op],
@@ -6787,6 +6870,80 @@ def render():
         )
         covered.append((op, category))
 
+    for op, functional in OPTIMIZER_BINARY_OUT.items():
+        if op not in wrappers:
+            raise SystemExit(f"error: {op} has no generated wrapper")
+        fn, disp = schema_to_cpp_name(op)
+        alpha_param, alpha_arg, _ = ALPHA.get(functional, ("", "", "1"))
+        bodies.append(
+            T_BINARY_OUT.format(
+                kernel=fn[:-2] + "KernelMps",
+                fn=fn,
+                disp=disp,
+                op=op,
+                at_op=AT_OP[functional],
+                alpha_param=alpha_param,
+                alpha_arg=alpha_arg,
+                reverse_scalar=(
+                    "true"
+                    if functional == "mul.Tensor"
+                    else "!alpha.isComplex() && alpha.toDouble() == 1.0"
+                    if functional == "add.Tensor"
+                    else "false"
+                ),
+            )
+        )
+        covered.append((op, "binary_out"))
+
+    for op, (factor, operands, combine) in OPTIMIZER_POINTWISE_OUT.items():
+        if op not in wrappers:
+            raise SystemExit(f"error: {op} has no generated wrapper")
+        fn, disp = schema_to_cpp_name(op)
+        with local.parametrize(
+            use_const_ref_for_mutable_tensors=False,
+            use_ilistref_for_tensor_lists=False,
+        ):
+            _, result, args = unified_sig(native_functions[op])
+        bodies.append(
+            T_OPTIMIZER_POINTWISE_OUT.format(
+                result=result,
+                args=args_decl(args),
+                call_args=call_args(args),
+                kernel=fn[:-2] + "KernelMps",
+                fn=fn,
+                disp=disp,
+                aten_op=op.replace(".", "_"),
+                factor=factor,
+                operands=", ".join(operands),
+                run=(
+                    T_OPTIMIZER_POINTWISE_GRAPH.format(
+                        op=op,
+                        operands=", ".join(operands),
+                        combine=combine,
+                        metal_term="div_true" if combine == "division" else "mul",
+                    )
+                    if combine is not None
+                    else 'mps::RunMetalBinaryAlpha(result, self, end, weight, "lerp")'
+                ),
+                zero_value=(
+                    "  if (value.equal(0.0)) {\n"
+                    "    at::native::resize_output(out, self.sizes());\n"
+                    "    return out.copy_(self);\n"
+                    "  }\n"
+                    if factor == "value"
+                    else ""
+                ),
+                bf16_fast_path=(
+                    T_OPTIMIZER_POINTWISE_BF16.format(
+                        symbol="/" if combine == "division" else "*"
+                    )
+                    if combine is not None
+                    else ""
+                ),
+            )
+        )
+        covered.append((op, "optimizer_pointwise_out"))
+
     for op, helper in METADATA_VIEW_OPS.items():
         wrapper = wrappers.get(op)
         if wrapper is None:
@@ -6817,7 +6974,11 @@ def render():
         covered.append((op, "metadata_view"))
 
     return (
-        FILE_HEADER + INDEXED_REDUCTION + "\n\n".join(bodies) + FILE_FOOTER,
+        FILE_HEADER
+        + INDEXED_REDUCTION
+        + COPY_KERNELS
+        + "\n\n".join(bodies)
+        + FILE_FOOTER,
         INC_HEADER
         + "".join(f'  m.impl("{op}", {wrappers[op]});\n' for op, _ in sorted(covered)),
         covered,

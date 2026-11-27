@@ -429,6 +429,12 @@ def emit(
                 expr = f"int64_t({a[0]}.layout())"
             elif op == "prim::device":
                 expr = f"{a[0]}.device()"
+            elif op == "prim::index" and str(ins[0].type()) == "Device":
+                device = a[0]
+                expr = (
+                    f"({device}.has_index() ? std::optional<int64_t>({device}.index())"
+                    " : std::nullopt)"
+                )
             elif op == "prim::type":
                 expr = f"DeviceName({a[0]})"
             elif op in ("prim::is_cuda", "prim::is_cpu"):
@@ -519,7 +525,10 @@ def emit(
                 expr = a[0] + ".copy()"
             elif op == "aten::_set_item" and ins[0].type().kind() == "ListType":
                 expr = "SetItem(" + ", ".join(a) + ")"
-            elif op == "aten::pop" and ins[0].type().kind() == "ListType":
+            elif (
+                op in ("aten::pop", "aten::Delete")
+                and ins[0].type().kind() == "ListType"
+            ):
                 expr = "Pop(" + ", ".join(a) + ")"
             elif op == "aten::extend" and ins[0].type().kind() == "ListType":
                 expr = a[0] + ".append(" + a[1] + ")"
@@ -557,6 +566,14 @@ def emit(
                 expr = f"{a[0]}.is_contiguous({format_})"
             elif op == "aten::tensor":
                 expr = "TensorValue(" + ", ".join(a) + ")"
+            elif (
+                op == "aten::get"
+                and function_name.startswith("Grid")
+                and str(ins[0].type()) == "Dict[str, int]"
+            ):
+                expr = f"FindGridMetadata({a[0]}, {a[1]})"
+                if len(a) == 3:
+                    expr += f".value_or({a[2]})"
             elif op == "aten::__getitem__":
                 producer = pointwise_projections.get(ins[0].unique())
                 if producer is not None:
@@ -698,6 +715,8 @@ def emit(
                 expr = f"{a[0]}.is_alias_of({a[1]})"
             elif op == "flagos_source_native::dtype_str":
                 expr = "dtype_names.at(" + a[0] + ")"
+            elif op == "flagos_source_native::factory_device":
+                expr = "c10::Device(c10::DeviceType::PrivateUse1)"
             elif op == "flagos_source_native::pointwise_apply":
                 slot = f"pointwise_slots.at({a[0]})" if slot_tables else a[0]
                 expr = (

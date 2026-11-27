@@ -33,6 +33,7 @@ the test files do not each restate it.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -40,6 +41,7 @@ import sys
 from pathlib import Path
 
 import torch_fl  # noqa: F401  -- importing resolves the conf torch_fl routes by
+from tests.integration.flaggems.flaggems_caps import route_for_dtype
 
 
 # conf value -> the name LogDispatch prints for the same Backend enum value.
@@ -68,8 +70,8 @@ def _conf_path() -> str:
     return torch_fl.backend_config_path()
 
 
-def _conf_route(op: str) -> str:
-    """Unconditional conf backend for ``op``; dtype clauses are not coverage.
+def _conf_route(op: str, dtype: str | None = None) -> str:
+    """Conf backend for ``op`` and the requested ATen input dtype.
 
     An op missing from the conf is a generation gap rather than a routing
     decision, so it raises here for both public accessors instead of being
@@ -81,12 +83,12 @@ def _conf_route(op: str) -> str:
         for line in f:
             name, sep, value = line.split("#")[0].partition("=")
             if sep and name.strip() == op:
-                return value.split(";", 1)[0].strip()
+                return route_for_dtype(value, dtype)
     raise AssertionError(f"{op} is not listed in {conf}")
 
 
-def routed_backend(op: str) -> str:
-    """The base route's log name, before per-input dtype clauses are resolved.
+def routed_backend(op: str, *, dtype: str | None = None) -> str:
+    """The dispatch-log name for the base route or the supplied input dtype.
 
     ``op`` is spelled the way the conf and the dispatch log spell it
     (``add.Tensor``, ``_softmax``, ``cat``). The result is what
@@ -97,7 +99,7 @@ def routed_backend(op: str) -> str:
     the conf is a generation gap -- both are failures a caller wants to see, not
     values to assert against.
     """
-    backend = _conf_route(op)
+    backend = _effective_route(op, dtype)
     conf = _conf_path()
     assert backend != "none", (
         f"{op} is routed to 'none' in {conf}: it reaches cpu_fallback "
@@ -106,7 +108,7 @@ def routed_backend(op: str) -> str:
     return _LOG_NAME.get(backend, backend)
 
 
-def routed_backend_or_none(op: str) -> str | None:
+def routed_backend_or_none(op: str, *, dtype: str | None = None) -> str | None:
     """Like ``routed_backend``, but ``None`` for an op the conf routes to ``none``.
 
     The two accessors split on what the caller does with a cpu_fallback route.
@@ -118,7 +120,7 @@ def routed_backend_or_none(op: str) -> str | None:
     "the op is deliberately unaccelerated on this platform", not "no impl was
     found"; an op absent from the conf still raises.
     """
-    backend = _conf_route(op)
+    backend = _effective_route(op, dtype)
     return None if backend == "none" else _LOG_NAME.get(backend, backend)
 
 
@@ -269,18 +271,34 @@ def override_is_logged(op: str, backend: str) -> bool:
     return claim_list is None or op in claim_list
 
 
-def route_is_served(op: str) -> bool:
-    """True when this wheel compiled the backend the conf routes ``op`` to.
-
-    The platform conf supplies the route and the build record supplies the
-    compiled kernel sets. An unlisted operator, a ``none`` route or a route to
-    an absent kernel set has no device dispatch log to assert.
-    """
-    backend = _conf_route(op)
-    if backend == "none":
-        return False
+def _backend_is_built(backend: str) -> bool:
     kernels = torch_fl._env.build_kernels()
-    if backend in _VENDOR_BACKENDS:
+    if backend in _VENDOR_BACKENDS or backend == torch_fl._platform.build_info().vendor:
         return "vendor" in kernels
     kernel_set = _BACKEND_KERNEL_SET.get(backend)
     return kernel_set is not None and kernel_set in kernels
+
+
+def _effective_route(op: str, dtype: str | None) -> str:
+    base = _conf_route(op)
+    if dtype is None:
+        return base
+    selected = _conf_route(op, dtype)
+    if selected == base or not _backend_is_built(selected):
+        return base
+    # A dtype clause takes effect when its kernel is registered. Vendor
+    # precision entries are installed from a separate cohort in native wheels.
+    if not getattr(torch_fl._build_config, "NATIVE_VENDOR", False):
+        import torch
+
+        catalog = getattr(torch.ops.flagos, "native_vendor_catalog", None)
+        if catalog is not None and any(
+            entry["op"] == op for entry in json.loads(catalog(selected))
+        ):
+            return base
+    return selected
+
+
+def route_is_served(op: str, *, dtype: str | None = None) -> bool:
+    """Return whether this wheel can serve the base or input-dtype route."""
+    return _backend_is_built(_effective_route(op, dtype))

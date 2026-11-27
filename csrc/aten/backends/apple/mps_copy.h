@@ -27,4 +27,8 @@ namespace at::native::flagos::mps {
 // for layouts the shader cannot index or memory outside the Metal runtime.
 bool CopyStridedToDense(const at::Tensor& src, const at::Tensor& dst);
 
+// A generated cast for supported FP32/BF16 pairs on contiguous inputs.
+// An undefined result selects the transfer dispatcher's fallback.
+at::Tensor CastFloatTensor(const at::Tensor& input, at::ScalarType dtype);
+
 } // namespace at::native::flagos::mps

@@ -282,6 +282,22 @@ def test_return_mismatch_and_missing_host_are_reported():
     ]
 
 
+def test_rank_specialization_checks_tensor_arguments_before_calling_host():
+    arguments = [("at::Tensor", None), ("int64_t", None), ("at::Tensor", None)]
+    public = [parameter("destination"), parameter("dim"), parameter("source")]
+    kinds = {"destination": TENSOR, "dim": INTEGER, "source": TENSOR}
+    code, records, rejected = entries.emit_entries(
+        [record(arguments)],
+        {"test": [group(public, kinds)]},
+        tensor_ranks={"test": {"destination": 4, "source": 4}},
+    )
+    assert not rejected and len(records) == 1
+    for guard in ("a0.dim()==4", "a2.dim()==4"):
+        assert code[0].index(guard) < code[0].index("Host0::Forward")
+    assert "a1.dim()" not in code[0]
+    assert "return false;" in code[0]
+
+
 @pytest.mark.parametrize("restricted", [False, True])
 def test_published_selection_emits_its_guard_before_the_host(restricted):
     selection = {

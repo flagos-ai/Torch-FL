@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <flagos.h>
+#include "acl_stream.h"
 #include <acl/acl.h>
 #include <acl/acl_rt.h>
 
@@ -112,6 +113,7 @@ Error_t DeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority) 
 }
 
 Error_t DeviceSynchronize(void) {
+  at::native::flagos::ascend::FlushAscendEager();
   aclError err = aclrtSynchronizeDevice();
   return (err == ACL_SUCCESS) ? Success : ErrorUnknown;
 }

@@ -79,6 +79,8 @@ container_options: >-
   --device=/dev/alixpu_ppu15
 
 timeout_minutes: 60
+# The integration job also builds and tests the Native Host wheel.
+integration_timeout_minutes: 90
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-ppu
 

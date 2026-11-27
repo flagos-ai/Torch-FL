@@ -49,6 +49,7 @@ def ctx(request):
         model_path,
         local_files_only=True,
         dtype=torch.float16,
+        attn_implementation="eager",
     )
     device = "flagos:0"
     model = model.to(device)

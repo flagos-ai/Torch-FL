@@ -80,7 +80,7 @@ def test_registered_backend_must_implement_the_adapter_interface(monkeypatch):
         ("abi_version", 0),
         ("vendor", "unregistered"),
         ("compiler_backend", "foreign"),
-        ("capabilities", 0),
+        ("capabilities", 1 << 15),
         ("compiler_distribution", {"name": "flagtree", "version": "0.8.0"}),
     ],
 )
@@ -143,6 +143,9 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
     ]
     assert str(NATIVE_SOURCE) in launcher.include_dirs
     assert str(NATIVE_SOURCE / "backend_api.h") in launcher.depends
+    stamp = source_dir / "launcher.sha256"
+    assert str(stamp) in launcher.depends
+    assert stamp.read_text() == record["native_source_sha256"] + "\n"
     for header in adapter.config.shared_headers:
         assert str(NATIVE_SOURCE / header) in launcher.depends
         assert f"csrc/{header}" in record["native_sources"]
@@ -229,13 +232,23 @@ def test_shared_launch_parameters_are_part_of_the_backend_contract(contract):
         backend.validate_record(record, adapter, root, compiled)
 
 
-def test_musa_launcher_packs_the_published_target_and_descriptors():
+@pytest.mark.parametrize("descriptor_width_in_metadata", [True, False])
+def test_musa_launcher_packs_the_published_target_and_descriptors(
+    monkeypatch, descriptor_width_in_metadata
+):
     musa = import_native_host("backends.mthreads")
     signature = {"descriptor": "tensordesc<fp16[16,32]>", "length": "i32"}
     source = SimpleNamespace(
         fn=SimpleNamespace(arg_names=("length", "descriptor")), signature=signature
     )
-    entry = {"block_size": (16, 32), "elem_size": 2}
+    entry = {"block_size": (16, 32)}
+    if descriptor_width_in_metadata:
+        entry["elem_size"] = 2
+    monkeypatch.setitem(
+        sys.modules,
+        "triton.language",
+        SimpleNamespace(dtype=lambda name: SimpleNamespace(primitive_bitwidth=16)),
+    )
     metadata = SimpleNamespace(
         target=SimpleNamespace(warp_size=128), tensordesc_meta=[entry]
     )
@@ -249,7 +262,7 @@ def test_musa_launcher_packs_the_published_target_and_descriptors():
     assert parameters.warp_size == 128
     assert parameters.global_scratch_size == parameters.profile_scratch_size == 0
     assert parameters.tensordesc_meta == (
-        {**entry, "elem_type": 4, "nan_fill": 0x7E00},
+        {**entry, "elem_size": 2, "elem_type": 4, "nan_fill": 0x7E00},
     )
     metadata.debug_launch_hidden_arg = True
     with pytest.raises(RuntimeError, match="debugger arguments"):
@@ -286,10 +299,16 @@ def test_metax_extensions_use_the_native_runtime_without_cuda(
 
 
 @pytest.mark.parametrize(
-    "contract", ["nvidia", "metax", "hygon", "thead", "iluvatar"], indirect=True
+    "contract,compiler_hook",
+    [
+        (vendor, "compile_module_from_src")
+        for vendor in ("nvidia", "metax", "hygon", "thead", "iluvatar", "cambricon")
+    ]
+    + [("tsingmicro", "compile_native")],
+    indirect=["contract"],
 )
 def test_reinstallation_updates_existing_and_future_driver_streams(
-    monkeypatch, contract
+    monkeypatch, contract, compiler_hook
 ):
     adapter, _, _, _ = contract
     config = adapter.config
@@ -322,6 +341,14 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
         modules[f"{package}.{config.utility_module}"] = SimpleNamespace(
             **{name: object() for name in exports}
         )
+    signature = {
+        "input": "*bf16",
+        "scalars": ("bf16", "i16"),
+        "key": "constexpr",
+        "size": "i64",
+    }
+    source = SimpleNamespace(fn=object(), signature=signature)
+    metadata = SimpleNamespace(_asdict=lambda: {"name": "published"})
     monkeypatch.setattr(
         driver_binding,
         "importlib",
@@ -334,19 +361,25 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
 
         kernel = object()
 
-        def factory(source, metadata, kernel=kernel):
+        def factory(admitted, fields, kernel=kernel):
+            assert admitted.fn is source.fn
+            if config.compiler_backend == "txda":
+                assert admitted.signature == {**signature, "scalars": ("fp32", "i16")}
+                assert fields.argument_widths == [0, 4, 2, 8]
+            else:
+                assert admitted.signature == signature
             return kernel
 
         driver_binding.install_driver(adapter, package, provider, factory)
         utilities = modules[f"{package}.{config.utility_module}"]
         for instance in (active, default, Driver()):
             assert instance.utils is utilities
-            assert instance.launcher_cls(None, SimpleNamespace()) is kernel
+            assert instance.launcher_cls(source, metadata) is kernel
             assert instance.get_current_stream(3) == offset + 3
         for name in exports:
             assert getattr(driver, name) is getattr(utilities, name)
         with pytest.raises(RuntimeError, match="compilation is forbidden"):
-            driver.compile_module_from_src("unused")
+            getattr(driver, compiler_hook)("unused")
     if config.vendor == "iluvatar":
         with pytest.raises(RuntimeError, match="debugger arguments"):
             active.launcher_cls(None, SimpleNamespace(debug_launch_hidden_arg=True))

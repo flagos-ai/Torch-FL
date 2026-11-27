@@ -15,6 +15,16 @@
 // Generated dispatcher headers
 #include "generated/ops.h"
 
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_CUDA)
+#include "generated/register_native_vendor_nvidia.inc"
+#endif
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(USE_DCU)
+#include "generated/register_native_vendor_hygon.inc"
+#endif
+#if defined(FLAGOS_NATIVE_THEAD_VENDOR)
+#include "generated/register_native_vendor_thead.inc"
+#endif
+
 #include <ATen/core/LegacyTypeDispatch.h>
 #include <ATen/core/grad_mode.h>
 #include <ATen/ops/matmul_native.h>

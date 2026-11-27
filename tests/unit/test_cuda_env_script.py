@@ -89,6 +89,7 @@ def test_shared_provisioning_reuses_packages_and_preserves_cache_policy(
             "FLAGTREE_PYTHON_VERSION": "3.12",
             "FLAGTREE_VERSION": "0.7.0",
             "FLAGGEMS_VERSION": "5.4.0",
+            "QWEN3_TRANSFORMERS_VERSION_DEFAULT": "5.19.0",
             "FLAGTREE_MIN_GLIBC": "2.0",
             "PIP_INDEX_URL_ARG": "https://pypi.org/simple",
             "PIP_RETRY_NO_CACHE": "1",
@@ -104,15 +105,15 @@ def test_shared_provisioning_reuses_packages_and_preserves_cache_policy(
     calls = log.read_text().splitlines()
     assert "build-tools" in calls
     assert "-m pip check" in calls
+    assert ("requirement transformers==5.19.0 https://pypi.org/simple" in calls) == (
+        stage == "integration"
+    )
     if provisioning == "image":
         assert "isolation flagcx" in calls
         assert "check-flaggems" in calls
         assert any(row.endswith("--check-installed wheel==0.46.2") for row in calls)
-        assert any(row.endswith("--check-installed transformers") for row in calls) == (
-            stage == "integration"
-        )
         assert not any(
-            row.startswith(("create ", "requirements ", "requirement ", "cpu-torch "))
+            row.startswith(("create ", "requirements ", "cpu-torch "))
             or "--target-python" in row
             or "-m pip uninstall" in row
             for row in calls
@@ -127,9 +128,6 @@ def test_shared_provisioning_reuses_packages_and_preserves_cache_policy(
     assert any("--requirements-file" in row for row in calls if row.startswith("seed "))
     assert any("requirements-nvidia.txt" in row for row in calls)
     assert "flaggems" in calls
-    assert ("requirement transformers https://pypi.org/simple" in calls) == (
-        stage == "integration"
-    )
     assert ("cpu-torch 2.10.0+cpu" in calls) is not prepared
     if not prepared:
         assert calls.index("-m pip uninstall -y torch") < calls.index(

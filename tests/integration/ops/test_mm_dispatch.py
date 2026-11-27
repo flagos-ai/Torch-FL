@@ -191,14 +191,8 @@ class TestMmDispatchLog:
     def test_dispatch_log_flaggems_runtime(self):
         """With the FlagGems runtime path available, mm keeps the route its conf selects.
 
-        ``FLAGOS_USE_FLAGGEMS`` no longer selects a conf, so on a platform whose
-        conf keeps mm on the vendor kernel (DCU and PPU route it there -- DCU's
-        FlagGems mm kernel hangs on the HCU backend, FlagGems issue #6227, and
-        FlagGems' mm passes a matmul kwarg the PPU Triton rejects -- and GCU,
-        whose matmul overloads are in its gap set) the FlagGems route this case
-        is named for does not exist and there is nothing to assert. Skips
-        instead of failing, so the case stays honest on the platforms where the
-        conf does route mm to FlagGems.
+        The test exercises the default FlagGems route on platforms that select
+        it. Platform-specific routing exceptions have their own checks.
         """
         if routed_backend_or_none("mm") != "flagos_python":
             pytest.skip("mm does not route through FlagGems on this platform")

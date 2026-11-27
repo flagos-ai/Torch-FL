@@ -304,9 +304,21 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     "FLAGOS_BUILD_NATIVE_HOST": (
         SCOPE_BUILD,
         "OFF",
-        "Generate and compile FlagGems host source into the NVIDIA CPU-Torch "
-        "wheel. Experimental; requires FlagGems, Cython and the CUDA toolkit at "
-        "build time. FlagGems C++ and TileOPs must be disabled",
+        "Generate and compile FlagGems host source into a supported CPU-Torch "
+        "wheel. Requires FlagGems, Cython and the platform SDK at build time. "
+        "FlagGems C++ and TileOPs must be disabled",
+    ),
+    "FLAGOS_NATIVE_HOST_DEVICE_BUNDLE": (
+        SCOPE_BUILD,
+        "Unset",
+        "Directory of precompiled device binaries and launch metadata to stage into "
+        "the Native Host wheel",
+    ),
+    "FLAGOS_NATIVE_HOST_REQUIRE_DEVICE_ARTIFACTS": (
+        SCOPE_RUNTIME,
+        "OFF",
+        "Require packaged Native Host device kernels and reject a missing "
+        "specialization before runtime code generation",
     ),
     "FLAGOS_BUILD_BOXING": (
         SCOPE_BUILD,

@@ -259,7 +259,7 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
 
     # Count flaggems routes
     flaggems_routes = {
-        op for op, key in routes.items() if key.split("#")[0].strip() == "flaggems"
+        op for op, key in routes.items() if policy.route_backends(key)[0] == "flaggems"
     }
 
     # The cohort minus the gaps above is registered and routed to flaggems.
@@ -387,17 +387,17 @@ def test_native_measured_python_ops_is_empty_for_an_unknown_vendor():
 def test_kunlunxin_measured_set_is_a_measured_subset_of_the_ceiling():
     """The shipped Kunlunxin routes are ones a survey vouched for, and no others.
 
-    Three properties, in the order they can go wrong: every entry is inside the
-    shared FlagGems ceiling (an op dropped from it cannot linger on a route), no
-    entry is claimed by the vendor-native half (both .inc files land in one
-    TORCH_LIBRARY_IMPL body, so an op in both is a duplicate m.impl that will not
-    compile), and the platform stays out of FLAGGEMS_PYTHON_PLATFORMS -- joining
-    that set is the "whole cohort measured" claim, which this is not.
+    Measured entries stay inside the FlagGems ceiling. The vendor fragment
+    provides the shared wrapper for the int64 comparison dtype routes.
     """
     measured = g.NATIVE_FLAGGEMS_MEASURED["kunlunxin"]
     assert measured, "the Kunlunxin routes are gone; did the survey get reverted?"
     assert measured <= g.flaggems_python_ops_for("kunlunxin")
-    assert not measured & g.vendor_native_ops("kunlunxin")
+    dual_routes = measured & g.vendor_native_ops("kunlunxin")
+    assert dual_routes == g.KUNLUNXIN_DTYPE_ROUTES.keys()
+    conf = (g.CONF_DIR / "backends_kunlunxin.conf").read_text()
+    for op in dual_routes:
+        assert f"{op} = flaggems; {g.KUNLUNXIN_DTYPE_ROUTES[op]}  # kunlunxin\n" in conf
     assert "kunlunxin" not in g.FLAGGEMS_PYTHON_PLATFORMS
     assert g.native_measured_python_ops("kunlunxin") == measured
 
@@ -481,7 +481,10 @@ def test_enflame_native_host_experiment_preserves_every_unmeasured_route(
             expected = "flaggems; Int:enflame; Long:enflame"
         assert routes[op] == expected, op
     assert len(g.ENFLAME_NATIVE_HOST_FLAGGEMS) == 9
-    assert built["enflame"][1]["silu"].split("#", 1)[0].strip() == "flaggems"
+    assert (
+        built["enflame"][1]["silu"].split("#", 1)[0].strip()
+        == "flaggems; BFloat16:enflame"
+    )
     assert built["enflame"][1]["_softmax"] == "enflame"
 
 
@@ -631,9 +634,9 @@ def test_tileops_set_survived_the_conf_deletion():
 def test_tileops_experiment_confs_are_closed_and_exclude_flaggems():
     """The request-specific confs contain only their stated backend sets."""
     expected = {
-        "ascend": {"tileops": 49, "ascend": 372, "none": 1621},
-        "mthreads": {"tileops": 59, "mthreads": 109, "none": 1874},
-        "metax": {"tileops": 60, "none": 1982},
+        "ascend": {"tileops": 49, "ascend": 372, "none": 1622},
+        "mthreads": {"tileops": 59, "mthreads": 114, "none": 1870},
+        "metax": {"tileops": 60, "none": 1983},
     }
     for platform, counts in expected.items():
         path = CONF_DIR / f"backends_{platform}_tileops.conf"
@@ -739,7 +742,9 @@ def test_sdpa_composite_is_measured_on_exactly_the_platforms_that_took_it():
         g.METAX_FLAGGEMS_MEASURED | g.METAX_COMPOSITE_FLAGGEMS
     )
     assert g.cuda_abi_measured_python_ops("backends_hygon.conf") == (
-        g.DCU_COMPOSITE_FLAGGEMS | g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]
+        g.DCU_COMPOSITE_FLAGGEMS
+        | g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]
+        | g.HYGON_HOST_FLAGGEMS_MEASURED
     )
     # Named the other way round on purpose: a platform that never measured the
     # op gets nothing, and backends_metax.conf's set must not arrive here.
@@ -925,12 +930,10 @@ def test_default_confs_route_only_measured_flaggems(platform):
     with the platform's measured routes -- nothing else is claimable here."""
     routes = g.build_all(CONF_DIR)[platform][1]
     accelerated = {
-        op for op, v in routes.items() if v.split("#", 1)[0].strip() != "none"
+        op for op, value in routes.items() if policy.route_backends(value)[0] != "none"
     }
     fg = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
     measured = g.cuda_abi_measured_python_ops(f"backends_{platform}.conf")
-    if platform == "hygon":
-        measured |= g.HYGON_HOST_FLAGGEMS_MEASURED
     stray = sorted(accelerated - (fg | measured))
     assert not stray, f"{platform} accelerates {stray[:5]} with no FlagGems route"
 

@@ -7,10 +7,12 @@
 
 #include <ATen/ATen.h>
 #include <ATen/EmptyTensor.h>
+#include <ATen/MemoryOverlap.h>
 #include <ATen/NamedTensorUtils.h>
 #include <ATen/TensorIterator.h>
 #include <ATen/native/ReduceOps.h>
 #include <ATen/native/ReduceOpsUtils.h>
+#include <ATen/native/Resize.h>
 #if defined(FLAGOS_NATIVE_HYGON)
 #include <ATen/hip/HIPContext.h>
 #include <c10/hip/HIPCachingAllocator.h>
@@ -31,6 +33,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
 #include <atomic>
 #include <limits>
 #include <map>
@@ -60,8 +63,12 @@ inline py::dict Libraries() {
 #else
   result["torch_cuda"] = LibraryOf(reinterpret_cast<void*>(&at::native::rsqrt_kernel_cuda));
   result["c10_cuda"] = LibraryOf(reinterpret_cast<void*>(&c10::cuda::getCurrentCUDAStream));
+#if defined(FLAGOS_NATIVE_THEAD)
+  result["cudart"] = LibraryOf(reinterpret_cast<void*>(&cudaGetDevice));
+#else
   result["cublas"] = LibraryOf(reinterpret_cast<void*>(&cublasCreate));
   result["cublas_lt"] = LibraryOf(dlsym(RTLD_DEFAULT, "cublasLtCreate"));
+#endif
 #endif
   return result;
 }
@@ -134,30 +141,60 @@ inline c10::cuda::CUDAStream VendorStream(const at::Tensor& input) {
   std::call_once(initialized, [] {
     c10::cuda::CUDACachingAllocator::init(c10::cuda::device_count());
   });
-  return c10::cuda::getStreamFromExternal(
-      reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device)), device);
+  const auto stream = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device));
+  if (stream == cudaStreamLegacy) return c10::cuda::getDefaultCUDAStream(device);
+  return c10::cuda::getStreamFromExternal(stream, device);
 }
 
 struct VendorScope {
-  c10::cuda::CUDAStreamGuard guard;
-  explicit VendorScope(const at::Tensor& input) : guard(VendorStream(input)) {}
+  std::optional<c10::cuda::CUDAStreamGuard> guard;
+  explicit VendorScope(const at::Tensor& input) {
+    const auto stream = VendorStream(input);
+    int current = -1;
+    if (::GetDevice(&current) != Success || current != stream.device_index() ||
+        c10::cuda::getCurrentCUDAStream(stream.device_index()) != stream) {
+      guard.emplace(stream);
+    }
+  }
 };
 
 struct VendorDeviceScope {
   // BLAS receives the FlagOS stream explicitly through its owned handle. It
   // needs the correct device, but does not consult ATen's CUDA stream registry.
-  c10::cuda::CUDAGuard guard;
-  explicit VendorDeviceScope(const at::Tensor& input) : guard(VendorDevice(input)) {}
+  std::optional<c10::cuda::CUDAGuard> guard;
+  explicit VendorDeviceScope(const at::Tensor& input) {
+    const auto device = VendorDevice(input);
+    int current = -1;
+    if (::GetDevice(&current) != Success || current != device) guard.emplace(device);
+  }
 };
 
 #endif
 
-inline void DescribeCudaMemory(at::TensorIteratorBase& iterator) {
+template <at::ScalarType Dtype, class... Lists>
+bool CanBatchForeach(at::TensorList self, Lists... lists) {
+  if (self.empty() || !self.front().defined() || !self.front().is_privateuseone())
+    return false;
+
+  const auto device = self.front().device();
+  auto eligible = [device](at::TensorList values) {
+    return std::all_of(values.begin(), values.end(), [device](const at::Tensor& tensor) {
+      return tensor.defined() && tensor.device() == device &&
+          tensor.layout() == at::kStrided && tensor.scalar_type() == Dtype &&
+          tensor.is_contiguous() && !tensor.is_neg() && !tensor.is_conj();
+    });
+  };
+  return eligible(self) && (eligible(lists) && ...);
+}
+
+inline void DescribeCudaMemory(at::TensorIteratorBase& iterator,
+                               bool allow_cpu_scalars = false) {
   // OperandInfo is the iterator's pointer descriptor, not TensorImpl. NVIDIA
   // memory is physically CUDA memory; input/output devices and key sets remain
   // PrivateUse1. The original vendor kernel checks these descriptors.
   for (int i = 0; i < iterator.ntensors(); ++i) {
     const auto device = iterator.tensor(i).device();
+    if (allow_cpu_scalars && iterator.is_cpu_scalar(i)) continue;
     TORCH_CHECK(device.is_privateuseone(), "unexpected native vendor operand device");
     iterator.operand(i).device = c10::Device(c10::DeviceType::CUDA, device.index());
   }
@@ -166,6 +203,9 @@ inline void DescribeCudaMemory(at::TensorIteratorBase& iterator) {
 template <class Impl>
 struct StructuredOutput : Impl {
   at::Tensor output;
+  const at::Tensor* destination = nullptr;
+
+  explicit StructuredOutput(const at::Tensor* out = nullptr) : destination(out) {}
 
   const at::Tensor& maybe_get_output(int64_t index) override {
     TORCH_CHECK(index == 0, "native vendor entry requires one output");
@@ -179,15 +219,25 @@ struct StructuredOutput : Impl {
                 "native vendor meta must allocate a flagos output");
     TORCH_CHECK(options.layout() == at::kStrided && !options.pinned_memory(),
                 "native vendor meta requires unpinned strided device storage");
-    // VendorScope already selected the actual device. Use the same tensor
-    // constructors and allocator as FlagOS's empty kernels, without a second
-    // dispatcher traversal solely to allocate the structured result.
-    auto* allocator = at::GetAllocator(at::kPrivateUse1);
-    constexpr c10::DispatchKeySet keys(c10::DispatchKey::PrivateUse1);
     const auto dtype = c10::typeMetaToScalarType(options.dtype());
-    output = strides.empty()
-        ? at::detail::empty_generic(sizes, allocator, keys, dtype, options.memory_format_opt())
-        : at::detail::empty_strided_generic(sizes, strides, allocator, keys, dtype);
+    if (destination && destination->device() == options.device() &&
+        destination->layout() == at::kStrided && destination->scalar_type() == dtype &&
+        destination->sizes() == sizes && names.empty() && !destination->has_names() &&
+        !destination->is_neg() && !destination->is_conj() &&
+        (strides.empty()
+            ? destination->is_contiguous(options.memory_format_opt().value_or(
+                  at::MemoryFormat::Contiguous))
+            : destination->strides() == strides)) {
+      output = *destination;
+    } else {
+      // VendorScope already selected the device. Use FlagOS's ordinary
+      // storage allocator directly for the structured result.
+      auto* allocator = at::GetAllocator(at::kPrivateUse1);
+      constexpr c10::DispatchKeySet keys(c10::DispatchKey::PrivateUse1);
+      output = strides.empty()
+          ? at::detail::empty_generic(sizes, allocator, keys, dtype, options.memory_format_opt())
+          : at::detail::empty_strided_generic(sizes, strides, allocator, keys, dtype);
+    }
     TORCH_INTERNAL_ASSERT(output.device() == options.device());
     if (!names.empty()) at::namedinference::propagate_names(output, names);
     if constexpr (std::is_base_of_v<at::TensorIteratorBase, Impl>) {
@@ -214,20 +264,64 @@ at::Tensor StructuredCall(const at::Tensor& input, const Args&... args) {
   return kernel.output;
 }
 
+template <class Impl>
+at::Tensor Concatenate(const at::ITensorListRef& tensors, int64_t dim) {
+  const auto device = tensors.front().device();
+  for (const auto& tensor : tensors) {
+    TORCH_CHECK(tensor.device() == device, "cat inputs must share a device");
+  }
+  StructuredOutput<Impl> kernel;
+  const auto layout = kernel.meta(tensors, dim);
+  kernel.impl(tensors, layout.dim, layout.valid, layout.all_contiguous,
+              layout.all_same_dtype, layout.all_same_sizes_and_stride,
+              layout.memory_format, kernel.output);
+  return kernel.output;
+}
+
+template <class Meta, class Stub>
+at::Tensor BinaryPointwise(Stub& stub, const at::Tensor& lhs, const at::Tensor& rhs) {
+  StructuredOutput<Meta> kernel;
+  kernel.meta(lhs, rhs);
+  DescribeCudaMemory(kernel, /*allow_cpu_scalars=*/true);
+  stub(at::kCUDA, kernel);
+  return kernel.output;
+}
+
+template <class Impl>
+at::Tensor& SoftmaxBackwardOut(const at::Tensor& grad, const at::Tensor& output,
+                              int64_t dim, at::ScalarType dtype, at::Tensor& out) {
+  TORCH_CHECK(grad.device() == output.device() && out.device() == grad.device(),
+              "softmax backward requires all tensors on the same device");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, grad);
+  at::assert_no_overlap(out, output);
+  StructuredOutput<Impl> kernel(&out);
+  kernel.meta(grad, output, dim, dtype);
+  TORCH_CHECK(kernel.output.scalar_type() == out.scalar_type(),
+              "softmax backward output dtype must match the result");
+  if constexpr (std::is_base_of_v<at::TensorIteratorBase, Impl>) {
+    DescribeCudaMemory(kernel);
+  }
+  kernel.impl(grad, output, dim, dtype, kernel.output);
+  if (kernel.output.is_same(out)) return out;
+  at::native::resize_output(out, kernel.output.sizes());
+  return out.copy_(kernel.output);
+}
+
 template <class Impl, class Stub>
 at::Tensor Reduction(Stub& stub, const at::Tensor& input,
                      at::OptionalIntArrayRef dims, bool keepdim,
-                     std::optional<at::ScalarType> dtype) {
+                     std::optional<at::ScalarType> dtype,
+                     double empty_value = std::numeric_limits<double>::quiet_NaN()) {
   StructuredOutput<Impl> kernel;
   kernel.meta(input, dims, keepdim, dtype);
   if (input.numel() == 0) {
-    // The policy admits the mean family, whose empty identity is NaN. This
-    // fill uses the existing FlagGems route; no reduction kernel accepts N=0.
+    // Fill the operation's empty result through FlagGems. The reduction
+    // kernels require a nonempty input.
 #if defined(FLAGOS_NATIVE_HYGON)
-    return at::full(kernel.output.sizes(), std::numeric_limits<double>::quiet_NaN(),
-                    kernel.output.options());
+    return at::full(kernel.output.sizes(), empty_value, kernel.output.options());
 #else
-    kernel.output.fill_(std::numeric_limits<double>::quiet_NaN());
+    kernel.output.fill_(empty_value);
     return kernel.output;
 #endif
   }

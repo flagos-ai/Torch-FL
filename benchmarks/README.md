@@ -1,5 +1,80 @@
 # Benchmarks
 
+## Qwen3-0.6B training and generation versus vendor Torch
+
+Run `qwen3_vendor_parity.py` in separate vendor Torch and Torch-FL
+environments on the same idle accelerator. Use Transformers 5.19.0 on
+every accelerator. Use the same local checkpoint and safetensors version
+in both environments.
+Set `QWEN3_BENCH_HOST` to the same machine and physical device identifier when
+the two processes run in containers with different hostnames.
+Use an installed FlagGems Native Host wheel (`FLAGOS_BUILD_NATIVE_HOST=1`)
+for the Linux candidate. Strict routing rejects unsupported numerical CPU
+fallbacks. Every warmup and timed round
+must record FlagGems launches from C++ Native Host and zero launches using
+Python argument submission. The process-wide Python count also covers
+setup and untimed accuracy collection. The report includes enqueue counts
+and vendor routes. On Apple, use the Torch-FL Metal wheel and PyTorch's
+native MPS reference.
+
+For Native Host acceptance, stage the binaries and launch metadata from the
+published compiler's isolated build outputs using
+`torch_fl/native_host/device_artifacts.py`. Pass each build report with
+`--pointwise-report` to include the generated pointwise modules. Set
+`FLAGOS_NATIVE_HOST_DEVICE_BUNDLE` to that directory when building the wheel.
+Use `--record-backend-fingerprints` in the pinned compile environment when
+the backend checks its compiler version as part of specialization lookup.
+The candidate loads the packaged specialization matching the current GPU
+and launch signature. A missing specialization fails before runtime code
+generation. The wheel compiles pointwise bytecode during the build and
+loads it directly during execution. It also packages bytecode for transformed
+published host modules. `--diagnose-device-kernels` records
+pointwise build outputs and marks the diagnostic run ineligible for acceptance.
+
+```bash
+for mode in train infer; do
+    "$vendor_python" benchmarks/qwen3_vendor_parity.py \
+        --model "$checkpoint" --device "$vendor_device" --mode "$mode" \
+        --output "vendor-$mode.json"
+    "$flagos_python" benchmarks/qwen3_vendor_parity.py \
+        --model "$checkpoint" --device flagos:0 --mode "$mode" \
+        --reference "vendor-$mode.json" --output "flagos-$mode.json"
+done
+```
+
+Use `--vendor-module torch_npu` or the corresponding vendor module when it
+registers the reference device. Both environments run the same eager model
+calls. Generation uses the usual dynamic KV cache with compilation disabled.
+Each build runs the same workload during warmup and timing, without additional
+graph capture, model compilation, or caches of model inputs or results.
+Defaults are BF16, batch one, 128 input tokens, 64 generated tokens, three
+warmups and five timed rounds. Reports keep the warmup times separately and
+compute steady-state throughput from the median of the timed rounds.
+Training times the forward pass, backward pass and complete AdamW update.
+The vendor process records its default AdamW foreach selection, and the
+Torch-FL process uses the same selection. Native Host builds with vendor
+kernels use batched implementations of individual BF16 foreach operators on
+MetaX and Iluvatar. Kunlunxin uses its SDK's tensor-list API. These paths keep
+AdamW's eager operation order and the per-operator BF16 rounding points.
+For deterministic eager runs, pass `--deterministic` to both processes.
+On the measured MTT S5000 vendor build, this setting stabilizes the BF16
+language-model-head matrix product in backward. The reports record the setting
+and require agreement before comparing the two runs.
+Every loss must agree within 2% relative error. The first and last step
+sample up to 128 evenly spaced values per parameter in both gradients and
+optimizer updates, with a relative L2 limit of 10% per tensor.
+
+Inference times fixed-length greedy generation, including prefill and token
+selection. It checks exact generated token IDs and raw logits at every
+prefill position and generation step. BF16 uses the repository's
+[`bf16-v2` policy](host_compiler/logits_validation.py) and FP32 uses elementwise
+absolute and relative tolerances of `1e-3`. Keep the
+`*.logits.safetensors` file beside its JSON report for comparison. Both modes
+synchronize at the timing boundaries. For the Linux accelerator lanes,
+training requires at least `1.00×` the vendor throughput and inference
+requires at least `0.95×`. The Apple lane records throughput and requires
+numerical agreement.
+
 ## BPU Qwen3-0.6B vs the vendor `llm` demo
 
 `bpu_qwen3_bench.py` runs D-Robotics' own two-graph Qwen3-0.6B `.hbm` through

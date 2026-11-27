@@ -23,26 +23,41 @@ def generator():
     return module
 
 
-def test_committed_entries_match_published_schemas(generator):
-    first = generator.render(generator.load_policy())
-    second = generator.render(generator.load_policy())
+@pytest.mark.parametrize("vendor", ["nvidia", "hygon", "thead"])
+def test_committed_entries_match_published_schemas(generator, vendor):
+    policy = generator.load_policy(vendor)
+    first = generator.render(policy)
+    second = generator.render(generator.load_policy(vendor))
     assert first == second
     for path, content in first[0].items():
         assert path.read_text() == content, path
+    assert {row["op"] for row in first[1]} == {row["op"] for row in policy["operators"]}
+    source = next(content for path, content in first[0].items() if path.suffix == ".cc")
+    assert 'module.def("bindings"' in source
+    assert "DeviceBoxingGuard" not in source
 
 
-def test_conf_dtype_routes_match_generated_vendor_capabilities(generator):
-    conf = (ROOT / "torch_fl/configs/backends_nvidia.conf").read_text()
+@pytest.mark.parametrize("vendor", ["nvidia", "hygon"])
+def test_conf_dtype_routes_match_generated_vendor_capabilities(generator, vendor):
+    conf = (ROOT / f"torch_fl/configs/backends_{vendor}.conf").read_text()
+    outputs, catalog = generator.render(generator.load_policy(vendor))
+    native_composite = {row["op"] for row in catalog if "composite" in row}
+    claims = outputs[
+        generator.ENTRY_PATH.with_name(f"register_native_vendor_{vendor}.inc")
+    ]
     clauses = {}
     for line in conf.splitlines():
         name, assignment, value = line.split("#", 1)[0].partition("=")
         if assignment and ";" in value:
             base, clause = value.split(";", 1)
             dtypes, backend = clause.strip().split(":")
-            assert base.strip() == "flaggems"
-            assert backend == "nvidia"
+            if name.strip() in native_composite:
+                assert base.strip() == "none"
+                assert f'm.impl("{name.strip()}",' in claims
+            else:
+                assert base.strip() == "flaggems"
+            assert backend == vendor
             clauses[name.strip()] = sorted(dtypes.split(","))
-    catalog = generator.render(generator.load_policy())[1]
     assert clauses == {row["op"]: row["dtypes"] for row in catalog}
 
 
@@ -125,22 +140,3 @@ def test_catalog_emission_rejects_stale_core_sources(
     with pytest.raises(SystemExit, match="stale native vendor entries"):
         generator.main()
     assert not capsys.readouterr().out
-
-
-def test_hcu_entries_use_published_structured_implementations(generator):
-    outputs, catalog = generator.render(generator.load_policy("hygon"))
-    assert len(catalog) == 5
-    for path, content in outputs.items():
-        assert path.read_text() == content
-    source = next(content for path, content in outputs.items() if path.suffix == ".cc")
-    assert "#define FLAGOS_NATIVE_HYGON 1" in source
-    assert "BindStreamScope(module)" in source
-    assert "StructuredCall<at::native::structured_mm_out_cuda>" in source
-    assert "StructuredCall<at::native::structured_bmm_out_cuda>" in source
-    assert "Matrix<" not in source
-    assert "DeviceBoxingGuard" not in source and "redispatch" not in source
-    routes = (ROOT / "torch_fl/configs/backends_hygon.conf").read_text()
-    for row in catalog:
-        assert row["vendor"] == "hygon"
-        expected = ",".join(row["dtypes"]) + ":hygon"
-        assert f"{row['op']} = flaggems; {expected}" in routes

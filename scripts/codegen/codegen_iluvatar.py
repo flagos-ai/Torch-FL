@@ -167,6 +167,8 @@ def _gemm_call(
     k,
     op_b="CUBLAS_OP_N",
     ld_b="n",
+    op_a="CUBLAS_OP_N",
+    ld_a=None,
 ):
     """The column-major cublas call computing a row-major C(m,n) = A(m,k)*B(k,n).
 
@@ -179,10 +181,10 @@ def _gemm_call(
     return (
         "  ILUVATAR_EXEC(\n"
         "      cublasGemmEx(\n"
-        "          handle, {op_b}, CUBLAS_OP_N, static_cast<int>({n}),\n"
+        "          handle, {op_b}, {op_a}, static_cast<int>({n}),\n"
         "          static_cast<int>({m}), static_cast<int>({k}), {alpha}, {b_ptr},\n"
         "          ab_type, static_cast<int>({ld_b}), {a_ptr}, ab_type,\n"
-        "          static_cast<int>({k}), {beta}, {c_ptr}, c_type,\n"
+        "          static_cast<int>({ld_a}), {beta}, {c_ptr}, c_type,\n"
         "          static_cast<int>({n}), {compute_type}, CUBLAS_GEMM_DEFAULT),\n"
         '      "cublasGemmEx");\n'
     ).format(
@@ -197,6 +199,8 @@ def _gemm_call(
         k=k,
         op_b=op_b,
         ld_b=ld_b,
+        op_a=op_a,
+        ld_a=k if ld_a is None else ld_a,
     )
 
 
@@ -765,17 +769,16 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
       mat2.device() != self.device()) {{
     return at::{at_op}(self.cpu(), mat2.cpu()).to(self.device());
   }}
+  at::Tensor empty_product;
+  if (TryEmptyMatmul(self, mat2, 2, empty_product)) return empty_product;
   iluvatar::IluvatarDeviceGuard guard(self);
-  at::Tensor a = self.contiguous();
-  // `mat2` is usually `weight.t()`: a transposed view whose transpose is the
-  // contiguous weight. Iluvatar has no on-device strided copy, so `.contiguous()`
-  // on such a view is a host round-trip -- measured 22.6 ms for a 2048x2048 bf16
-  // transpose against 0.05 ms for a contiguous clone of the same bytes, and
-  // 11.9 ms of every `F.linear` call. Hand the view to cublas transposed
-  // instead: its storage already is the contiguous (k x n) row-major operand,
-  // which as column-major is the [k, n] matrix CUBLAS_OP_T wants.
+  // Weight-gradient inputs and forward weights often reach GEMM as transposed
+  // dense views. Describe their storage directly to ixBLAS.
+  const bool a_t = !self.is_contiguous() &&
+      self.stride(0) == 1 && self.stride(1) == self.size(0);
+  at::Tensor a = a_t ? self : self.contiguous();
   const bool b_t = !mat2.is_contiguous() &&
-      mat2.transpose(0, 1).is_contiguous();
+      mat2.stride(0) == 1 && mat2.stride(1) == mat2.size(0);
   at::Tensor b = (mat2.is_contiguous() || b_t) ? mat2 : mat2.contiguous();
   const int64_t m = a.size(0);
   const int64_t k = a.size(1);
@@ -789,11 +792,10 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
       iluvatar::IluvatarGemmComputeType(a.scalar_type());
   const float alpha = 1.0f;
   const float beta = 0.0f;
+  const cublasOperation_t a_op = a_t ? CUBLAS_OP_T : CUBLAS_OP_N;
   const cublasOperation_t b_op = b_t ? CUBLAS_OP_T : CUBLAS_OP_N;
-  // Leading dimension of the *stored* column-major operand: n when mat2 is the
-  // contiguous (k x n) row-major that reads as column-major [n, k], k when it is
-  // a (k x n) view of a contiguous (n x k) row-major weight.
-  const int ld_b = static_cast<int>(b_t ? b.stride(1) : b.stride(0));
+  const int ld_a = static_cast<int>(std::max<int64_t>(a_t ? m : k, 1));
+  const int ld_b = static_cast<int>(std::max<int64_t>(b_t ? k : n, 1));
 """
     + _gemm_call(
         alpha="&alpha",
@@ -807,9 +809,11 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
         k="k",
         op_b="b_op",
         ld_b="ld_b",
+        op_a="a_op",
+        ld_a="ld_a",
     )
     + """\
-  iluvatar::IluvatarSynchronizeStream(device);
+  iluvatar::IluvatarFinishMatrix(device);
   return out;
 }}
 
@@ -826,7 +830,47 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
       mat2.size(1) != self.size(2) || mat2.device() != self.device()) {{
     return at::{at_op}(self.cpu(), mat2.cpu()).to(self.device());
   }}
+  at::Tensor empty_product;
+  if (TryEmptyMatmul(self, mat2, 3, empty_product)) return empty_product;
   iluvatar::IluvatarDeviceGuard guard(self);
+  const auto gemm = iluvatar::GetStridedBatchedGemm();
+  if (gemm &&
+      !self.is_conj() && !self.is_neg() && !mat2.is_conj() && !mat2.is_neg() &&
+      self.stride(0) > 0 && mat2.stride(0) > 0) {{
+    const auto batch = self.size(0);
+    const auto m = self.size(1);
+    const auto k = self.size(2);
+    const auto n = mat2.size(2);
+    const bool a_rows = self.stride(2) == 1 && self.stride(1) >= k;
+    const bool a_cols = self.stride(1) == 1 && self.stride(2) >= m;
+    const bool b_rows = mat2.stride(2) == 1 && mat2.stride(1) >= n;
+    const bool b_cols = mat2.stride(1) == 1 && mat2.stride(2) >= k;
+    const auto lda = a_rows ? self.stride(1) : self.stride(2);
+    const auto ldb = b_rows ? mat2.stride(1) : mat2.stride(2);
+    if ((a_rows || a_cols) && (b_rows || b_cols) &&
+        std::max({{batch, m, k, n, lda, ldb}}) <= std::numeric_limits<int>::max()) {{
+      const int device = iluvatar::IluvatarDeviceIndex(self);
+      auto handle = iluvatar::GetCublasHandle(device);
+      auto out = at::empty({{batch, m, n}}, self.options());
+      const auto dtype = iluvatar::ToBlasDataType(self.scalar_type());
+      const auto compute = iluvatar::IluvatarGemmComputeType(self.scalar_type());
+      const float alpha = 1.0f;
+      const float beta = 0.0f;
+      // ixblas uses column-major matrices. Swap the operands for row-major
+      // output and describe both input layouts through their leading strides.
+      ILUVATAR_EXEC(
+          gemm(handle, b_rows ? CUBLAS_OP_N : CUBLAS_OP_T,
+               a_rows ? CUBLAS_OP_N : CUBLAS_OP_T, static_cast<int>(n),
+               static_cast<int>(m), static_cast<int>(k), &alpha,
+               mat2.const_data_ptr(), dtype, static_cast<int>(ldb), mat2.stride(0),
+               self.const_data_ptr(), dtype, static_cast<int>(lda), self.stride(0),
+               &beta, out.data_ptr(), dtype, static_cast<int>(n), m * n,
+               static_cast<int>(batch), compute, CUBLAS_GEMM_DEFAULT),
+          "ixblasGemmStridedBatchedEx");
+      iluvatar::IluvatarFinishMatrix(device);
+      return out;
+    }}
+  }}
   at::Tensor a = self.contiguous();
   at::Tensor b = mat2.contiguous();
   const int64_t batch = a.size(0);
@@ -848,9 +892,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   const char* a_base = static_cast<const char*>(a.const_data_ptr());
   const char* b_base = static_cast<const char*>(b.const_data_ptr());
   char* c_base = static_cast<char*>(out.data_ptr());
-  // One GemmEx per batch slice. The batched strided entry point is not in the
-  // symbol set this cohort was measured against, so the loop composes the
-  // unbatched call rather than guessing at an unverified symbol.
+  // Normalize unsupported batch layouts for the individual GEMM calls.
   for (int64_t i = 0; i < batch; ++i) {{
     const void* a_ptr = a_base + i * a_stride * a.element_size();
     const void* b_ptr = b_base + i * b_stride * b.element_size();
@@ -871,7 +913,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
     .replace("  ILUVATAR_EXEC", "    ILUVATAR_EXEC", 1)
     + """\
   }}
-  iluvatar::IluvatarSynchronizeStream(device);
+  iluvatar::IluvatarFinishMatrix(device);
   return out;
 }}
 
@@ -951,7 +993,7 @@ at::Tensor {kernel}(
     + """\
     }}
   }}
-  iluvatar::IluvatarSynchronizeStream(device);
+  iluvatar::IluvatarFinishMatrix(device);
   return out;
 }}
 
@@ -1034,7 +1076,7 @@ at::Tensor& {kernel}(
     + """\
     }}
   }}
-  iluvatar::IluvatarSynchronizeStream(device);
+  iluvatar::IluvatarFinishMatrix(device);
   return self;
 }}
 
@@ -1113,7 +1155,7 @@ at::Tensor {kernel}(
     .replace("  ILUVATAR_EXEC", "    ILUVATAR_EXEC", 1)
     + """\
   }}
-  iluvatar::IluvatarSynchronizeStream(device);
+  iluvatar::IluvatarFinishMatrix(device);
   return out;
 }}
 
@@ -1184,6 +1226,7 @@ FILE_HEADER = """\
 // m.impl is rejected at load. Whatever routes here without a kernel falls
 // through to cpu_fallback.
 
+#include "../../../common.h"
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ops/_convolution.h>
@@ -1205,6 +1248,9 @@ FILE_HEADER = """\
 #include <tuple>
 #include <vector>
 #include "../iluvatar_common.h"
+
+#include <algorithm>
+#include <limits>
 
 namespace at::native::flagos {
 // Reopened, not aliased: `namespace iluvatar = at::native::flagos::iluvatar;`
@@ -1355,10 +1401,11 @@ def main():
 
     cc_text, inc_text, covered = render()
     withheld = [op for op, _, claimed in covered if not claimed]
+    outputs = [(OUT_CC, cc_text), (OUT_INC, inc_text)]
 
     if args.check:
         stale = []
-        for target, text in ((OUT_CC, cc_text), (OUT_INC, inc_text)):
+        for target, text in outputs:
             current = target.read_text() if target.exists() else ""
             if current != text:
                 stale.append(target)
@@ -1377,8 +1424,8 @@ def main():
         return
 
     OUT_CC.parent.mkdir(parents=True, exist_ok=True)
-    OUT_CC.write_text(cc_text)
-    OUT_INC.write_text(inc_text)
+    for target, text in outputs:
+        target.write_text(text)
 
     print(f"[gen] {OUT_CC.relative_to(REPO)}  ({len(covered)} kernels)")
     print(

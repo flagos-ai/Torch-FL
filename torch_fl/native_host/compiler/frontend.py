@@ -13,11 +13,267 @@ import typing
 import collections.abc
 from collections import Counter
 import hashlib
+from pathlib import Path
 import sys
 import types
 
 from .constants import Evaluator, NotConstant
 from .bindings import preserve_scalar_bindings
+
+
+def lower_recursive_scan(function, definition):
+    if (
+        function.__module__ != "flag_gems.ops.cumsum"
+        or function.__name__ != "scan_then_fan"
+        or hashlib.sha256(
+            Path(inspect.getsourcefile(function)).read_bytes()
+        ).hexdigest()
+        != "ef7f010fdc53b3eacef469326bffd030c961887e5fa0ec1c71f861a62793a502"
+    ):
+        return
+    # TorchScript cannot lower recursive host calls. Keep the published
+    # launch statements and unwind the original scan stages in reverse order.
+    recursive_tail = definition.body[-1]
+    follow = ast.parse(
+        """
+if part_num < 2:
+    break
+stages.append((out, partial_sum, B, part_num, BLOCK_SIZE))
+inp = partial_sum
+out = partial_sum
+B = part_num
+"""
+    )
+    loops = ast.parse(
+        """
+stages: List[Tuple[torch.Tensor, torch.Tensor, int, int, int]] = []
+while True:
+    pass
+while len(stages) > 0:
+    out, partial_sum, B, part_num, BLOCK_SIZE = stages.pop()
+    grid = (A, part_num, C)
+"""
+    )
+    loops.body[1].body = definition.body[:-1] + follow.body
+    loops.body[2].body += recursive_tail.body[1:]
+    definition.body = loops.body
+
+
+def lower_tsingmicro_slice_grids(function, definition):
+    if (
+        function.__module__ != "_tsingmicro.ops.slice_backward"
+        or function.__name__ != "slice_backward"
+    ):
+        return
+    payload = Path(inspect.getsourcefile(function)).read_bytes()
+    if hashlib.sha256(payload).hexdigest() != (
+        "19d11798f69926ce594b8320d6f0ef315385bc50cbb6646c930db1a46d7361d7"
+    ):
+        return
+
+    # The published grid helpers return tuples of integer metadata directly
+    # into the launch subscript. Preserve their expressions in the launch IR.
+    names = {"_launch_grid", "_launch_outer_grid", "_launch_strided_grid"}
+    helpers = {
+        node.name: node
+        for node in ast.parse(payload).body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    }
+    for node in ast.walk(definition):
+        if not isinstance(node, ast.Subscript):
+            continue
+        grid = node.slice
+        if (
+            not isinstance(grid, ast.Call)
+            or not isinstance(grid.func, ast.Name)
+            or grid.func.id not in helpers
+        ):
+            continue
+        helper = helpers[grid.func.id]
+        arguments = dict(
+            zip((arg.arg for arg in helper.args.args), grid.args, strict=True)
+        )
+        (result,) = helper.body
+
+        class Bind(ast.NodeTransformer):
+            def visit_Name(self, value):
+                return arguments.get(value.id, value)
+
+        node.slice = Bind().visit(copy.deepcopy(result.value))
+
+
+def lower_sum_metadata(function, definition):
+    if (
+        function.__module__ != "flag_gems.ops.sum"
+        or function.__name__ != "sum_dim_comm"
+        or hashlib.sha256(
+            Path(inspect.getsourcefile(function)).read_bytes()
+        ).hexdigest()
+        != "5259b9f60445ef4a99e85387bc1e4c7a2264681170c695c6fc9b94378fa6348b"
+    ):
+        return
+    # The two whole-tensor branches return early in the published host. For
+    # the ATen out overload they must also resize and populate its output.
+    for node in definition.body:
+        if isinstance(node, ast.If) and ast.unparse(node.test) in (
+            "dim is None",
+            "dim == [] or dim == ()",
+        ):
+            node.body = ast.parse(
+                """
+result: torch.Tensor = torch.sum(inp, dtype=dtype)
+if keepdim:
+    result = result.reshape([1] * inp.ndim)
+if out is not None:
+    out.resize_(result.shape)
+    out.copy_(result)
+    return out
+return result
+"""
+            ).body
+    # The published host only tests membership in dim_set. A list gives the
+    # same answer and fits TorchScript's integer metadata types.
+    for node in ast.walk(definition):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "dim_set"
+        ):
+            node.value = node.value.args[0]
+        # Keep the normalized dimension list and the single-axis specialization
+        # in distinct TorchScript variables.
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "len(dim) == 1":
+            assign = node.body[0]
+            assign.targets[0].id = "_sum_axis"
+            for statement in node.body[1:]:
+                for value in ast.walk(statement):
+                    if isinstance(value, ast.Name) and value.id == "dim":
+                        value.id = "_sum_axis"
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "_out_provided":
+            node.test = ast.parse("out is not None", mode="eval").body
+
+
+def lower_mean_dimension_input(function, definition):
+    if (
+        function.__module__ != "flag_gems.ops.mean"
+        or function.__name__ != "mean_dim_comm"
+        or hashlib.sha256(
+            Path(inspect.getsourcefile(function)).read_bytes()
+        ).hexdigest()
+        != "c968ad14d3ba76ed87c29e5e9346a0e392cdaeaeb01c0774cfd7c5c489394d1c"
+    ):
+        return
+    # ATen already passes its optional integer list through the typed entry.
+    for index, node in reversed(list(enumerate(definition.body))):
+        if not isinstance(node, ast.If):
+            continue
+        test = ast.unparse(node.test)
+        if test == "isinstance(dim, int)":
+            definition.body.pop(index)
+        elif test == "dim == [] or dim == ()":
+            node.test = ast.parse("dim is None or len(dim) == 0", mode="eval").body
+            node.body = ast.parse(
+                """
+result: torch.Tensor = torch.mean(inp, dtype=dtype)
+if keepdim:
+    result = result.reshape([1] * inp.ndim)
+if out is not None:
+    out.resize_(result.shape)
+    out.copy_(result)
+    return out
+return result
+"""
+            ).body
+
+
+def tiled_mean_source(function):
+    if not getattr(function, "_torch_fl_tiled_row_mean", False):
+        return function, None
+    original = function.__wrapped__
+    if (
+        original.__module__ != "flag_gems.ops.mean"
+        or hashlib.sha256(
+            Path(inspect.getsourcefile(original)).read_bytes()
+        ).hexdigest()
+        != "c968ad14d3ba76ed87c29e5e9346a0e392cdaeaeb01c0774cfd7c5c489394d1c"
+    ):
+        return function, None
+    from torch_fl.compat.flaggems.ops import _MEAN_TILED_MAX_N
+
+    # Use the original module's kernel bindings so the existing DCU row-mean
+    # optimization can go through the typed launcher.
+    definition = ast.parse(inspect.getsource(original)).body[0]
+    definition.body[:0] = ast.parse(f"""
+if inp.numel() == 0:
+    output_dtype = inp.dtype if dtype is None else dtype
+    empty = torch.empty([0], dtype=output_dtype, device=inp.device)
+    if not (empty.is_floating_point() or empty.is_complex()):
+        raise RuntimeError("mean(): input or output dtype must be floating point or complex")
+    axes: List[int] = []
+    if dim is None or len(dim) == 0:
+        axes = list(range(inp.ndim))
+    else:
+        for axis in dim:
+            if not -inp.ndim <= axis < inp.ndim:
+                raise IndexError("mean(): dimension out of range")
+            normalized = axis % inp.ndim
+            if normalized in axes:
+                raise RuntimeError("mean(): dimension appears multiple times")
+            axes.append(normalized)
+    shape: List[int] = []
+    for i in range(inp.ndim):
+        if i not in axes:
+            shape.append(inp.size(i))
+        elif keepdim:
+            shape.append(1)
+    return torch.full(shape, float("nan"), dtype=output_dtype, device=inp.device)
+if dtype is None and dim is not None and len(dim) == 1 and inp.ndim > 0:
+    last = inp.ndim - 1
+    n = inp.size(last)
+    if (dim[0] == -1 or dim[0] == last) and n <= {_MEAN_TILED_MAX_N} and inp.is_contiguous() and inp.is_floating_point():
+        m = inp.numel() // n
+        output = torch.empty([m, 1], dtype=inp.dtype, device=inp.device)
+        grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M"]),)
+        with torch_device_fn.device(inp.device):
+            mean_dim_kernel[grid](inp, output, m, n)
+        row_shape = inp.shape[:-1] + [1]
+        result = output.view(row_shape)
+        return result if keepdim else result.squeeze(-1)
+""").body
+    return original, definition
+
+
+def ascend_embedding_source(function):
+    if (
+        function.__name__ != "embedding"
+        or function.__module__
+        not in {
+            "_ascend.ops.embedding",
+            "flag_gems.runtime.backend._ascend.ops.embedding",
+        }
+        or hashlib.sha256(
+            Path(inspect.getsourcefile(function)).read_bytes()
+        ).hexdigest()
+        != "3fffc43ee952df143cb303bd0f8cc8bf818fabcc29d2a18ec4fb2316c39d44c6"
+    ):
+        return None
+    # The ATen embedding entry already sits below PyTorch's autograd wrapper.
+    # Lower the published forward without writing its Python autograd context.
+    forward = function.__globals__["Embedding"].forward
+    definition = ast.parse(textwrap.dedent(inspect.getsource(forward))).body[0]
+    definition.body = [
+        statement
+        for statement in definition.body
+        if not isinstance(statement, ast.Assign)
+        or not all(
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "ctx"
+            for target in statement.targets
+        )
+    ]
+    return definition
 
 
 def type_text(value):
@@ -206,6 +462,11 @@ class Frontend:
             if definition is not None
             else ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
         )
+        if definition is None:
+            lower_recursive_scan(function, node)
+            lower_sum_metadata(function, node)
+            lower_mean_dimension_input(function, node)
+            lower_tsingmicro_slice_grids(function, node)
         node.name = name
         node.decorator_list = []
         if signature:
@@ -461,11 +722,14 @@ class Frontend:
         return name
 
     def source(self, function, signature, *, input_dtypes=()):
+        function, definition = tiled_mean_source(function)
+        if definition is None:
+            definition = ascend_embedding_source(function)
         # Only schema entries with the corresponding runtime dtype guard may
         # call this specialization. Ordinary source hosts keep every branch.
         self.guarded_function = function
         self.guarded_input_dtypes = frozenset(input_dtypes)
-        name = self.transform(function, signature=signature)
+        name = self.transform(function, signature=signature, definition=definition)
         node = self.functions[name]
         text = "import torch\nimport math\nfrom typing import Any, List, Dict, Tuple, Optional\n\n"
         text += "def _reduce_mul(values: List[int], initial: int) -> int:\n    for value in values:\n        initial *= value\n    return initial\n\n"
@@ -568,6 +832,7 @@ class Transform(ast.NodeTransformer):
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
         )
         self.literal_values = {}
+        self.triton_dtypes = {}
         self.defined = set(self.inputs)
         self.tagged_values = {}
         for a in node.args.args + node.args.kwonlyargs:
@@ -822,7 +1087,27 @@ class Transform(ast.NodeTransformer):
                 return first
         return None
 
-    def kernel_value(self, node):
+    def triton_dtype_name(self, node):
+        if isinstance(node, ast.Name):
+            return self.triton_dtypes.get(node.id)
+        if not isinstance(node, ast.Attribute):
+            return None
+        language = sys.modules.get("triton.language")
+        if language is None or not isinstance(node.value, ast.Name):
+            return None
+        if node.value.id in self.locals or self.resolve(node.value) is not language:
+            return None
+        if isinstance(getattr(language, node.attr, None), language.dtype):
+            return node.attr
+        return None
+
+    def kernel_value(self, node, *, constexpr=False):
+        if constexpr:
+            name = self.triton_dtype_name(node)
+            if name is not None:
+                # The launch key carries the dtype as native metadata. A
+                # specialization miss recovers the original Triton object.
+                return ast.Constant("__flagos_triton_dtype__:" + name)
         value = self.visit(node)
         if self.container(value) == "tuple":
             return ast.Call(
@@ -907,6 +1192,13 @@ class Transform(ast.NodeTransformer):
                     return "List[" + annotations[0] + "]"
         if isinstance(node, ast.Call):
             name = ast.unparse(node.func)
+            if name == "torch.ops.flagos_source_native.factory_device":
+                return "torch.device"
+            if (
+                name == "_real_output"
+                and self.function.__module__ == "flag_gems.ops.mul"
+            ):
+                return "torch.Tensor"
             if (
                 node.args
                 and isinstance(node.args[0], ast.GeneratorExp)
@@ -971,6 +1263,7 @@ class Transform(ast.NodeTransformer):
             ):
                 return "torch.Tensor"
             if name in (
+                "_bit_length",
                 "_reduce_mul",
                 "_next_power_of_2",
                 "int",
@@ -1258,7 +1551,113 @@ class Transform(ast.NodeTransformer):
             node.value._type = kind
         return node
 
+    def matching_flaggems_device(self, detector):
+        runtime = sys.modules.get("flag_gems.runtime")
+        if detector is None or detector is not getattr(runtime, "device", None):
+            return False
+        vendor = (
+            getattr(self.frontend.hosts, "manifest", {})
+            .get("backend", {})
+            .get("vendor")
+        )
+        name = getattr(detector, "name", None)
+        return isinstance(name, str) and (
+            name == "flagos"
+            or vendor is not None
+            and getattr(detector, "vendor_name", None) == vendor
+        )
+
+    def is_flagos_device_name(self, node):
+        if not isinstance(node, ast.Attribute) or node.attr != "name":
+            return False
+        module = self.function.__module__.removeprefix("flag_gems.runtime.backend.")
+        expression = ast.unparse(node)
+        if (
+            self.function.__name__ == "arange_start"
+            and (module, expression)
+            in {
+                ("flag_gems.ops.arange", "runtime.device.name"),
+                ("_ascend.ops.arange", "runtime.device.name"),
+                ("_metax.ops.arange", "device.name"),
+            }
+        ) or (
+            (module, self.function.__name__)
+            in {
+                ("flag_gems.ops.ones", "ones"),
+                ("flag_gems.ops.zeros", "zeros"),
+                ("_ascend.ops.zeros", "zeros"),
+            }
+            and expression == "device_.name"
+        ):
+            # A typed native factory defaults to the registered PrivateUse1
+            # device. The vendor's Python detector may retain another name.
+            return True
+        try:
+            value = self.resolve(node.value)
+        except (AttributeError, ValueError):
+            return False
+        # A provider can spell this device with its vendor alias. The bound
+        # factory uses the real PrivateUse1 device of the matching native host.
+        return self.matching_flaggems_device(value)
+
     def visit_Attribute(self, node):
+        if self.is_flagos_device_name(node):
+            return ast.copy_location(ast.Constant("flagos"), node)
+        info = node.value
+        if (
+            node.attr in ("min", "max", "bits")
+            and isinstance(info, ast.Call)
+            and len(info.args) == 1
+            and not info.keywords
+            and not any(
+                isinstance(value, ast.Name) and value.id in self.locals
+                for value in ast.walk(info)
+            )
+        ):
+            import torch
+
+            try:
+                if self.resolve(info.func) is torch.iinfo:
+                    dtype = self.resolve(info.args[0])
+                    if isinstance(dtype, torch.dtype):
+                        extent = getattr(torch.iinfo(dtype), node.attr)
+                        if -(1 << 63) <= extent < (1 << 63):
+                            return ast.copy_location(ast.Constant(extent), node)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        if node.attr == "itemsize" and not any(
+            isinstance(value, ast.Name) and value.id in self.locals
+            for value in ast.walk(node.value)
+        ):
+            import torch
+
+            try:
+                dtype = self.resolve(node.value)
+            except (AttributeError, ValueError):
+                dtype = None
+            if isinstance(dtype, torch.dtype):
+                return ast.copy_location(ast.Constant(dtype.itemsize), node)
+        if isinstance(node.value, ast.Name) and node.attr == "device":
+            provider = self.resolve(node.value)
+            if provider is not None and provider is sys.modules.get("flag_gems"):
+                name = getattr(provider, "device", None)
+                runtime = sys.modules.get("flag_gems.runtime")
+                detector = getattr(runtime, "device", None)
+                if name == "flagos" or (
+                    self.matching_flaggems_device(detector) and name == detector.name
+                ):
+                    return ast.copy_location(ast.Constant("flagos"), node)
+            elif (
+                type(provider) is types.SimpleNamespace
+                and self.function.__module__
+                in (
+                    "flag_gems.ops.embedding_dense_backward",
+                    "_thead.ops.embedding_dense_backward",
+                )
+                and provider is self.globals.get("flag_gems")
+                and getattr(provider, "device", None) == "flagos"
+            ):
+                return ast.copy_location(ast.Constant("flagos"), node)
         if isinstance(node.value, ast.Name) and node.value.id in self.objects:
             value = getattr(self.objects[node.value.id], node.attr, None)
             if type(value) in (str, int, float, bool):
@@ -1346,7 +1745,24 @@ class Transform(ast.NodeTransformer):
             )
         if len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)):
             left = self.visit(node.left)
-            right = self.visit(node.comparators[0])
+            right = node.comparators[0]
+            if isinstance(right, ast.Name) and right.id not in self.locals:
+                members = self.globals.get(right.id)
+                if (
+                    type(members) in (set, frozenset)
+                    and members
+                    and all(type(member).__name__ == "dtype" for member in members)
+                ):
+                    # Membership only needs the publisher's dtype choices.
+                    # Emit a deterministic list that the host compiler can lower.
+                    right = ast.List(
+                        [
+                            ast.parse(name, mode="eval").body
+                            for name in sorted(map(str, members))
+                        ],
+                        ast.Load(),
+                    )
+            right = self.visit(right)
             try:
                 first, second = ast.literal_eval(left), ast.literal_eval(right)
             except (ValueError, TypeError):
@@ -1511,10 +1927,31 @@ class Transform(ast.NodeTransformer):
             return ast.Constant(self.literal_values[node.id])
         if node.id not in self.locals and node.id in self.globals:
             value = self.globals[node.id]
+            if (
+                node.id == "_DEVICE_NAME"
+                and self.function.__module__ == "flag_gems.ops.mul"
+            ):
+                detector = self.globals.get("runtime_device")
+                if self.matching_flaggems_device(detector) and value == detector.name:
+                    return ast.copy_location(ast.Constant("flagos"), node)
             if value is None or isinstance(value, (int, float, bool, str)):
                 return self.frontend.literal_global(self.function, node.id)
             if type(value).__name__ == "dtype":
                 return ast.parse(str(value)).body[0].value
+            if (
+                (
+                    self.function.__module__ == "torch._prims_common"
+                    and type(value) is tuple
+                    or node.id == "_ordered_datatypes"
+                    and type(value) is list
+                )
+                and value
+                and all(type(dtype).__name__ == "dtype" for dtype in value)
+            ):
+                return ast.List(
+                    [ast.parse(str(dtype), mode="eval").body for dtype in value],
+                    ast.Load(),
+                )
         return node
 
     def visit_Expr(self, node):
@@ -1681,6 +2118,20 @@ class Transform(ast.NodeTransformer):
         )
 
     def visit_If(self, node):
+        if (
+            self.function.__module__.removeprefix("flag_gems.runtime.backend.")
+            == "_mthreads.ops.bmm"
+            and self.function.__name__ == "bmm"
+            and ast.unparse(node.test) == "is_sqmma_compatible(a, b, N, K) and M >= 128"
+        ):
+            # The published SQMMA branch returns FP16 for BF16 input. Its
+            # output feeds BF16 BMM backward operands on hardware without
+            # mixed-precision dot support. Use the published BF16 FMA branch.
+            node.test = ast.parse(
+                "a_dtype != torch.bfloat16 and ("
+                "is_sqmma_compatible(a, b, N, K) and M >= 128)",
+                mode="eval",
+            ).body
         if isinstance(node.test, ast.Call):
             node.test._return_hint = "bool"
         test = self.visit(node.test)
@@ -1807,6 +2258,20 @@ class Transform(ast.NodeTransformer):
             and isinstance(node.body[-1], (ast.Return, ast.Raise))
         ):
             self.types[narrowed[0]] = narrowed[1]
+        # Constant folding can remove every statement of a runtime branch.
+        if not node.body:
+            node.body = [ast.Pass()]
+        if (
+            narrowed
+            and narrowed[1] == "torch.device"
+            and self.types.get(narrowed[0]) == "torch.device"
+        ):
+            # Both paths now bind a concrete device. Make that refinement
+            # visible when the original schema parameter was Optional[Device].
+            known_device = ast.Compare(
+                ast.Name(narrowed[0], ast.Load()), [ast.IsNot()], [ast.Constant(None)]
+            )
+            return [node, ast.Assert(known_device)]
         return node
 
     def visit_BoolOp(self, node):
@@ -1896,6 +2361,23 @@ class Transform(ast.NodeTransformer):
     def visit_Assign(self, node):
         value = node.value
         if (
+            len(node.targets) == 1
+            and self.annotation(node.targets[0])
+            in (
+                "torch.device",
+                "Optional[torch.device]",
+            )
+            and self.is_flagos_device_name(value)
+        ):
+            # Python torch factories accept the device name as a string.
+            # A typed host must keep the local bound to a Device.
+            value = node.value = ast.copy_location(
+                ast.parse(
+                    "torch.ops.flagos_source_native.factory_device()", mode="eval"
+                ).body,
+                value,
+            )
+        if (
             node in self.root.body
             and len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
@@ -1944,6 +2426,17 @@ class Transform(ast.NodeTransformer):
         ):
             self.grids[node.targets[0].id] = value
             return None
+        if (
+            node in self.root.body
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id not in self.inputs
+            and self.assignments[node.targets[0].id] == 1
+        ):
+            dtype = self.triton_dtype_name(value)
+            if dtype is not None:
+                self.triton_dtypes[node.targets[0].id] = dtype
+                return None
         if isinstance(value, ast.Attribute) and isinstance(node.targets[0], ast.Name):
             try:
                 constant = self.resolve(value)
@@ -2324,14 +2817,13 @@ class Transform(ast.NodeTransformer):
         )
 
     def metadata_sort(self, node):
-        """Preserve stable sorting by a captured integer metadata lookup."""
+        """Preserve stable sorting by an integer metadata key."""
         if not (
             isinstance(node.func, ast.Name)
             and node.func.id == "sorted"
             and node.func.id not in self.locals
             and self.resolve(node.func) is sorted
             and len(node.args) == 1
-            and self.annotation(node.args[0]) == "List[int]"
             and len({key.arg for key in node.keywords}) == len(node.keywords)
             and all(key.arg in {"key", "reverse"} for key in node.keywords)
         ):
@@ -2339,7 +2831,12 @@ class Transform(ast.NodeTransformer):
         options = {key.arg: key.value for key in node.keywords}
         key = options.get("key")
         reverse = options.get("reverse", ast.Constant(False))
-        if not (
+        values_type = self.annotation(node.args[0])
+        if self.annotation(reverse) != "bool":
+            return None
+        if key is None and values_type == "List[int]":
+            capture, capture_type, key_expression = None, None, "value"
+        elif (
             isinstance(key, ast.Lambda)
             and len(key.args.args) == 1
             and not key.args.posonlyargs
@@ -2347,24 +2844,47 @@ class Transform(ast.NodeTransformer):
             and not key.args.defaults
             and key.args.vararg is None
             and key.args.kwarg is None
-            and isinstance(key.body, ast.Subscript)
-            and isinstance(key.body.value, ast.Name)
-            and key.body.value.id != key.args.args[0].arg
-            and self.annotation(key.body.value) == "List[int]"
-            and isinstance(key.body.slice, ast.Name)
-            and key.body.slice.id == key.args.args[0].arg
-            and self.annotation(reverse) == "bool"
         ):
+            parameter = key.args.args[0].arg
+            body = key.body
+            if (
+                isinstance(body, ast.Subscript)
+                and values_type == "List[int]"
+                and isinstance(body.value, ast.Name)
+                and body.value.id != parameter
+                and self.annotation(body.value) == "List[int]"
+                and isinstance(body.slice, ast.Name)
+                and body.slice.id == parameter
+            ):
+                capture, capture_type = body.value, "List[int]"
+                key_expression = "metadata[value]"
+            elif (
+                isinstance(body, ast.BinOp)
+                and isinstance(body.op, ast.Mod)
+                and isinstance(body.left, ast.Name)
+                and body.left.id == parameter
+                and isinstance(body.right, ast.Attribute)
+                and body.right.attr == "ndim"
+                and isinstance(body.right.value, ast.Name)
+                and body.right.value.id != parameter
+                and self.annotation(body.right.value) == "torch.Tensor"
+            ):
+                capture, capture_type = body.right, "int"
+                key_expression = "value % metadata"
+            else:
+                return None
+        else:
             return None
         name = "metadata_sort_" + str(len(self.frontend.functions))
+        capture_parameter = f"metadata: {capture_type}, " if capture is not None else ""
         # Compute keys before sorting, as Python does. Strict comparisons retain
         # input order for equal keys in both ascending and descending order.
         self.frontend.functions[name] = ast.parse(
             "def "
             + name
-            + "(values: List[int], lookup: List[int], reverse: bool) -> List[int]:\n"
+            + f"(values: List[int], {capture_parameter}reverse: bool) -> List[int]:\n"
             "    output = list(values)\n"
-            "    keys = [lookup[value] for value in values]\n"
+            f"    keys = [{key_expression} for value in values]\n"
             "    for index in range(1, len(output)):\n"
             "        value = output[index]\n        key = keys[index]\n"
             "        position = index\n"
@@ -2377,21 +2897,17 @@ class Transform(ast.NodeTransformer):
             "        output[position] = value\n        keys[position] = key\n"
             "    return output"
         ).body[0]
-        return ast.Call(
-            ast.Name(name, ast.Load()),
-            [self.visit(node.args[0]), self.visit(key.body.value), self.visit(reverse)],
-            [],
-        )
+        args = [self.visit(node.args[0])]
+        if capture is not None:
+            args.append(self.visit(capture))
+        args.append(self.visit(reverse))
+        return ast.Call(ast.Name(name, ast.Load()), args, [])
 
     def metadata_comprehension(self, node):
         if len(node.generators) != 1:
             return None
         generator = node.generators[0]
-        if not (
-            generator.ifs
-            and not generator.is_async
-            and isinstance(generator.target, ast.Name)
-        ):
+        if not generator.ifs or generator.is_async:
             return None
         iterable = generator.iter
         is_range = (
@@ -2404,14 +2920,35 @@ class Transform(ast.NodeTransformer):
             and not iterable.keywords
             and all(self.annotation(arg) == "int" for arg in iterable.args)
         )
-        if not is_range and not (
-            isinstance(iterable, ast.Name) and self.annotation(iterable) == "List[int]"
+        is_enumerate = (
+            isinstance(iterable, ast.Call)
+            and isinstance(iterable.func, ast.Name)
+            and iterable.func.id == "enumerate"
+            and "enumerate" not in self.locals
+            and self.resolve(iterable.func) is enumerate
+            and len(iterable.args) == 1
+            and not iterable.keywords
+            and self.annotation(iterable.args[0]) == "List[int]"
+        )
+        target = generator.target
+        if (
+            is_enumerate
+            and isinstance(target, ast.Tuple)
+            and len(target.elts) == 2
+            and all(isinstance(item, ast.Name) for item in target.elts)
         ):
+            names = {item.id for item in target.elts}
+            if len(names) != 2:
+                return None
+        elif isinstance(target, ast.Name) and (
+            is_range
+            or isinstance(iterable, ast.Name)
+            and self.annotation(iterable) == "List[int]"
+        ):
+            names = {target.id}
+        else:
             return None
-        if any(
-            isinstance(n, ast.Name) and n.id == generator.target.id
-            for n in ast.walk(iterable)
-        ):
+        if any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(iterable)):
             return None
         allowed = (
             ast.Name,
@@ -2439,14 +2976,14 @@ class Transform(ast.NodeTransformer):
                 for n in ast.walk(value)
                 if isinstance(n, ast.Name)
                 and isinstance(n.ctx, ast.Load)
-                and n.id != generator.target.id
-                and not (is_range and n is iterable.func)
+                and n.id not in names
+                and not ((is_range or is_enumerate) and n is iterable.func)
             }
         )
         if any(self.types.get(n) not in {"int", "bool", "List[int]"} for n in inputs):
             return None
         original_types = self.types.copy()
-        self.types[generator.target.id] = "int"
+        self.types.update({name: "int" for name in names})
         try:
             if self.annotation(node.elt) != "int":
                 return None
@@ -2454,7 +2991,7 @@ class Transform(ast.NodeTransformer):
             self.types = original_types
         name = "metadata_filter_" + str(len(self.frontend.functions))
         output = "_filtered_output"
-        while output in inputs or output == generator.target.id:
+        while output in inputs or output in names:
             output += "_"
         helper = ast.parse(
             "def "
@@ -2644,6 +3181,33 @@ class Transform(ast.NodeTransformer):
         )
 
     def visit_Call(self, node):
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "_index_copy_func"
+            and self.function.__module__ == "flag_gems.ops.index_copy_"
+            and self.function.__name__ == "index_copy_"
+            and getattr(self.frontend.hosts, "manifest", {})
+            .get("backend", {})
+            .get("vendor")
+            == "metax"
+        ):
+            # Both compiled entries require rank four before calling this host.
+            hosts = self.frontend.hosts
+            module = hosts.index_copy_ranks.get("4")
+            if module is not None:
+                wrapper = hosts.originals[module]._index_copy_wrapper
+                types = {
+                    name: "torch.Tensor" if index < 3 else "int"
+                    for index, name in enumerate(inspect.signature(wrapper).parameters)
+                }
+                target = self.frontend.transform(
+                    wrapper, types, return_hint="torch.Tensor"
+                )
+                return ast.Call(
+                    ast.Name(target, ast.Load()),
+                    [self.visit(arg) for arg in node.args],
+                    [],
+                )
         ordered = self.metadata_sort(node)
         if ordered is not None:
             return ordered
@@ -2693,14 +3257,128 @@ class Transform(ast.NodeTransformer):
                     ],
                     [],
                 )
+        label = ast.unparse(node.func)
+        if (
+            label in {"builtins.min", "builtins.max"}
+            and not node.keywords
+            and self.resolve(node.func.value) is builtins
+        ):
+            arguments = [self.visit(arg) for arg in node.args]
+            if len(arguments) > 2:
+                arguments = [ast.List(arguments, ast.Load())]
+            # Resolve the qualified builtin before lowering. The source module
+            # itself can export an operator named max or min.
+            return ast.Call(ast.Name(node.func.attr, ast.Load()), arguments, [])
+        if (
+            label in {"get_sm_count", "get_device_capability", "get_l2_cache_size"}
+            and not node.args
+            and not node.keywords
+        ):
+            import torch
+
+            device_info = sys.modules.get("flag_gems.utils.device_info")
+            original = getattr(device_info, label, None)
+            queries = (
+                ("compute_capability_major", "compute_capability_minor")
+                if label == "get_device_capability"
+                else (label,)
+            )
+            if (
+                original is not None
+                and self.resolve(node.func) is original
+                and all(hasattr(torch.ops.flagos_source_native, q) for q in queries)
+            ):
+                calls = []
+                for name in queries:
+                    call = ast.parse(
+                        f"torch.ops.flagos_source_native.{name}()", mode="eval"
+                    ).body
+                    call._type = "int"
+                    calls.append(call)
+                expression = (
+                    calls[0] if len(calls) == 1 else ast.Tuple(calls, ast.Load())
+                )
+                return ast.copy_location(expression, node)
+        if (
+            label == "mask.item"
+            and not node.args
+            and not node.keywords
+            and self.function.__module__.removeprefix("flag_gems.runtime.backend.")
+            == "_ascend.ops.masked_fill"
+        ):
+            return ast.copy_location(
+                ast.parse("mask.is_nonzero()", mode="eval").body, node
+            )
+        if len(node.args) == 1 and not node.keywords:
+            if label == "torch.is_tensor":
+                kind = self.annotation(node.args[0])
+                if kind in {"torch.Tensor", "bool", "int", "float", "str", "None"}:
+                    return ast.Constant(kind == "torch.Tensor")
+            if label == "torch.device":
+                if self.is_flagos_device_name(node.args[0]):
+                    return ast.copy_location(
+                        ast.parse(
+                            "torch.ops.flagos_source_native.factory_device()",
+                            mode="eval",
+                        ).body,
+                        node,
+                    )
+                if self.annotation(node.args[0]) == "torch.device":
+                    return self.visit(node.args[0])
+        if (
+            label == "torch.empty"
+            and self.function.__module__ == "flag_gems.ops.mul"
+            and self.function.__name__ == "_real_output"
+            and len(node.args) == 1
+            and self.types.get("a_t") == "torch.Tensor"
+            and any(
+                keyword.arg == "device" and ast.unparse(keyword.value) == "a_t.device"
+                for keyword in node.keywords
+            )
+        ):
+            # This allocator already receives a typed Device. Use its ATen
+            # entry even when the compatibility wrapper is installed later.
+            node.func = ast.parse("torch.ops.aten.empty", mode="eval").body
+            return self.generic_visit(node)
+        if label == "torch.empty" and node.args:
+            factory = self.resolve(node.func)
+            if (
+                getattr(factory, "__module__", None)
+                == "torch_fl.compat.flaggems.device"
+                and getattr(factory, "__qualname__", "")
+                == "_install_musa_flaggems_compat.<locals>._musa_empty"
+            ):
+                for keyword in node.keywords:
+                    if keyword.arg != "device":
+                        continue
+                    kind = self.annotation(keyword.value)
+                    if kind == "str" and isinstance(
+                        keyword.value, (ast.Name, ast.Constant)
+                    ):
+                        # Match the shim's prefix translation for the published
+                        # batched matrix provider's literal vendor device.
+                        value = ast.unparse(keyword.value)
+                        keyword.value = ast.parse(
+                            f'torch.device("flagos" + {value}[4:] '
+                            f'if {value} == "musa" or {value}.startswith("musa:") '
+                            f"else {value})",
+                            mode="eval",
+                        ).body
+                        kind = "torch.device"
+                    if kind in {"torch.device", "Optional[torch.device]"}:
+                        if len(node.args) > 1:
+                            if any(self.annotation(arg) != "int" for arg in node.args):
+                                break
+                            node.args = [ast.List(node.args, ast.Load())]
+                        node.func = ast.parse("torch.ops.aten.empty", mode="eval").body
+                        return self.generic_visit(node)
         call = self.source_region(node, "expression", self.annotation(node))
         if call is not None:
             return call
-        label = ast.unparse(node.func)
         if (
             self.function is self.frontend.guarded_function
             and self.frontend.guarded_input_dtypes
-            and self.frontend.guarded_input_dtypes <= {"Float", "BFloat16"}
+            and self.frontend.guarded_input_dtypes <= {"Bool", "Float", "BFloat16"}
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "is_complex"
             and isinstance(node.func.value, ast.Name)
@@ -2735,6 +3413,33 @@ class Transform(ast.NodeTransformer):
             )
         try:
             function = self.resolve(node.func)
+            if (
+                self.function.__module__ == "flag_gems.ops.cumsum"
+                and label == "get_num_sms"
+                and len(node.args) == 1
+                and not node.keywords
+                and getattr(function, "__module__", None) == self.function.__module__
+            ):
+                # The published cache reads device properties for long scans.
+                # Bind that metadata lookup separately from the kernel slots.
+                slot = self.frontend.launcher.register_foreign(
+                    self.frontend.hosts.resolve(function), ()
+                )
+                name = f"host_scan_processors_{slot}"
+                self.frontend.functions[name] = ast.parse(
+                    f"""
+def {name}(device: Optional[int]) -> int:
+    value = torch.ops.flagos_source_native.foreign_value(
+        {slot}, torch.jit.annotate(List[Any], [device]),
+        torch.jit.annotate(Dict[str, Any], {{}})
+    )
+    assert torch.jit.isinstance(value, int)
+    return value
+"""
+                ).body[0]
+                return ast.Call(
+                    ast.Name(name, ast.Load()), [self.visit(node.args[0])], []
+                )
             if (
                 inspect.isfunction(function)
                 and function.__module__ in self.frontend.hosts.originals
@@ -2772,6 +3477,23 @@ class Transform(ast.NodeTransformer):
             return ast.Call(
                 ast.parse("torch.ops.flagos_script_host.deterministic").body[0].value,
                 [],
+                [],
+            )
+        if label == "torch.get_default_dtype" and not (node.args or node.keywords):
+            return ast.parse(
+                "torch.ops.flagos_source_native.default_dtype()", mode="eval"
+            ).body
+        if (
+            label == "math.prod"
+            and len(node.args) == 1
+            and not node.keywords
+            and self.annotation(node.args[0]) == "List[int]"
+        ):
+            return ast.Call(
+                ast.parse(
+                    "torch.ops.flagos_source_native.shape_product", mode="eval"
+                ).body,
+                [self.visit(node.args[0])],
                 [],
             )
 
@@ -2848,9 +3570,22 @@ class Transform(ast.NodeTransformer):
             kernel = self.frontend.hosts.resolve(original_kernel)
             slot = self.frontend.launcher.register_script_kernel(kernel)
             grid = self.grids.get(ast.unparse(node.func.slice), node.func.slice)
-            args = annotated_list("Any", [self.kernel_value(a) for a in node.args])
+            params = getattr(kernel, "params", ())
+            constexpr = {p.name for p in params if p.is_constexpr}
+            args = annotated_list(
+                "Any",
+                [
+                    self.kernel_value(
+                        a, constexpr=i < len(params) and params[i].is_constexpr
+                    )
+                    for i, a in enumerate(node.args)
+                ],
+            )
             kwargs = annotated_dict(
-                [(k.arg, self.kernel_value(k.value)) for k in node.keywords]
+                [
+                    (k.arg, self.kernel_value(k.value, constexpr=k.arg in constexpr))
+                    for k in node.keywords
+                ]
             )
             if isinstance(grid, ast.Tuple):
                 return ast.Call(
@@ -2891,7 +3626,10 @@ class Transform(ast.NodeTransformer):
                     args,
                     kwargs,
                     ast.Constant(index),
-                    ast.List([ast.Name(n, ast.Load()) for n in captures], ast.Load()),
+                    ast.List(
+                        [self.visit(ast.Name(n, ast.Load())) for n in captures],
+                        ast.Load(),
+                    ),
                 ],
                 [],
             )

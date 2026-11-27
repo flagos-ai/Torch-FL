@@ -379,11 +379,9 @@ else
 fi
 
 if [[ "$CI_STAGE" == "integration" ]]; then
-  if (( USE_IMAGE_VENV )); then
-    check_image_requirement transformers
-  else
-    ensure_runtime_requirement transformers "$PIP_INDEX_URL_ARG"
-  fi
+  # The requirements file already provides pytest and Ninja for host-program
+  # tests. Reuse Transformers only when it matches the upstream Qwen3 pin.
+  ensure_runtime_requirement "transformers==$QWEN3_TRANSFORMERS_VERSION_DEFAULT" "$PIP_INDEX_URL_ARG"
 fi
 
 "$VENV_PYTHON" -m pip check

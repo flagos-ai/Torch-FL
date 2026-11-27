@@ -178,13 +178,13 @@ at::Tensor PadMatmulContractDim(const at::Tensor& operand, bool is_rhs,
 // with the same small K. See TritonMinDotContractExtent above.
 bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs);
 
+bool TryEmptyMatmul(const at::Tensor& lhs, const at::Tensor& rhs,
+                    int64_t rank, at::Tensor& result);
+
 // Native MetaX FP32 outer products honor the caller's TF32 policy using the
 // published pointwise kernels. Other builds/contracts retain their bmm path.
 bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
                                   at::Tensor& result);
-bool TryNativeHostMean(const at::Tensor& input, at::OptionalIntArrayRef dims,
-                       bool keepdim, std::optional<at::ScalarType> dtype,
-                       at::Tensor& result);
 
 // Shared by ATen fallback and explicit numerical host escapes.
 void SetStrictHostRoutes(bool enabled);

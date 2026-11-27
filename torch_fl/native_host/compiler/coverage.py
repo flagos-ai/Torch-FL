@@ -151,8 +151,15 @@ def discover_variants(registry, original_ops: dict, names: set, schema_lookup) -
                         )
                     )
                     position += 1
-                if argument is None and p.name == "out" and p.default is None:
-                    kind = "Optional[torch.Tensor]"
+                if (
+                    argument is None
+                    and p.default is None
+                    and p.name in ("out", "dtype")
+                ):
+                    kind = {
+                        "out": "Optional[torch.Tensor]",
+                        "dtype": "Optional[torch.dtype]",
+                    }[p.name]
                 elif argument is None and type(p.default) in (bool, int, float, str):
                     # A Python helper may accept an extra defaulted positional
                     # parameter (e.g. step), even when the ATen overload ends

@@ -30,6 +30,7 @@
 //     EventRecord/StreamWaitEvent, so null must resolve to the process default
 //     queue rather than be rejected.
 
+#include "mps.h"
 #include "mps_runtime.h"
 
 #include <array>
@@ -242,6 +243,48 @@ Error_t EventDestroy(Event_t event) {
   }
   delete state;
   return Success;
+}
+
+Error_t FlagosMPSAllocatorEventCreate(Event_t* event) {
+  if (!event) {
+    return ErrorUnknown;
+  }
+  *event = reinterpret_cast<Event_t>(new torch_fl_mps::EventState());
+  return Success;
+}
+
+Error_t FlagosMPSAllocatorEventRecord(Event_t event, Stream_t stream) {
+  auto* state = torch_fl_mps::AsEvent(event);
+  if (!state) {
+    return ErrorUnknown;
+  }
+  auto* stream_state = torch_fl_mps::AsStream(stream);
+  id<MTLCommandBuffer> submitted = nil;
+  if (stream_state) {
+    std::lock_guard<std::mutex> lock(stream_state->commit_mutex);
+    submitted = [stream_state->last_committed retain];
+  }
+  [state->stamp release];
+  state->stamp = submitted;
+  state->recorded = true;
+  return Success;
+}
+
+Error_t FlagosMPSAllocatorEventQuery(Event_t event) {
+  const auto* state = torch_fl_mps::AsEvent(event);
+  if (!state) {
+    return ErrorUnknown;
+  }
+  if (!state->recorded) {
+    return ErrorNotReady;
+  }
+  if (state->stamp == nil) {
+    return Success;
+  }
+  const auto status = state->stamp.status;
+  return status == MTLCommandBufferStatusCompleted || status == MTLCommandBufferStatusError
+      ? Success
+      : ErrorNotReady;
 }
 
 Error_t EventRecord(Event_t event, Stream_t stream) {

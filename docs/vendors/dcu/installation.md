@@ -84,6 +84,10 @@ facade can select the matching runtime.
 
 Full measurements and rationale: [vendor-free-core-libs.md](vendor-free-core-libs.md).
 
+With the pinned Native Host precision bundle, BF16 and FP32 `cat` use the DTK
+eager kernel on the selected HCU stream. The generated adapter uses ATen's
+structured metadata to allocate the result on FlagOS storage.
+
 ## CI image and isolated environment
 
 DCU CI retains the Torch 2.10-compatible development image
@@ -108,10 +112,9 @@ FlagCX remains deferred under the functional-CI policy.
 
 The ordinary runtime version/dispatch checks, symbol ABI guard, decoupled
 computation checks and separate full-vendor-core legacy smoke are enabled.
-Returning
-to the old image removes the known cross-version ABI mismatch; compatibility
-with the fresh venv and current checkout still requires a complete hardware
-CI run.
+Returning to the old image removes the known cross-version ABI mismatch.
+Compatibility with the fresh venv and current checkout still requires a
+complete hardware CI run.
 
 ## Verification
 

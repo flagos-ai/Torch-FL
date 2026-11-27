@@ -193,19 +193,40 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
     source_root = Path(source_root)
     build_temp = Path(build_temp)
     build_temp.mkdir(parents=True, exist_ok=True)
+    registry = list(flag_gems._FULL_CONFIG)
+    if _build_config.ACCELERATOR == "nvidia":
+        # ATen passes the same functional arguments when the native out
+        # adapters call the published, bounds-masked NLL providers.
+        for operator, name in (
+            ("nll_loss_forward", "nll_loss_nd_forward"),
+            ("nll_loss_backward", "nll_loss_nd_backward"),
+        ):
+            if name in hosts.original_ops:
+                registry.append((operator, hosts.original_ops[name]))
     variants, entries = discover_variants(
-        flag_gems._FULL_CONFIG,
+        registry,
         hosts.original_ops,
         names,
         torch._C._jit_get_schemas_for_operator,
     )
     selections = hosts.manifest.get("source_variants", {}).get("entries", [])
+    tensor_ranks = {}
+    index_copy = hosts.original_ops.get("index_copy_")
+    if (
+        _build_config.ACCELERATOR == "metax"
+        and "4" in hosts.index_copy_ranks
+        and index_copy is not None
+        and index_copy.__module__ == "flag_gems.ops.index_copy_"
+    ):
+        # The pinned generator exposes a separate host and kernel per rank.
+        # This specialization is admitted only for the rank compiled in the frontend.
+        tensor_ranks["index_copy_"] = {"inp": 4, "src": 4}
     selected_names = {row["id"] for row in selections}
     selected_dtypes = {row["id"]: row["dtypes"] for row in selections}
     if selected_names & hosts.original_ops.keys():
         raise ValueError("published source identifier shadows an existing host")
     for row in selections:
-        function = getattr(hosts.originals[row["module"]], row["function"])
+        function = hosts.source_variant_functions[row["id"]]
         alternatives, _ = discover_variants(
             [(row["op"].removeprefix("aten::"), SimpleNamespace(__name__=row["id"]))],
             {row["id"]: function},
@@ -214,17 +235,20 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         )
         variants.extend(alternatives)
     catalog = json.loads(torch.ops.flagos.native_source_typed_catalog())
+    compiler = hosts.manifest["backend"]["compiler_distribution"]
     cohort = {
         "vendor": _build_config.ACCELERATOR,
         "torch": hosts.manifest["torch"],
         "triton": hosts.manifest["triton"],
-        "flagtree": importlib.metadata.version("flagtree"),
+        "compiler_distribution": compiler,
         "flag_gems": importlib.metadata.version("flag_gems"),
         "host_manifest_sha256": hashlib.sha256(
             json.dumps(hosts.manifest, sort_keys=True).encode()
         ).hexdigest(),
         "selected_hosts": sorted(names),
     }
+    if compiler["name"] == "flagtree":
+        cohort["flagtree"] = compiler["version"]
     write_coverage(directory, entries, [], [], cohort=cohort)
     recorder = Recorder(hosts)
     library = torch.library.Library("flagos_script_host", "DEF")
@@ -434,6 +458,9 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
                 argument_check(jit_types[p["name"]], "a" + str(i))
                 for i, p in enumerate(public)
             ]
+            for parameter, rank in tensor_ranks.get(name, {}).items():
+                tensor = f"a{names.index(parameter)}.toTensor()"
+                checks.append(f"{tensor}.defined() && {tensor}.dim()=={rank}")
             values = {
                 p["name"]: "a"
                 + str(i)
@@ -461,7 +488,7 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
             + "));"
         )
     typed_code, typed_entries, typed_rejected = emit_entries(
-        catalog, native_groups, selections
+        catalog, native_groups, selections, tensor_ranks=tensor_ranks
     )
     native_code.extend(typed_code)
     init = sample[sample.index("PYBIND11_MODULE(") :].replace(
@@ -550,8 +577,8 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         library_dirs=[str(torch_dir / "lib")],
         libraries=["torch_python", "torch_cpu", "c10"],
         define_macros=(
-            [("FLAGOS_HYGON_NATIVE_HOST_FAST_ALLOC", "1")]
-            if _build_config.ACCELERATOR == "hygon"
+            [("FLAGOS_NATIVE_HOST_FAST_ALLOC", "1")]
+            if _build_config.ACCELERATOR in {"hygon", "thead"}
             else []
         ),
         language="c++",

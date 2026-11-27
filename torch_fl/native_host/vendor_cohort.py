@@ -16,7 +16,7 @@ import sys
 from packaging.requirements import Requirement
 
 LIBRARIES = ("libtorch_nvshmem.so", "libc10_cuda.so", "libtorch_cuda.so")
-METAX_LIBRARIES = ("libc10_cuda.so", "libtorch_cuda.so")
+CUDA_DEVICE_LIBRARIES = ("libc10_cuda.so", "libtorch_cuda.so")
 
 
 def load_build_policy(source_root):
@@ -75,13 +75,14 @@ def version_fields(path):
 def describe(library_dir, policy):
     library_dir = Path(library_dir).resolve()
     fields = version_fields(library_dir.parent / "version.py")
-    hygon = policy.get("vendor") == "hygon"
-    metax = policy.get("vendor") == "metax"
+    vendor = policy.get("vendor", "nvidia")
+    hygon = vendor == "hygon"
+    cuda_device_only = vendor in {"metax", "thead"}
     libraries = (
         ("libc10_hip.so", "libtorch_hip.so")
         if hygon
-        else METAX_LIBRARIES
-        if metax
+        else CUDA_DEVICE_LIBRARIES
+        if cuda_device_only
         else LIBRARIES
     )
     if (
@@ -89,6 +90,7 @@ def describe(library_dir, policy):
         != policy.get("vendor_source_version", policy["vendor_torch"])
         or fields.get("git_version") != policy["torch_git_version"]
         or (fields.get("hip") != policy["hip"] if hygon else fields.get("cuda") is None)
+        or ("cuda" in policy and fields.get("cuda") != policy["cuda"])
     ):
         raise ValueError(
             "native vendor precision requires its validated published Torch cohort"
@@ -96,6 +98,13 @@ def describe(library_dir, policy):
     for name in libraries:
         if not (library_dir / name).is_file():
             raise ValueError(f"missing published vendor library: {name}")
+    if vendor == "thead":
+        expected = policy["libraries"]
+        if expected.keys() != set(libraries):
+            raise ValueError("T-Head precision requires both CUDA device libraries")
+        for name, checksum in expected.items():
+            if digest(library_dir / name) != checksum:
+                raise ValueError(f"published T-Head device library changed: {name}")
     matches = []
     for candidate in library_dir.parent.parent.glob("torch-*.dist-info"):
         metadata = Parser().parsestr((candidate / "METADATA").read_text())
@@ -118,7 +127,7 @@ def describe(library_dir, policy):
                 "vendor runtime dependencies must have verified exact pins"
             )
         requirements.append(str(requirement))
-    if not hygon and not metax and not requirements:
+    if not hygon and not cuda_device_only and not requirements:
         raise ValueError("vendor Torch declares no NVIDIA runtime dependencies")
     headers = {}
     for relative, expected in policy.get("host_headers", {}).items():
@@ -126,12 +135,20 @@ def describe(library_dir, policy):
         if not path.is_file() or digest(path) != expected:
             raise ValueError(f"published vendor host header changed: {relative}")
         headers[relative] = {"path": str(path), "sha256": expected}
-    licenses = sorted((distribution / "licenses").glob("*"))
-    if not any(path.is_file() for path in licenses):
+    licenses = sorted(
+        path for path in (distribution / "licenses").glob("*") if path.is_file()
+    )
+    if not licenses:
+        licenses = [
+            distribution / name
+            for name in metadata.get_all("License-File", [])
+            if Path(name).name == name and (distribution / name).is_file()
+        ]
+    if not licenses:
         raise ValueError("published vendor Torch license files are missing")
     return {
         "version": policy["vendor_torch"],
-        "vendor": policy.get("vendor", "nvidia"),
+        "vendor": vendor,
         "git_version": fields["git_version"],
         "cuda": fields.get("cuda"),
         "hip": fields.get("hip"),
@@ -139,18 +156,16 @@ def describe(library_dir, policy):
         "library_dir": str(library_dir),
         "metadata_sha256": digest(distribution / "METADATA"),
         "requirements": sorted(requirements),
-        "licenses": [str(path) for path in licenses if path.is_file()],
+        "licenses": [str(path) for path in licenses],
         "libraries": libraries,
         "host_headers": headers,
     }
 
 
 def bundle_directory(vendor):
-    return Path(
-        {"hygon": "lib_hygon", "metax": "native_host/_generated/metax_vendor"}.get(
-            vendor, "lib"
-        )
-    )
+    if vendor in {"metax", "thead"}:
+        return Path("native_host/_generated") / f"{vendor}_vendor"
+    return Path("lib_hygon" if vendor == "hygon" else "lib")
 
 
 def bundle(cohort, package, source_root=None):

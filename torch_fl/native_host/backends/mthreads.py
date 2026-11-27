@@ -7,7 +7,14 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from ..backend import BackendConfig, BackendInterface, BuildOptions, LauncherOptions
+from ..backend import (
+    BackendConfig,
+    BackendInterface,
+    BuildOptions,
+    LauncherOptions,
+    align_published_embedding_device,
+    align_published_mul_device,
+)
 
 
 def _leaves(signature):
@@ -39,6 +46,14 @@ def _descriptors(signature, entries, driver):
                 "elem_type": driver._musa_tme_dtype_enum(dtype),
                 "nan_fill": driver._MUSA_TME_NAN_FILL.get(dtype),
             }
+            if "elem_size" not in entry:
+                # The compiler may leave element width out of TME metadata.
+                # The descriptor signature still carries the element dtype.
+                from triton.language import dtype as triton_dtype
+
+                descriptors[index]["elem_size"] = (
+                    triton_dtype(dtype).primitive_bitwidth // 8
+                )
     return tuple(descriptors)
 
 
@@ -81,6 +96,10 @@ class Backend(BackendInterface):
         scratch_alignment=256,
         shared_headers=("launch_params.h",),
     )
+
+    def initialize_runtime(self) -> None:
+        align_published_embedding_device("musa")
+        align_published_mul_device("musa")
 
     def extension_options(self, driver: Path, source_dir: Path) -> BuildOptions:
         sdk = Path(os.environ.get("MUSA_HOME") or "/usr/local/musa")

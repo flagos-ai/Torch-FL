@@ -29,7 +29,8 @@ class FLAGOS_EXPORT MetalKernel {
   ~MetalKernel();
 
   void run(c10::ArrayRef<MetalArg> args, const MetalGrid& threads,
-           const std::optional<MetalGrid>& group_size) const;
+           const std::optional<MetalGrid>& group_size,
+           bool compiled_host = false) const;
 
  private:
   struct Impl;
@@ -39,6 +40,15 @@ class FLAGOS_EXPORT MetalKernel {
 // The registered operator uses PyTorch's bundled dense Metal kernel.
 bool RunMetalUnary(const at::Tensor& out, const at::Tensor& input,
                    const char* name);
+bool RunMetalBinaryAlpha(const at::Tensor& out, const at::Tensor& input,
+                        const at::Tensor& other, const at::Scalar& alpha,
+                        const char* name);
+bool RunMetalFp32ScaledAdd(const at::Tensor& out, const at::Tensor& input,
+                           const at::Tensor& left, const at::Tensor& right,
+                           const at::Scalar& alpha, const char* term_name);
+void RunMetalTernaryAlpha(const MetalKernel& kernel, const at::Tensor& out,
+                          const at::Tensor& input, const at::Tensor& left,
+                          const at::Tensor& right, float alpha);
 
 FLAGOS_EXPORT ::flagos::native_host::EnqueueTrace::Events CaptureEnqueues(
     const std::function<void()>& run);

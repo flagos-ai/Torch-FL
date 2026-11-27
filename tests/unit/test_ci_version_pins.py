@@ -416,9 +416,8 @@ def test_requires_python_is_the_platforms_pinned_interpreter():
 def test_published_sdk_or_flagtree_cohort_has_an_interpreter_pin():
     """Interpreter restrictions follow the published compiler or SDK cohort.
 
-    Kunlunxin keeps a platform-id wheel segment but depends on a cp310-only
-    FlagTree. Metal has neither an SDK segment nor a FlagTree dependency and
-    retains the base interpreter range.
+    Kunlunxin and TsingMicro depend on cp310-only FlagTree wheels without SDK
+    segments. Apple MPS uses a platform-only segment and has no FlagTree pin.
     """
     pins = _pins()
     for platform in _platforms_in_the_table():

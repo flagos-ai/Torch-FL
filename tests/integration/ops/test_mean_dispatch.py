@@ -17,7 +17,7 @@ mean.dim dispatch tests
 
 Verifies that torch.mean(dim=...):
   - produces correct results on flagos device
-  - C++ wrapper routes to flaggems_python backend (default)
+  - the C++ wrapper uses the installed backend configuration
   - dispatch log confirms the actual backend used
 
 Usage:
@@ -50,7 +50,7 @@ def _run_mean_subprocess(
     env.update(extra_env)
     code = (
         "import torch_fl, torch; "
-        "a = torch.randn(4,8,device='flagos:0'); "
+        "a = torch.randn(4,8,device='flagos:0',dtype=torch.float32); "
         "torch.mean(a, dim=-1)"
     )
     return subprocess.run(
@@ -120,20 +120,11 @@ class TestMeanDimDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """mean.dim dispatches to whatever backend this platform's conf lists.
-
-        FlagGems-first is the generated default, but it is not unconditional:
-        MetaX keeps mean.dim on the cuda boxing kernel because gems' non-inner-dim
-        path uses a CUDA context triton-metax rejects. Asserting the conf's own
-        value keeps this test meaningful on every platform rather than pinning it
-        to the one it was written on: kunlunxin lists no accelerated mean.dim at
-        all and hands it to cpu_fallback, where there is no dispatch to assert,
-        so the case skips there instead of raising.
-        """
-        expected = routed_backend_or_none("mean.dim")
+        """mean.dim with FP32 input uses the route declared for Float."""
+        expected = routed_backend_or_none("mean.dim", dtype="Float")
         if expected is None:
             pytest.skip("mean.dim is routed to 'none' on this platform")
-        if not route_is_served("mean.dim"):
+        if not route_is_served("mean.dim", dtype="Float"):
             pytest.skip(
                 f"this wheel did not compile the `{expected}` route the conf "
                 "names, so the op is unregistered and logs no dispatch"

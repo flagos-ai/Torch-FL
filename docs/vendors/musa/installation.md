@@ -173,6 +173,17 @@ a separate import directory before running the common `test_compiled_stream_chai
 The MUSA launcher uses the compiler target's warp size and the SDK tensor
 descriptor encoding.
 
+The native host build uses the published FlagGems scalar `lerp_` implementation
+with FP32 arithmetic for BF16 tensors. The generated MUSA foreach operators
+cover dense BF16 AdamW state and updates with the vendor's fused FP32
+arithmetic. These kernels are compiled with `mcc` when the wheel is built.
+The BF16 sum route uses the vendor's contiguous input layout, and muDNN
+matrix multiplication follows PyTorch's deterministic-algorithm setting.
+The muDNN routes pass eligible
+CPU scalars directly to the device kernels while preserving the ATen promotion
+rules. The generated cross-entropy route calls the muDNN eager loss for
+contiguous FP32 logits and unweighted class-index targets with mean reduction.
+
 ## Testing
 
 Run the MUSA dispatch suite:

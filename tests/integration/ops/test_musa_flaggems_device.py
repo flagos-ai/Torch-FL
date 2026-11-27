@@ -44,12 +44,11 @@ def _require_flaggems_mthreads():
         pytest.skip(f"FlagGems MThreads runtime is unavailable: {exc}")
     if "mthreads" not in triton.backends.backends:
         pytest.skip("the installed Triton does not provide the MThreads backend")
-    flag_gems.enable()
+    return flag_gems
 
 
 def test_flaggems_randn_shares_native_generator_reservations():
-    _require_flaggems_mthreads()
-    import flag_gems
+    flag_gems = _require_flaggems_mthreads()
 
     # The package-level name, not ``flag_gems.ops.randn``: that is what the
     # generated kernel resolves to, and on MUSA ``SpecOpRegistrar`` has rebound

@@ -20,6 +20,9 @@
   m.impl("acosh", WrapperAcosh);
   m.impl("add.Scalar", WrapperAddScalar);
   m.impl("add.Tensor", WrapperAddTensor);
+  m.impl("add.out", WrapperAddOut);
+  m.impl("addcdiv.out", WrapperAddcdivOut);
+  m.impl("addcmul.out", WrapperAddcmulOut);
   m.impl("addmm", WrapperAddmm);
   m.impl("all", WrapperAll);
   m.impl("all.dim", WrapperAllDim);
@@ -47,6 +50,7 @@
   m.impl("cumsum", WrapperCumsum);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
+  m.impl("div.out", WrapperDivOut);
   m.impl("elu", WrapperElu);
   m.impl("embedding", WrapperEmbedding);
   m.impl("eq.Scalar", WrapperEqScalar);
@@ -70,6 +74,7 @@
   m.impl("le.Scalar", WrapperLeScalar);
   m.impl("le.Tensor", WrapperLeTensor);
   m.impl("leaky_relu", WrapperLeakyRelu);
+  m.impl("lerp.Scalar_out", WrapperLerpScalarOut);
   m.impl("linalg_solve_triangular", WrapperLinalgSolveTriangular);
   m.impl("linspace", WrapperLinspace);
   m.impl("log", WrapperLog);
@@ -88,6 +93,7 @@
   m.impl("mm", WrapperMm);
   m.impl("mul.Scalar", WrapperMulScalar);
   m.impl("mul.Tensor", WrapperMulTensor);
+  m.impl("mul.out", WrapperMulOut);
   m.impl("native_batch_norm", WrapperNativeBatchNorm);
   m.impl("native_layer_norm", WrapperNativeLayerNorm);
   m.impl("ne.Scalar", WrapperNeScalar);

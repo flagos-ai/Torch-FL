@@ -36,7 +36,7 @@
 //   - sub_.Tensor
 //   - where.self_out
 //
-// Total: 358 ops registered here, 123 further FlagGems ops already claimed by musa_register.inc.
+// Total: 360 ops registered here, 123 further FlagGems ops already claimed by musa_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_batch_norm_no_update", WrapperPrivBatchNormNoUpdate);
@@ -154,6 +154,7 @@
   m.impl("dot", WrapperDot);
   m.impl("elu_", WrapperEluInplace);
   m.impl("elu_backward", WrapperEluBackward);
+  m.impl("embedding_dense_backward", WrapperEmbeddingDenseBackward);
   m.impl("erf_", WrapperErfInplace);
   m.impl("erfinv", WrapperErfinv);
   m.impl("erfinv_", WrapperErfinvInplace);
@@ -263,6 +264,7 @@
   m.impl("mode", WrapperMode);
   m.impl("mse_loss", WrapperMseLoss);
   m.impl("mse_loss_backward", WrapperMseLossBackward);
+  m.impl("mul.out", WrapperMulOut);
   m.impl("multinomial", WrapperMultinomial);
   m.impl("mv", WrapperMv);
   m.impl("nan_to_num", WrapperNanToNum);

@@ -27,8 +27,12 @@ class CudaDeviceMemory final : public DeviceMemoryInterface {
   }
 
   Error_t get_device_index(int* device) override {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+    return ::GetDevice(device);
+#else
     cudaError_t err = cudaGetDevice(device);
     return (err == cudaSuccess) ? Success : ErrorUnknown;
+#endif
   }
 
   Error_t set_device(int device) override {

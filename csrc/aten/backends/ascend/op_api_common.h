@@ -4,6 +4,7 @@
 
 #include <flagos.h>
 #include "aten/common.h"
+#include "native_host/enqueue_trace.h"
 #include "runtime/accelerator/ascend/acl_stream.h"
 #include "runtime/allocator/caching_device_allocator.h"
 
@@ -13,6 +14,10 @@
 #include <stdexcept>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <memory>
+#include <type_traits>
+#include <c10/util/SmallVector.h>
 #include <cstdlib>
 #include <vector>
 #include <unordered_map>
@@ -373,6 +378,12 @@ struct AclTensorListWrapper {
 // by-value float/double are NOT -- pass scalars as aclScalar*).
 typedef int (*GwsFunc)(...);
 
+inline void RecordNativeEnqueue(aclrtStream stream) {
+#if defined(FLAGOS_NATIVE_HOSTS)
+  ::flagos::native_host::EnqueueTrace::record(reinterpret_cast<uintptr_t>(stream), true);
+#endif
+}
+
 inline void GetRebindFuncs(void*& set_repeatable, void*& set_in_addr,
                            void*& set_out_addr) {
   void* h = GetOpBaseLibHandle();
@@ -397,6 +408,12 @@ struct CachedExecKeyHash {
            (static_cast<size_t>(k.device) * 0xC2B2AE3D27D4EB4FULL);
   }
 };
+
+#if defined(FLAGOS_NATIVE_HOSTS)
+using AclTensorArgs = c10::SmallVector<AclTensorWrapper, 2>;
+#else
+using AclTensorArgs = std::vector<AclTensorWrapper>;
+#endif
 
 struct CachedExecEntry {
   aclOpExecutor* executor = nullptr;
@@ -427,6 +444,20 @@ struct SigHasher {
     for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ULL; }
   }
   template <typename T> void val(const T& v) { bytes(&v, sizeof(T)); }
+  void scalar(const at::Scalar& value) {
+    val(value.type());
+    if (value.isComplex()) {
+      const auto number = value.toComplexDouble();
+      val(number.real());
+      val(number.imag());
+    } else if (value.type() == at::kUInt64) {
+      val(value.toUInt64());
+    } else if (value.isIntegral(/*includeBool=*/true)) {
+      val(value.toLong());
+    } else {
+      val(value.toDouble());
+    }
+  }
   void tensor(const at::Tensor& t) {
     if (!t.defined()) { uint8_t z = 0; bytes(&z, 1); return; }
     int64_t nd = t.dim();
@@ -485,7 +516,7 @@ inline void RecordCacheStat(const char* api, bool hit) {
 // it. On a miss the executor is built + marked repeatable + stored; on a hit
 // only the tensor addresses are rebound. `inputs`/`outputs` list the at::Tensor
 // args in tensor-index order (inputs and outputs indexed separately).
-template <typename BuildFn>
+template <bool OwnsBuild = false, typename BuildFn>
 void ExecAscendCached(const char* api_name, const char* ws_name,
                       void*& opApiFuncAddr, void*& getWsFuncAddr,
                       uint64_t sig,
@@ -496,41 +527,12 @@ void ExecAscendCached(const char* api_name, const char* ws_name,
   TORCH_CHECK(opApiFuncAddr && getWsFuncAddr,
       "Failed to load symbols for ", api_name, ": ", dlerror());
 
-  static void* setRepeatableAddr = nullptr;
-  static void* setInAddrAddr = nullptr;
-  static void* setOutAddrAddr = nullptr;
-  GetRebindFuncs(setRepeatableAddr, setInAddrAddr, setOutAddrAddr);
-
-  typedef int (*SetRepeatableFunc)(aclOpExecutor*);
-  typedef int (*SetAddrFunc)(aclOpExecutor*, size_t, aclTensor*, void*);
-  auto setRepeatable = reinterpret_cast<SetRepeatableFunc>(setRepeatableAddr);
-  auto setInAddr = reinterpret_cast<SetAddrFunc>(setInAddrAddr);
-  auto setOutAddr = reinterpret_cast<SetAddrFunc>(setOutAddrAddr);
-
-  // The executor and the cached workspace below are both device-bound: an
-  // aclOpExecutor is built against the device current at GetWorkspaceSize time
-  // and its workspace is allocated on that device. Keying the cache without the
-  // device let a call on device 1 reuse an executor (and workspace) built on
-  // device 0, which either failed outright or produced garbage.
   int device_index = 0;
   ::GetDevice(&device_index);
   auto acl_stream = GetCurrentAclStreamForDevice(device_index);
-  auto& cache = GetExecCache();
-  CachedExecKey key{api_name, sig, device_index};
-
-  auto it = cache.find(key);
-  // Optional hit/miss instrumentation (FLAGOS_LOG=op_cache): prints per-op
-  // hit/miss counts at process exit. Zero cost when the env var is unset.
-  if (CacheStatsEnabled()) RecordCacheStat(api_name, it != cache.end());
-  // Cap resident executors: eager decode uses a bounded shape set, but a long
-  // varying-shape workload (e.g. prefill over growing sequence lengths) could
-  // otherwise accumulate executors without bound. Past the cap, run uncached
-  // (the executor for this shape is built, used once, and destroyed) so the
-  // resident set stays fixed while still serving the hot decode shapes.
-  static constexpr size_t kMaxCachedExecutors = 4096;
-  if (it == cache.end() && cache.size() >= kMaxCachedExecutors) {
+  const auto run_uncached = [&] {
     auto gws = reinterpret_cast<GwsFunc>(getWsFuncAddr);
-    std::vector<AclTensorWrapper> in_t, out_t;
+    AclTensorArgs in_t, out_t;
     in_t.reserve(inputs.size());
     for (const at::Tensor* t : inputs) in_t.emplace_back(*t);
     out_t.reserve(outputs.size());
@@ -548,7 +550,144 @@ void ExecAscendCached(const char* api_name, const char* ws_name,
     auto ef = reinterpret_cast<ExecFunc>(opApiFuncAddr);
     int er = ef(wsa, ws, ex, acl_stream);
     TORCH_CHECK(er == 0, api_name, " execution failed, ret=", er);
+    RecordNativeEnqueue(acl_stream);
     if (ws > 0) RecordWorkspaceStream(wst, acl_stream);
+  };
+#if defined(FLAGOS_NATIVE_HOSTS)
+  if constexpr (OwnsBuild || std::is_empty_v<std::decay_t<BuildFn>>) {
+    if (acl_stream && AscendEagerQueueEnabled() &&
+        acl_stream == GetDefaultAclStreamForDevice(device_index) &&
+        c10::flagos::CachingDeviceAllocator::is_enabled() &&
+        !at::globalContext().deterministicAlgorithms()) {
+      using CanUse = bool (*)(const char*);
+      using Scope = void (*)();
+      using Add = void (*)(void*);
+      using Set = void (*)(uint64_t);
+      using Find = aclOpExecutor* (*)(uint64_t, uint64_t*);
+      using Execute = int (*)(void*, uint64_t, aclOpExecutor*, aclrtStream);
+
+      static const auto can_use = reinterpret_cast<CanUse>(dlsym(GetOpApiLibHandle(), "CanUsePTACache"));
+      static const auto begin = reinterpret_cast<Scope>(dlsym(GetOpApiLibHandle(), "InitPTACacheThreadLocal"));
+      static const auto end = reinterpret_cast<Scope>(dlsym(GetOpApiLibHandle(), "UnInitPTACacheThreadLocal"));
+      static const auto add = reinterpret_cast<Add>(dlsym(GetOpApiLibHandle(), "AddTensorAddrToCachedList"));
+      static const auto set = reinterpret_cast<Set>(dlsym(GetOpApiLibHandle(), "SetPTAHashKey"));
+      static const auto find = reinterpret_cast<Find>(dlsym(GetOpApiLibHandle(), "PTAGetExecCache"));
+      // Use the SDK's PTA lookup enabled by vendor Torch. No executors or
+      // workspaces are retained by this path after their eager submission.
+      const bool vendor_lookup = can_use && begin && end && add && set && find && can_use(api_name);
+
+      auto* allocator = c10::flagos::GetCachingAllocator();
+      auto stream = reinterpret_cast<Stream_t>(acl_stream);
+      bool ordinary_pool_storage = true;
+      SigHasher key;
+      key.val(sig);
+      key.bytes(api_name, std::strlen(api_name));
+      key.val(device_index);
+      key.val(acl_stream);
+      for (auto list : {inputs, outputs}) {
+        for (const auto* tensor : list) {
+          if (!tensor->defined() || !tensor->is_privateuseone() ||
+              tensor->device().index() != device_index || tensor->numel() == 0 ||
+              !allocator->owns_data_ptr_on_stream(tensor->storage().data_ptr(), stream)) {
+            ordinary_pool_storage = false;
+            break;
+          }
+          key.val(tensor->storage().nbytes());
+        }
+      }
+      if (!ordinary_pool_storage) {
+        FlushAscendEager();
+        run_uncached();
+        return;
+      }
+
+      struct CacheScope {
+        Scope finish = nullptr;
+        ~CacheScope() { if (finish) finish(); }
+      } cache;
+      uint64_t workspace_size = 0;
+      aclOpExecutor* executor = nullptr;
+      if (vendor_lookup) {
+        begin();
+        cache.finish = end;
+        for (auto list : {inputs, outputs}) {
+          for (const auto* tensor : list) {
+            add(const_cast<void*>(tensor->storage().data()));
+          }
+        }
+        set(key.h);
+        executor = find(key.h, &workspace_size);
+      }
+      std::shared_ptr<void> descriptors;
+      if (!executor) {
+        struct Parameters {
+          AclTensorArgs in;
+          AclTensorArgs out;
+          std::decay_t<BuildFn> build;
+          explicit Parameters(BuildFn&& fn) : build(std::forward<BuildFn>(fn)) {}
+        };
+        auto params = std::make_shared<Parameters>(std::forward<BuildFn>(build));
+        params->in.reserve(inputs.size());
+        params->out.reserve(outputs.size());
+        for (const auto* t : inputs) params->in.emplace_back(*t);
+        for (const auto* t : outputs) params->out.emplace_back(*t);
+        const auto get_workspace = reinterpret_cast<GwsFunc>(getWsFuncAddr);
+        const int status = params->build(get_workspace, params->in, params->out, &workspace_size, &executor);
+        TORCH_CHECK(status == 0, api_name, "GetWorkspaceSize failed, ret=", status);
+        descriptors = std::move(params);
+      }
+      c10::DataPtr workspace;
+      if (workspace_size > 0) {
+        TORCH_CHECK(workspace_size <= INT64_MAX, "ACLNN workspace size exceeds int64");
+        workspace = allocator->allocate(static_cast<size_t>(workspace_size));
+        TORCH_CHECK(allocator->owns_data_ptr_on_stream(workspace, stream),
+                    "ACLNN workspace belongs to a different stream");
+      }
+      // The allocator keeps these buffers in the owning stream's pool.
+      // Queue order gives them the same lifetime as an immediate submission.
+      SubmitAscendEager({
+          device_index, api_name, reinterpret_cast<Execute>(opApiFuncAddr),
+          workspace.get(), workspace_size, executor, acl_stream, std::move(descriptors)});
+      RecordNativeEnqueue(acl_stream);
+      return;
+    }
+  }
+  FlushAscendEager();
+  run_uncached();
+  return;
+#else
+
+  static void* setRepeatableAddr = nullptr;
+  static void* setInAddrAddr = nullptr;
+  static void* setOutAddrAddr = nullptr;
+  GetRebindFuncs(setRepeatableAddr, setInAddrAddr, setOutAddrAddr);
+
+  typedef int (*SetRepeatableFunc)(aclOpExecutor*);
+  typedef int (*SetAddrFunc)(aclOpExecutor*, size_t, aclTensor*, void*);
+  auto setRepeatable = reinterpret_cast<SetRepeatableFunc>(setRepeatableAddr);
+  auto setInAddr = reinterpret_cast<SetAddrFunc>(setInAddrAddr);
+  auto setOutAddr = reinterpret_cast<SetAddrFunc>(setOutAddrAddr);
+
+  // The executor and the cached workspace below are both device-bound: an
+  // aclOpExecutor is built against the device current at GetWorkspaceSize time
+  // and its workspace is allocated on that device. Keying the cache without the
+  // device let a call on device 1 reuse an executor (and workspace) built on
+  // device 0, which either failed outright or produced garbage.
+  auto& cache = GetExecCache();
+  CachedExecKey key{api_name, sig, device_index};
+
+  auto it = cache.find(key);
+  // Optional hit/miss instrumentation (FLAGOS_LOG=op_cache): prints per-op
+  // hit/miss counts at process exit. Zero cost when the env var is unset.
+  if (CacheStatsEnabled()) RecordCacheStat(api_name, it != cache.end());
+  // Cap resident executors: eager decode uses a bounded shape set, but a long
+  // varying-shape workload (e.g. prefill over growing sequence lengths) could
+  // otherwise accumulate executors without bound. Past the cap, run uncached
+  // (the executor for this shape is built, used once, and destroyed) so the
+  // resident set stays fixed while still serving the hot decode shapes.
+  static constexpr size_t kMaxCachedExecutors = 4096;
+  if (it == cache.end() && cache.size() >= kMaxCachedExecutors) {
+    run_uncached();
     return;
   }
   if (it == cache.end()) {
@@ -628,6 +767,7 @@ void ExecAscendCached(const char* api_name, const char* ws_name,
   auto executeFunc = reinterpret_cast<ExecFunc>(opApiFuncAddr);
   int exec_ret = executeFunc(workspace_addr, e.workspace_size, e.executor, acl_stream);
   TORCH_CHECK(exec_ret == 0, api_name, " execution failed, ret=", exec_ret);
+#endif
 }
 
 } // namespace at::native::flagos::ascend
@@ -695,6 +835,7 @@ void ExecAscendCached(const char* api_name, const char* ws_name,
         workspace_addr, workspace_size, executor, acl_stream);                \
     TORCH_CHECK(exec_ret == 0, #aclnn_api " execution failed, ret=",         \
         exec_ret);                                                            \
+    at::native::flagos::ascend::RecordNativeEnqueue(acl_stream);               \
     /* No per-op aclrtSynchronizeStream: ops enqueue asynchronously on the    \
      * shared default stream (FIFO on-device), overlapping host dispatch with \
      * device compute. Correctness is preserved by (1) draining the default   \
