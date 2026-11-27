@@ -3474,6 +3474,10 @@ at::Tensor MseLossBackwardKernelPython(const at::Tensor & grad_output, const at:
 
 static TypedSourceSlot MulTensorFnSource("aten::mul.Tensor", "flag_gems.mul", "8101128c7200897c8e10a3deebc523678c14898916831d2b4c3af03763d0f1a2", "{\"abi\": \"8101128c7200897c8e10a3deebc523678c14898916831d2b4c3af03763d0f1a2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mul\", \"op\": \"aten::mul.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = ::flagos::nvidia::TryMultiply(self, other); result.defined())
+    return result;
+#endif
   const auto& tensor = self.device().is_cpu() ? other : self;
   const auto& scalar = self.device().is_cpu() ? self : other;
   const auto dtype = tensor.scalar_type();

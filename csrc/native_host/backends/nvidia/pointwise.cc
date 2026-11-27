@@ -8,6 +8,7 @@
 #include <ATen/native/layer_norm.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_like.h>
+#include <ATen/ops/empty_strided.h>
 #include <c10/core/DeviceGuard.h>
 #include <c10/util/llvmMathExtras.h>
 #include <cuda_runtime_api.h>
@@ -21,7 +22,9 @@ namespace flagos::nvidia {
 cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* output,
                             const int64_t size, float scalar, cudaStream_t stream);
 cudaError_t LaunchDivide(const float* left, const float* right, float* out,
-                         int64_t size, DivisionLayout layout, cudaStream_t stream);
+                         int64_t size, PointwiseLayout layout, cudaStream_t stream);
+cudaError_t LaunchMultiply(const void* left, const void* right, void* output, int64_t count,
+                            bool bf16, PointwiseLayout layout, cudaStream_t stream);
 cudaError_t LaunchMeanLastDim(const float* input, float* output, int rows, int width,
                               int lanes, int rows_per_block, float scale, cudaStream_t stream);
 cudaError_t LaunchLayerNorm(const void* input, const void* weight, const void* bias,
@@ -60,8 +63,8 @@ at::Tensor TryDivide(const at::Tensor& left, const at::Tensor& right) {
   at::Tensor output;
   auto iter = at::TensorIterator::binary_float_op(output, left, right);
   if (iter.numel() == 0) return iter.output();
-  if (iter.ndim() > DivisionLayout::max_dimensions) return {};
-  DivisionLayout layout{};
+  if (iter.ndim() > PointwiseLayout::max_dimensions) return {};
+  PointwiseLayout layout{};
   if (!iter.is_contiguous()) {
     layout.dimensions = iter.ndim();
     for (int dim = 0; dim < iter.ndim(); ++dim) {
@@ -78,6 +81,52 @@ at::Tensor TryDivide(const at::Tensor& left, const at::Tensor& right) {
   TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK divide launch failed: ",
               cudaGetErrorString(status));
   return iter.output();
+}
+
+at::Tensor TryMultiply(const at::Tensor& left, const at::Tensor& right) {
+  const auto dtype = left.scalar_type();
+  const auto device = left.device();
+  if ((dtype != at::kFloat && dtype != at::kBFloat16) ||
+      right.scalar_type() != dtype || !device.is_privateuseone() ||
+      right.device() != device || left.layout() != at::kStrided ||
+      right.layout() != at::kStrided || left.is_neg() || right.is_neg() ||
+      left.has_names() || right.has_names()) {
+    return {};
+  }
+  const c10::OptionalDeviceGuard guard(device);
+  at::Tensor output;
+  PointwiseLayout layout{};
+  const void* a = left.const_data_ptr();
+  const void* b = right.const_data_ptr();
+  if (left.sizes().equals(right.sizes()) && left.strides().equals(right.strides()) &&
+      left.is_non_overlapping_and_dense()) {
+    output = at::empty_strided(left.sizes(), left.strides(), left.options());
+  } else {
+    auto iterator = at::TensorIterator::binary_op(output, left, right);
+    if (!iterator.is_contiguous()) {
+      // Leave large strided products to the published tiled FlagGems kernels.
+      if (iterator.ndim() > PointwiseLayout::max_dimensions ||
+          iterator.numel() > (1 << 20) || !iterator.can_use_32bit_indexing()) {
+        return {};
+      }
+      layout.dimensions = iterator.ndim();
+      for (int dim = 0; dim < layout.dimensions; ++dim) {
+        layout.sizes[dim] = iterator.shape()[dim];
+        for (int argument = 0; argument < 3; ++argument)
+          layout.strides[argument][dim] = iterator.strides(argument)[dim] / left.element_size();
+      }
+    }
+    output = iterator.output();
+    a = iterator.data_ptr(1);
+    b = iterator.data_ptr(2);
+  }
+  if (!output.numel()) return output;
+  const auto queue = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device.index()));
+  const auto status = LaunchMultiply(a, b, output.mutable_data_ptr(), output.numel(),
+                                    dtype == at::kBFloat16, layout, queue);
+  TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK multiply failed: ",
+              cudaGetErrorString(status));
+  return output;
 }
 
 at::Tensor TryMeanLastDim(const at::Tensor& input, bool keepdim) {

@@ -96,6 +96,10 @@
 #include "generated/flaggems_source_bridges.h"
 #endif
 
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+#include "native_host/backends/nvidia/linalg.h"
+#endif
+
 namespace at::native::flagos {
 
 #if defined(FLAGOS_GEMS_DEVICE_COPY)
@@ -205,6 +209,7 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
   }
 #endif
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (::flagos::nvidia::TryCastDense(source, destination)) return true;
   // The copy visits TensorIterator's physical dimensions. Collapsing adjacent
   // strides lets the native FlagGems host launch its lower-rank copy kernel.
   if (destination.dim() > 1 && !source.has_names() && !destination.has_names()) {

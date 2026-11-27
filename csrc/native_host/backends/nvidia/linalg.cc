@@ -389,7 +389,7 @@ void MatrixProduct(const at::Tensor& left, const at::Tensor& right, at::Tensor& 
   }
 }
 
-at::Tensor Scale(const at::Tensor& input, float alpha) {
+bool TransformDense(const at::Tensor& input, const at::Tensor& output, float alpha) {
   static const auto create = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtCreate);
   static const auto destroy = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtDestroy);
   static const auto make_transform =
@@ -408,21 +408,26 @@ at::Tensor Scale(const at::Tensor& input, float alpha) {
     handle = handles.emplace(device.index(), LtDescriptor<cublasLtHandle_t>(create, destroy)).first;
   }
   const auto dtype = input.scalar_type() == at::kBFloat16 ? CUDA_R_16BF : CUDA_R_32F;
+  const auto output_dtype = output.scalar_type() == at::kBFloat16 ? CUDA_R_16BF : CUDA_R_32F;
   const auto size = input.numel();
   static thread_local const auto descriptor =
       LtDescriptor<cublasLtMatrixTransformDesc_t>(make_transform, drop_transform, CUDA_R_32F);
-  const auto layout = LtDescriptor<cublasLtMatrixLayout_t>(
+  auto layout = LtDescriptor<cublasLtMatrixLayout_t>(
       make_layout, drop_layout, dtype, size, 1, size);
-  auto output = at::empty_strided(input.sizes(), input.strides(), input.options());
+  std::optional<decltype(layout)> output_layout;
+  if (output_dtype != dtype) {
+    output_layout.emplace(LtDescriptor<cublasLtMatrixLayout_t>(
+        make_layout, drop_layout, output_dtype, size, 1, size));
+  }
   const auto queue = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device.index()));
   constexpr float zero = 0;
   const auto status = transform(handle->second.get(), descriptor.get(), &alpha,
       input.const_data_ptr(), layout.get(), &zero, nullptr, nullptr,
-      output.mutable_data_ptr(), layout.get(), queue);
+      output.mutable_data_ptr(), output_layout ? output_layout->get() : layout.get(), queue);
   if (status == CUBLAS_STATUS_NOT_SUPPORTED || status == CUBLAS_STATUS_ARCH_MISMATCH)
-    return {};
+    return false;
   Check(status, "cublasLtMatrixTransform");
-  return output;
+  return true;
 }
 
 #undef FLAGOS_SDK_FUNCTION
@@ -573,7 +578,22 @@ at::Tensor TryScale(const at::Tensor& input, float alpha) {
       !std::isnormal(alpha)) {
     return {};
   }
-  return Scale(input, alpha);
+  auto output = at::empty_strided(input.sizes(), input.strides(), input.options());
+  return TransformDense(input, output, alpha) ? output : at::Tensor();
+}
+
+bool TryCastDense(const at::Tensor& input, const at::Tensor& output) {
+  const auto source = input.scalar_type();
+  const auto target = output.scalar_type();
+  if (!((source == at::kFloat && target == at::kBFloat16) ||
+        (source == at::kBFloat16 && target == at::kFloat)) ||
+      !input.device().is_privateuseone() || input.device() != output.device() ||
+      !input.is_non_overlapping_and_dense() ||
+      !input.sizes().equals(output.sizes()) || !input.strides().equals(output.strides()) ||
+      input.numel() == 0 || input.numel() > std::numeric_limits<int>::max()) {
+    return false;
+  }
+  return TransformDense(input, output, 1.0f);
 }
 
 at::Tensor TryMatrixProduct(const at::Tensor& left, const at::Tensor& right,

@@ -1542,6 +1542,10 @@ def gen_flaggems_python_kernel(
             # back through mul.out. Use the scalar kernel and retain ATen's
             # accumulation precision and output layout in either order.
             prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (auto result = ::flagos::nvidia::TryMultiply(self, other); result.defined())\n"
+                "    return result;\n"
+                "#endif\n"
                 "  const auto& tensor = self.device().is_cpu() ? other : self;\n"
                 "  const auto& scalar = self.device().is_cpu() ? self : other;\n"
                 "  const auto dtype = tensor.scalar_type();\n"

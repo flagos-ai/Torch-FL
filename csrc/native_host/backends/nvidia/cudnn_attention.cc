@@ -157,6 +157,7 @@ at::Tensor TryCuDnnAttention(const at::Tensor& query, const at::Tensor& key,
   at::Tensor workspace;
   if (compiled.workspace_size)
     workspace = at::empty({compiled.workspace_size}, query.options().dtype(at::kByte));
+  // The frontend appends auxiliary pointers to this map during execution.
   std::unordered_map<int64_t, void*> pointers{
       {kQuery, const_cast<void*>(query.const_data_ptr())},
       {kKey, const_cast<void*>(key.const_data_ptr())},

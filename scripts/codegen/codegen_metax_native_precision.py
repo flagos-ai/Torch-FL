@@ -133,9 +133,43 @@ void Launch(int blocks, int threads, cudaStream_t stream, const void* input,
       static_cast<const T*>(input), static_cast<T*>(output), size, scalar);
 }
 
+template <typename T, bool Dense>
+__global__ void Multiply(const T* left, const T* right, T* output, int64_t count,
+                         PointwiseLayout layout) {
+  const auto step = int64_t(blockDim.x) * gridDim.x;
+  for (auto i = int64_t(blockDim.x) * blockIdx.x + threadIdx.x; i < count; i += step) {
+    if constexpr (Dense) {
+      output[i] = T(float(left[i]) * float(right[i]));
+    } else {
+      int offsets[3]{};
+      auto linear = static_cast<int>(i);
+      for (int dim = 0; dim < layout.dimensions; ++dim) {
+        const auto size = static_cast<int>(layout.sizes[dim]);
+        const auto coordinate = linear % size;
+        linear /= size;
+        for (int argument = 0; argument < 3; ++argument)
+          offsets[argument] += coordinate * static_cast<int>(layout.strides[argument][dim]);
+      }
+      output[offsets[0]] = T(float(left[offsets[1]]) * float(right[offsets[2]]));
+    }
+  }
+}
+
+template <typename T>
+void MultiplyOnStream(int blocks, int threads, cudaStream_t stream, const void* left,
+                      const void* right, void* output, int64_t count, PointwiseLayout layout) {
+  const auto* a = static_cast<const T*>(left);
+  const auto* b = static_cast<const T*>(right);
+  auto* out = static_cast<T*>(output);
+  if (layout.dimensions == 0)
+    Multiply<T, true><<<blocks, threads, 0, stream>>>(a, b, out, count, layout);
+  else
+    Multiply<T, false><<<blocks, threads, 0, stream>>>(a, b, out, count, layout);
+}
+
 template <bool Dense>
 __global__ void Divide(const float* left, const float* right, float* result,
-                       int64_t count, DivisionLayout layout) {
+                       int64_t count, PointwiseLayout layout) {
   const auto step = int64_t(blockDim.x) * gridDim.x;
   for (auto i = int64_t(blockDim.x) * blockIdx.x + threadIdx.x; i < count; i += step) {
     if constexpr (Dense) {
@@ -253,13 +287,25 @@ cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* 
 }
 
 cudaError_t LaunchDivide(const float* left, const float* right, float* out,
-                         int64_t size, DivisionLayout layout, cudaStream_t stream) {
+                         int64_t size, PointwiseLayout layout, cudaStream_t stream) {
   constexpr int threads = 256;
   const auto blocks = std::min<int64_t>(65535, (size - 1) / threads + 1);
   if (layout.dimensions == 0) {
     Divide<true><<<blocks, threads, 0, stream>>>(left, right, out, size, layout);
   } else {
     Divide<false><<<blocks, threads, 0, stream>>>(left, right, out, size, layout);
+  }
+  return cudaGetLastError();
+}
+
+cudaError_t LaunchMultiply(const void* left, const void* right, void* output,
+                           int64_t count, bool bf16, PointwiseLayout layout, cudaStream_t stream) {
+  constexpr int threads = 256;
+  const auto blocks = std::min<int64_t>(65535, (count - 1) / threads + 1);
+  if (bf16) {
+    MultiplyOnStream<__nv_bfloat16>(blocks, threads, stream, left, right, output, count, layout);
+  } else {
+    MultiplyOnStream<float>(blocks, threads, stream, left, right, output, count, layout);
   }
   return cudaGetLastError();
 }
