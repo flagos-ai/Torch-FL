@@ -13,19 +13,23 @@
 #include <aten/backends/flagos/sdk_blas_layout.h>
 #include <c10/core/DeviceGuard.h>
 #include <c10/util/env.h>
+#include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cusolverDn.h>
 #include <dlfcn.h>
 #include <flagos.h>
 #include <torch/library.h>
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <limits>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 
 namespace flagos::nvidia {
 namespace {
@@ -42,6 +46,11 @@ void* OpenSdk(const char* library, int major) {
 
 void* BlasLibrary() {
   static auto* handle = OpenSdk("libcublas", CUBLAS_VER_MAJOR);
+  return handle;
+}
+
+void* BlasLtLibrary() {
+  static auto* handle = OpenSdk("libcublasLt", CUBLAS_VER_MAJOR);
   return handle;
 }
 
@@ -167,16 +176,147 @@ struct MatrixHandle {
     int before = device;
     cudaGetDevice(&before);
     cudaSetDevice(device);
+    if (lt) destroy_lt(lt);
     destroy(handle);
     cudaSetDevice(before);
   }
 
   cublasHandle_t handle = nullptr;
+  cublasLtHandle_t lt = nullptr;
   cublasMath_t math = CUBLAS_DEFAULT_MATH;
   int device;
   decltype(&cublasDestroy_v2) destroy;
+  decltype(&cublasLtDestroy) destroy_lt = nullptr;
   at::Tensor workspace;
+  at::Tensor lt_workspace;
 };
+
+MatrixHandle& MatrixState(const at::Tensor& input, cudaStream_t queue) {
+  static thread_local std::map<std::pair<int, uintptr_t>, MatrixHandle> handles;
+  return handles.try_emplace(
+      std::make_pair(input.device().index(), reinterpret_cast<uintptr_t>(queue)),
+      input, queue).first->second;
+}
+
+size_t LtWorkspaceBytes() {
+  static const auto bytes = [] {
+    constexpr size_t default_bytes = 1024 * 1024;
+    const auto setting = c10::utils::get_env("CUBLASLT_WORKSPACE_SIZE");
+    if (!setting) return default_bytes;
+    size_t kib = 0;
+    const auto end = setting->data() + setting->size();
+    const auto parsed = std::from_chars(setting->data(), end, kib);
+    if (parsed.ec != std::errc{} || parsed.ptr != end ||
+        kib > std::numeric_limits<int64_t>::max() / 1024) return default_bytes;
+    return kib * 1024;
+  }();
+  return bytes;
+}
+
+template <typename Handle, typename Create, typename Destroy, typename... Args>
+auto LtDescriptor(Create create, Destroy destroy, Args... args) {
+  Handle handle = nullptr;
+  Check(create(&handle, args...), "cuBLASLt descriptor creation");
+  return std::unique_ptr<std::remove_pointer_t<Handle>, Destroy>(handle, destroy);
+}
+
+uint32_t LtAlignment(const void* ptr) {
+  uint32_t alignment = 256;
+  while (reinterpret_cast<uintptr_t>(ptr) % alignment) alignment /= 2;
+  return alignment;
+}
+
+bool FusedBFloat16Bias(const at::Tensor& left, const at::Tensor& right,
+                       const at::Tensor& bias, at::Tensor& output, float alpha) {
+  static const auto disabled = c10::utils::get_env("DISABLE_ADDMM_CUDA_LT") == "1";
+  if (disabled || bias.dim() != 1 || !bias.is_contiguous() ||
+      bias.size(0) != right.size(1) || left.size(0) <= 1 ||
+      left.size(1) <= 1 || right.size(1) <= 1 ||
+      at::globalContext()._SMCarveout_EXPERIMENTAL().has_value()) return false;
+
+  static const auto create = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtCreate);
+  static const auto destroy = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtDestroy);
+  static const auto make_operation = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatmulDescCreate);
+  static const auto drop_operation = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatmulDescDestroy);
+  static const auto set_operation = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatmulDescSetAttribute);
+  static const auto make_layout = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixLayoutCreate);
+  static const auto drop_layout = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixLayoutDestroy);
+  static const auto make_preference = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatmulPreferenceCreate);
+  static const auto drop_preference = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatmulPreferenceDestroy);
+  static const auto set_preference = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatmulPreferenceSetAttribute);
+  static const auto select = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatmulAlgoGetHeuristic);
+  static const auto matmul = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatmul);
+
+  const c10::DeviceGuard guard(left.device());
+  const auto queue = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(left.device().index()));
+  auto& state = MatrixState(left, queue);
+  if (!state.lt) {
+    Check(create(&state.lt), "cublasLtCreate");
+    state.destroy_lt = destroy;
+  }
+  static const auto unified = c10::utils::check_env("TORCH_CUBLASLT_UNIFIED_WORKSPACE") == true;
+  size_t workspace_size = LtWorkspaceBytes();
+  if (!unified && !state.lt_workspace.defined()) {
+    state.lt_workspace = at::empty({static_cast<int64_t>(workspace_size)},
+                                   left.options().dtype(at::kByte));
+  }
+  auto& workspace = unified ? state.workspace : state.lt_workspace;
+  workspace_size = std::min(workspace_size, static_cast<size_t>(workspace.numel()));
+
+  const auto m = sdk_blas::Dimension(left.size(0));
+  const auto n = sdk_blas::Dimension(right.size(1));
+  const auto k = sdk_blas::Dimension(left.size(1));
+  const auto [a, b] = sdk_blas::ColumnMajorOperands(left, right, m, n, k);
+  const auto trans_a = a.transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
+  const auto trans_b = b.transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
+  const auto epilogue = CUBLASLT_EPILOGUE_BIAS;
+  const auto bias_data = bias.const_data_ptr();
+  auto op = LtDescriptor<cublasLtMatmulDesc_t>(make_operation, drop_operation,
+                                               CUBLAS_COMPUTE_32F, CUDA_R_32F);
+  const auto set = [&](cublasLtMatmulDescAttributes_t attribute, const auto& value) {
+    Check(set_operation(op.get(), attribute, &value, sizeof(value)), "cublasLtMatmulDescSetAttribute");
+  };
+  set(CUBLASLT_MATMUL_DESC_TRANSA, trans_a);
+  set(CUBLASLT_MATMUL_DESC_TRANSB, trans_b);
+  set(CUBLASLT_MATMUL_DESC_EPILOGUE, epilogue);
+  set(CUBLASLT_MATMUL_DESC_BIAS_POINTER, bias_data);
+
+  const auto a_layout = LtDescriptor<cublasLtMatrixLayout_t>(make_layout, drop_layout,
+      CUDA_R_16BF, a.transpose ? k : n, a.transpose ? n : k, a.leading);
+  const auto b_layout = LtDescriptor<cublasLtMatrixLayout_t>(make_layout, drop_layout,
+      CUDA_R_16BF, b.transpose ? m : k, b.transpose ? k : m, b.leading);
+  const auto c_layout = LtDescriptor<cublasLtMatrixLayout_t>(make_layout, drop_layout,
+      CUDA_R_16BF, n, m, n);
+  const auto preference = LtDescriptor<cublasLtMatmulPreference_t>(make_preference, drop_preference);
+  const auto prefer = [&](cublasLtMatmulPreferenceAttributes_t attribute, const auto& value) {
+    Check(set_preference(preference.get(), attribute, &value, sizeof(value)), "cublasLtMatmulPreferenceSetAttribute");
+  };
+  const auto reduction = at::globalContext().allowBF16ReductionCuBLAS();
+  if (reduction != at::CuBLASReductionOption::AllowReducedPrecisionWithSplitK) {
+    const uint32_t mask = reduction == at::CuBLASReductionOption::DisallowReducedPrecisionAllowSplitK
+        ? CUBLASLT_REDUCTION_SCHEME_COMPUTE_TYPE | CUBLASLT_REDUCTION_SCHEME_NONE
+        : CUBLASLT_REDUCTION_SCHEME_NONE;
+    prefer(CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK, mask);
+  }
+  prefer(CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, workspace_size);
+  prefer(CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, LtAlignment(a.tensor.const_data_ptr()));
+  prefer(CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES, LtAlignment(b.tensor.const_data_ptr()));
+  prefer(CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, LtAlignment(output.const_data_ptr()));
+  prefer(CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, LtAlignment(bias_data));
+
+  cublasLtMatmulHeuristicResult_t config{};
+  int returned = 0;
+  const auto status = select(state.lt, op.get(), a_layout.get(), b_layout.get(),
+                             c_layout.get(), c_layout.get(), preference.get(), 1, &config, &returned);
+  if (status == CUBLAS_STATUS_NOT_SUPPORTED || (status == CUBLAS_STATUS_SUCCESS && !returned)) return false;
+  Check(status, "cublasLtMatmulAlgoGetHeuristic");
+  constexpr float beta = 0;
+  auto* out_data = output.mutable_data_ptr();
+  return matmul(state.lt, op.get(), &alpha, a.tensor.const_data_ptr(), a_layout.get(),
+                b.tensor.const_data_ptr(), b_layout.get(), &beta, out_data, c_layout.get(),
+                out_data, c_layout.get(), &config.algo, workspace.mutable_data_ptr(),
+                workspace_size, queue) == CUBLAS_STATUS_SUCCESS;
+}
 
 using GemmEx = cublasStatus_t (*)(
     cublasHandle_t, cublasOperation_t, cublasOperation_t, int, int, int,
@@ -192,12 +332,8 @@ using GemmStridedBatchedEx = cublasStatus_t (*)(
 void MatrixProduct(const at::Tensor& left, const at::Tensor& right, at::Tensor& out,
                    float beta, float alpha) {
   const auto device = left.device().index();
-  const auto stream = GetCurrentStreamForDevice(device);
   const c10::DeviceGuard guard(left.device());
-  static thread_local std::map<std::pair<int, uintptr_t>, MatrixHandle> handles;
-  auto& state = handles.try_emplace(
-      std::make_pair(device, reinterpret_cast<uintptr_t>(stream)), left,
-      reinterpret_cast<cudaStream_t>(stream)).first->second;
+  auto& state = MatrixState(left, reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device)));
 
   const auto m = sdk_blas::Dimension(left.size(-2));
   const auto n = sdk_blas::Dimension(right.size(-1));
@@ -409,10 +545,9 @@ at::Tensor TryMatrixProduct(const at::Tensor& left, const at::Tensor& right,
   }
   auto shape = left.sizes().vec();
   shape.back() = right.size(-1);
-  // A single output row takes the non-fused cuBLAS addmm path.
-  if (bias && (rank != 2 || left.size(0) != 1 || dtype != at::kFloat ||
+  if (bias && (rank != 2 || (dtype == at::kFloat && left.size(0) != 1) ||
                  bias->scalar_type() != dtype || bias->device() != left.device() ||
-                 bias->layout() != at::kStrided ||
+                 bias->layout() != at::kStrided || bias->is_neg() || bias->has_names() ||
                  !at::is_expandable_to(bias->sizes(), shape))) return {};
   at::Tensor result;
   if (out) {
@@ -426,6 +561,8 @@ at::Tensor TryMatrixProduct(const at::Tensor& left, const at::Tensor& right,
     result = at::empty(shape, left.options());
   }
   if (result.numel() == 0) return result;
+  if (bias && dtype == at::kBFloat16 && beta == 1 &&
+      FusedBFloat16Bias(left, right, *bias, result, alpha)) return result;
   if (bias && beta != 0) result.copy_(bias->expand(shape));
   if (left.size(-1) == 0) return beta == 0 ? result.zero_() : result.mul_(beta);
   MatrixProduct(left, right, result, beta, alpha);
