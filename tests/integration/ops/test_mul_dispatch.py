@@ -144,7 +144,13 @@ class TestMulPythonNumberOperand:
         if explicit_tensor:
             scale = torch.tensor(scale, dtype=torch.float64)
         expected = values * scale
-        for actual in (device_values * scale, scale * device_values):
+        was_allowed = torch.ops.flagos.cpu_fallback_allowed()
+        torch.ops.flagos.strict_host_routes(True)
+        try:
+            products = (device_values * scale, scale * device_values)
+        finally:
+            torch.ops.flagos.strict_host_routes(not was_allowed)
+        for actual in products:
             assert actual.device == device_values.device
             assert actual.stride() == expected.stride()
             torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)

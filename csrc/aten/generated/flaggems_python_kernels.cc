@@ -3300,7 +3300,9 @@ at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & oth
       (tensor.scalar_type() == at::kHalf || tensor.scalar_type() == at::kBFloat16) &&
       scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point() &&
       (!scalar.unsafeGetTensorImpl()->is_wrapped_number() || !tensor.is_contiguous())) {
-    auto result = at::native::call_fallback_fn<&cpu_fallback, at::_ops::mul_Tensor>::call(tensor, scalar);
+    const auto output_dtype = at::result_type(tensor, scalar);
+    const auto accumulation = output_dtype == at::kDouble ? at::kDouble : at::kFloat;
+    auto result = at::mul(tensor.to(accumulation), scalar.item()).to(output_dtype);
     const auto strides = at::infer_dense_strides(tensor.sizes(), tensor.strides());
     if (result.strides().equals(strides)) return result;
     auto strided = at::empty_strided(result.sizes(), strides, result.options());

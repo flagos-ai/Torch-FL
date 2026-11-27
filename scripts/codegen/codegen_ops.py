@@ -1399,9 +1399,8 @@ def gen_flaggems_python_kernel(
             )
         elif op == "mul.Tensor":
             # FlagGems materializes CPU scalars in the output dtype for the
-            # general broadcast path. ATen uses the full-precision scalar.
-            # Put the device tensor first so CPU TensorIterator retains the
-            # scalar precision for either operand order.
+            # general broadcast path. Match ATen's opmath precision while
+            # keeping the tensor on the device in either operand order.
             prelude += (
                 "  const auto& tensor = self.device().is_cpu() ? other : self;\n"
                 "  const auto& scalar = self.device().is_cpu() ? self : other;\n"
@@ -1409,7 +1408,9 @@ def gen_flaggems_python_kernel(
                 "      (tensor.scalar_type() == at::kHalf || tensor.scalar_type() == at::kBFloat16) &&\n"
                 "      scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point() &&\n"
                 "      (!scalar.unsafeGetTensorImpl()->is_wrapped_number() || !tensor.is_contiguous())) {\n"
-                "    auto result = at::native::call_fallback_fn<&cpu_fallback, at::_ops::mul_Tensor>::call(tensor, scalar);\n"
+                "    const auto output_dtype = at::result_type(tensor, scalar);\n"
+                "    const auto accumulation = output_dtype == at::kDouble ? at::kDouble : at::kFloat;\n"
+                "    auto result = at::mul(tensor.to(accumulation), scalar.item()).to(output_dtype);\n"
                 "    const auto strides = at::infer_dense_strides(tensor.sizes(), tensor.strides());\n"
                 "    if (result.strides().equals(strides)) return result;\n"
                 "    auto strided = at::empty_strided(result.sizes(), strides, result.options());\n"

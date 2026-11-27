@@ -34,6 +34,7 @@
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
 #include <ATen/MemoryOverlap.h>
 #include <ATen/NamedTensorUtils.h>
+#include <ATen/native/IndexingUtils.h>
 #include <ATen/native/Resize.h>
 #include "backends/flagos/python_op_caller.h"
 #endif
@@ -370,6 +371,96 @@ at::Tensor& DeviceProdDimOut(const at::Tensor& self, int64_t dim, bool keepdim,
     values = std::move(next);
   }
   return out.copy_(keepdim ? values : values.squeeze(dim));
+}
+
+at::Tensor NormalizeDeviceIndex(const at::Tensor& index, int64_t extent,
+                                bool allow_negative) {
+  auto positions = index.to(at::kLong);
+  if (!positions.numel()) return positions;
+  const auto [minimum, maximum] = at::aminmax(positions);
+  auto lower = minimum.item<int64_t>();
+  TORCH_CHECK_INDEX(lower >= (allow_negative ? -extent : 0) &&
+                    maximum.item<int64_t>() < extent,
+                    "index out of range for dimension of size ", extent);
+  return lower < 0
+      ? at::where(positions.lt(0), positions.add(extent), positions)
+      : positions;
+}
+
+at::Tensor SelectDevicePositions(const at::Tensor& self, int64_t dim,
+                                 const at::Tensor& positions) {
+  auto shape = self.sizes().vec();
+  shape[dim] = positions.numel();
+  if (std::find(shape.begin(), shape.end(), 0) != shape.end()) {
+    return at::empty(shape, self.options());
+  }
+  auto result = at::native::flagos::CallPythonOp_Generic(
+      "flag_gems.index_select", {self, dim, positions.contiguous()});
+  at::native::flagos::UnboxToFlagos(result);
+  return result;
+}
+
+at::Tensor DeviceIndexSelect(const at::Tensor& self, int64_t dim,
+                             const at::Tensor& index) {
+  TORCH_CHECK(index.device() == self.device(), "index_select(): index device must match input");
+  TORCH_CHECK_INDEX(index.dim() <= 1 &&
+                    (index.scalar_type() == at::kInt || index.scalar_type() == at::kLong),
+                    "index_select(): expected a vector of int32 or int64 indices");
+  dim = at::maybe_wrap_dim(dim, self.dim());
+  if (self.dim() == 0) {
+    TORCH_CHECK_INDEX(index.numel() == 1, "index_select(): scalar input requires one index");
+    NormalizeDeviceIndex(index, 1, false);
+    return self.clone();
+  }
+  return SelectDevicePositions(self, dim, NormalizeDeviceIndex(index, self.size(dim), false));
+}
+
+at::Tensor& DeviceAdvancedIndexOut(const at::Tensor& self,
+                                   const c10::List<std::optional<at::Tensor>>& raw,
+                                   at::Tensor& out) {
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == self.scalar_type(),
+              "index(): output must match input device and dtype");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  auto indices_ref = at::IOptTensorListRef(raw);
+  at::native::checkIndexTensorTypes(indices_ref, /*allow_int=*/true);
+  for (const auto& index : indices_ref) {
+    if (!index || !index->defined()) continue;
+    TORCH_CHECK_INDEX(index->is_cpu() || index->device() == self.device(),
+                      "index(): indices must be on the CPU or input device");
+    at::assert_no_overlap(out, *index);
+  }
+  auto indices = at::native::expandTensors(self, indices_ref, /*ensure_same_device=*/true);
+  TORCH_CHECK_INDEX(static_cast<int64_t>(indices.size()) <= self.dim(),
+                    "too many indices for tensor of dimension ", self.dim());
+  indices = at::expand_outplace(indices);
+  indices.resize(self.dim());
+  auto input = self;
+  if (!at::native::hasContiguousSubspace(indices)) {
+    std::tie(input, indices) = at::native::transposeToFront(self, indices);
+  }
+  auto first = std::find_if(indices.begin(), indices.end(),
+                            [](const auto& tensor) { return tensor.defined(); });
+  if (first == indices.end()) {
+    at::native::resize_output(out, input.sizes());
+    return out.copy_(input);
+  }
+  auto before = std::distance(indices.begin(), first);
+  auto end = before;
+  at::Tensor linear;
+  while (end < input.dim() && indices[end].defined()) {
+    auto extent = input.size(end);
+    auto current = NormalizeDeviceIndex(indices[end], extent, true);
+    linear = linear.defined() ? linear.mul(extent).add(current) : current;
+    ++end;
+  }
+  auto flattened = input.flatten(before, end - 1);
+  auto selected = SelectDevicePositions(flattened, before, linear.flatten());
+  auto shape = input.sizes().slice(0, before).vec();
+  shape.insert(shape.end(), linear.sizes().begin(), linear.sizes().end());
+  shape.insert(shape.end(), input.sizes().begin() + end, input.sizes().end());
+  at::native::resize_output(out, shape);
+  return out.copy_(selected.reshape(shape));
 }
 
 std::optional<float> NvidiaScalarReciprocal(const at::Tensor& self,
@@ -925,6 +1016,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
 #endif
 #if defined(FLAGOS_ACCEL_CUDA)
   m.impl("equal", WrapperEqual);
+  m.impl("index.Tensor_out", DeviceAdvancedIndexOut);
+  m.impl("index_select", DeviceIndexSelect);
   m.impl("prod.int_out", DeviceProdDimOut);
 #endif
 

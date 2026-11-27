@@ -65,3 +65,23 @@ def test_prod_preserves_large_long_values_without_cpu_fallback():
         torch.ops.flagos.strict_host_routes(not was_allowed)
     torch.testing.assert_close(result.cpu(), host.prod(dim=-1, keepdim=True))
     torch.testing.assert_close(empty.cpu(), host[:, :0].prod(dim=-1))
+
+
+@pytest.mark.nvidia
+@pytest.mark.flaggems_python
+def test_index_selection_and_advanced_indexing_without_cpu_fallback():
+    host = torch.arange(60).reshape(3, 4, 5)
+    source = host.to("flagos:0")
+    rows = torch.tensor([[0], [-1]])
+    columns = torch.tensor([[4, 0]])
+    was_allowed = torch.ops.flagos.cpu_fallback_allowed()
+    torch.ops.flagos.strict_host_routes(True)
+    try:
+        result = source[rows.to(source.device), :, columns.to(source.device)]
+        selected = source.index_select(1, torch.tensor([3, 1]).to(source.device))
+    finally:
+        torch.ops.flagos.strict_host_routes(not was_allowed)
+    torch.testing.assert_close(result.cpu(), host[rows, :, columns])
+    torch.testing.assert_close(
+        selected.cpu(), host.index_select(1, torch.tensor([3, 1]))
+    )
