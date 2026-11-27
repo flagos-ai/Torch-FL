@@ -305,9 +305,9 @@ def test_full_coverage_confs_share_one_op_set():
 
 @pytest.mark.anyplatform
 def test_cuda_conf_is_the_generated_base_list():
-    """The NVIDIA generator includes the SDPA composite's optional vendor route."""
+    """The NVIDIA generator lists SDPA with its default composite route."""
     routes = _parse_conf(CONF_DIR / "backends_nvidia.conf", conditions=True)
-    assert routes.pop("scaled_dot_product_attention") == "none; BFloat16:nvidia"
+    assert routes.pop("scaled_dot_product_attention") == "none"
     widened = EXTRA_NATIVE["ascend"]
     assert not (set(routes) & widened), (
         f"backends_nvidia.conf should not list the widened vendor-only ops "
