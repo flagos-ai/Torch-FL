@@ -3484,8 +3484,15 @@ at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & oth
       (!scalar.unsafeGetTensorImpl()->is_wrapped_number() ||
        (low_precision && !tensor.is_contiguous()))) {
     const auto output_dtype = at::result_type(tensor, scalar);
+    const auto scalar_value = scalar.item();
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+    if (output_dtype == dtype) {
+      auto scaled = ::flagos::nvidia::TryScale(tensor, scalar_value.toFloat());
+      if (scaled.defined()) return scaled;
+    }
+#endif
     const auto accumulation = output_dtype == at::kDouble ? at::kDouble : at::kFloat;
-    auto result = at::mul(tensor.to(accumulation), scalar.item()).to(output_dtype);
+    auto result = at::mul(tensor.to(accumulation), scalar_value).to(output_dtype);
     return RestorePointwiseLayout(tensor, std::move(result));
   }
   auto result = MulTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mul", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));

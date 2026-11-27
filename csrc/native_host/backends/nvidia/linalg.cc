@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <memory>
@@ -388,6 +389,40 @@ void MatrixProduct(const at::Tensor& left, const at::Tensor& right, at::Tensor& 
   }
 }
 
+at::Tensor Scale(const at::Tensor& input, float alpha) {
+  static const auto create = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtCreate);
+  static const auto destroy = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtDestroy);
+  static const auto init_transform =
+      FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixTransformDescInit);
+  static const auto init_layout =
+      FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixLayoutInit);
+  static const auto transform = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixTransform);
+  using Handle = decltype(LtDescriptor<cublasLtHandle_t>(create, destroy));
+  static thread_local std::map<int, Handle> handles;
+  const auto device = input.device();
+  const c10::DeviceGuard guard(device);
+  auto handle = handles.find(device.index());
+  if (handle == handles.end()) {
+    handle = handles.emplace(device.index(), LtDescriptor<cublasLtHandle_t>(create, destroy)).first;
+  }
+  const auto dtype = input.scalar_type() == at::kBFloat16 ? CUDA_R_16BF : CUDA_R_32F;
+  const auto size = input.numel();
+  cublasLtMatrixTransformDescOpaque_t descriptor;
+  cublasLtMatrixLayoutOpaque_t layout;
+  Check(init_transform(&descriptor, CUDA_R_32F), "cublasLtMatrixTransformDescInit");
+  Check(init_layout(&layout, dtype, size, 1, size), "cublasLtMatrixLayoutInit");
+  auto output = at::empty_strided(input.sizes(), input.strides(), input.options());
+  const auto queue = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device.index()));
+  constexpr float zero = 0;
+  const auto status = transform(handle->second.get(), &descriptor, &alpha,
+      input.const_data_ptr(), &layout, &zero, nullptr, nullptr,
+      output.mutable_data_ptr(), &layout, queue);
+  if (status == CUBLAS_STATUS_NOT_SUPPORTED || status == CUBLAS_STATUS_ARCH_MISMATCH)
+    return {};
+  Check(status, "cublasLtMatrixTransform");
+  return output;
+}
+
 #undef FLAGOS_SDK_FUNCTION
 
 struct SolveMetadata : at::meta::structured__linalg_solve_ex {
@@ -526,6 +561,18 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&> SolveOut(
 }
 
 }  // namespace
+
+at::Tensor TryScale(const at::Tensor& input, float alpha) {
+  const auto dtype = input.scalar_type();
+  if ((dtype != at::kBFloat16 && dtype != at::kFloat) ||
+      !input.device().is_privateuseone() || input.layout() != at::kStrided ||
+      input.is_neg() || input.has_names() || !input.is_non_overlapping_and_dense() ||
+      input.numel() == 0 || input.numel() > std::numeric_limits<int>::max() ||
+      !std::isnormal(alpha)) {
+    return {};
+  }
+  return Scale(input, alpha);
+}
 
 at::Tensor TryMatrixProduct(const at::Tensor& left, const at::Tensor& right,
                             at::Tensor* out, const at::Tensor* bias, float beta,

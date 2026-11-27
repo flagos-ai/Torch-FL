@@ -10,5 +10,6 @@ namespace flagos::nvidia {
 at::Tensor TryMatrixProduct(const at::Tensor& left, const at::Tensor& right,
                             at::Tensor* out = nullptr, const at::Tensor* bias = nullptr,
                             float beta = 0, float alpha = 1);
+at::Tensor TryScale(const at::Tensor& input, float alpha);
 
 }  // namespace flagos::nvidia
