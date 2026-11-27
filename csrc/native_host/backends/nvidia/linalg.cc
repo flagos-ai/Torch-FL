@@ -210,7 +210,12 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&> SolveOut(
   prepared.meta(a, b, left, check_errors);
   auto& [x, factors, indices, status] = prepared.outputs;
   const auto vector = at::native::linalg_solve_is_vector_rhs(a, b);
-  auto rhs = vector ? x.unsqueeze(-1) : (left ? x : x.mT());
+  auto result_view = vector ? x.unsqueeze(-1) : (left ? x : x.mT());
+  // A batched vector result can have its batch and row dimensions interleaved.
+  // The SDK expects each column-major matrix to occupy a separate range.
+  auto rhs = result_view.mT().is_contiguous() ? result_view : at::empty_strided(
+      result_view.sizes(), at::native::batched_matrix_contiguous_strides(result_view.sizes(), true),
+      result_view.options());
   rhs.copy_(vector ? b.unsqueeze(-1) : (left ? b : b.mT()));
   const bool factor_transpose = a.is_contiguous() && !a.is_complex();
   factors.copy_(factor_transpose ? a.mT() : a);
@@ -227,6 +232,7 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&> SolveOut(
     case at::kComplexDouble: Solve<cuDoubleComplex>(handles, factors, indices, status, rhs, operation, check_errors); break;
     default: TORCH_CHECK(false, "linalg.solve does not support ", a.scalar_type());
   }
+  if (!rhs.is_same(result_view)) result_view.copy_(rhs);
 
   std::array<at::Tensor*, 4> outputs{&result, &lu, &pivots, &info};
   for (size_t i = 0; i < outputs.size(); ++i) {

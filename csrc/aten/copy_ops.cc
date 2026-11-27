@@ -14,6 +14,7 @@
 #include <ATen/MemoryOverlap.h>
 #include <ATen/ops/_pin_memory.h>
 #include <ATen/ops/_to_copy.h>
+#include <ATen/ops/view_as_real.h>
 #include <ATen/ops/_to_copy_ops.h>
 #include <ATen/ops/copy_native.h>
 #include <c10/core/DeviceGuard.h>
@@ -142,11 +143,19 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
   static thread_local bool active = false;
   if (active || !src.device().is_privateuseone() || src.device() != dst.device() ||
       src.is_conj() || src.is_neg() || dst.is_conj() || dst.is_neg() ||
-      src.is_complex() || dst.is_complex() || src.numel() > INT32_MAX ||
-      dst.numel() > INT32_MAX || src.numel() == 0 || dst.numel() == 0 ||
+      src.numel() > INT32_MAX || dst.numel() > INT32_MAX ||
+      src.numel() == 0 || dst.numel() == 0 ||
       MayOverlapForGemsCopy(src, dst)) return false;
   const auto src_type = src.scalar_type();
   const auto dst_type = dst.scalar_type();
+  if (src.is_complex() || dst.is_complex()) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+    if (src_type == dst_type) {
+      return TryGemsDeviceCopy(at::view_as_real(src), at::view_as_real(dst));
+    }
+#endif
+    return false;
+  }
 #if defined(USE_TSINGMICRO)
   if (!TsingMicroGemsCast(src_type, dst_type) || !src.is_contiguous() ||
       !dst.is_contiguous() || !src.sizes().equals(dst.sizes())) {
@@ -160,7 +169,7 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
   if (src_type == dst_type) {
     // A same-dtype copy can use a supported view of identical-width storage.
     if (src_type == at::kChar) storage_type = at::kByte;
-#if defined(USE_DCU) && defined(FLAGOS_NATIVE_HOSTS)
+#if (defined(USE_DCU) || defined(FLAGOS_ACCEL_CUDA)) && defined(FLAGOS_NATIVE_HOSTS)
     if (src_type == at::kDouble) storage_type = at::kLong;
 #endif
   }

@@ -19,6 +19,15 @@ def test_concat_strided_tensors(dtype):
 
 
 @pytest.mark.anyplatform
+def test_nonzero_resolves_grid_for_expanded_mask():
+    host = (torch.arange(31) % 7 == 0).reshape(1, 31, 1)
+    device = host.to("flagos:0").expand(1, 31, 257)
+    actual = device.nonzero()
+    assert actual.device == device.device
+    torch.testing.assert_close(actual.cpu(), host.expand(1, 31, 257).nonzero())
+
+
+@pytest.mark.anyplatform
 @pytest.mark.parametrize(
     "dtype", [torch.float32, torch.bfloat16, torch.int32, torch.int64]
 )
@@ -134,12 +143,14 @@ def test_index_copy_preserves_output_layout():
 @pytest.mark.anyplatform
 def test_linear_solve_accepts_vector_and_matrix_rhs():
     matrix = torch.tensor([[2.0, 1.0], [1.0, -1.0]])
-    vectors = (torch.tensor([3.0, 0.0]), torch.tensor([[3.0, 0.0], [0.0, 3.0]]))
-    gpu_matrix = matrix.to("flagos:0")
-    for rhs in vectors:
-        expected = torch.linalg.solve(matrix, rhs)
-        actual = torch.linalg.solve(gpu_matrix, rhs.to(gpu_matrix.device))
-        assert actual.device == gpu_matrix.device
+    vector = torch.tensor([3.0, 0.0])
+    matrix_rhs = torch.tensor([[3.0, 0.0], [0.0, 3.0]])
+    batch = torch.stack((matrix, matrix + torch.eye(2)))
+    for lhs, rhs in ((matrix, vector), (matrix, matrix_rhs), (batch, matrix_rhs)):
+        expected = torch.linalg.solve(lhs, rhs)
+        gpu_lhs = lhs.to("flagos:0")
+        actual = torch.linalg.solve(gpu_lhs, rhs.to(gpu_lhs.device))
+        assert actual.device == gpu_lhs.device
         torch.testing.assert_close(actual.cpu(), expected)
 
 

@@ -1117,6 +1117,10 @@ class KernelCache {
         actual_grid = reinterpret_cast<Grid>(grid_function)(metadata, grid.vec());
       }
     }
+    const auto launch_grid = grid_function ? at::IntArrayRef(actual_grid) : grid;
+    // A callable grid can depend on metadata available only in the published
+    // host. Let that host resolve the grid before any hooks run.
+    if (launch_grid.empty() || launch_grid.size() > 3) return false;
     for (const auto& hook : variant.native_hooks) {
       if (hook.packed) {
         if constexpr (std::is_same_v<Args, flagos::native_host::Arguments>) {
@@ -1139,8 +1143,7 @@ class KernelCache {
       }
     }
     variant.launcher->CallNative(variant.bindings.size(), get_value,
-                                 grid_function ? at::IntArrayRef(actual_grid) : grid,
-                                 device, variant.function);
+                                 launch_grid, device, variant.function);
     return true;
   }
 
