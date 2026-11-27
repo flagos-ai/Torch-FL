@@ -34,7 +34,9 @@ void CheckCuda(cudaError_t result) {
 }
 
 c10::Stream ExternalStream(cudaStream_t queue, c10::Device device) {
-  if (queue == nullptr) return c10::Stream(c10::Stream::DEFAULT, device);
+  // Normalize CUDA's legacy queue sentinel to the PyTorch default stream ID.
+  if (queue == nullptr || queue == cudaStreamLegacy)
+    return c10::Stream(c10::Stream::DEFAULT, device);
   // The optional provider supplies CUDA PyTorch's public stream constructor.
   // Cache its stream identity so repeated launches on a queue stay in C++.
   static thread_local cudaStream_t previous_queue = nullptr;

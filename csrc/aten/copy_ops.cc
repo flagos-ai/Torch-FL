@@ -14,7 +14,7 @@
 #include <ATen/MemoryOverlap.h>
 #include <ATen/ops/_pin_memory.h>
 #include <ATen/ops/_to_copy.h>
-#include <ATen/ops/view_as_real.h>
+#include <ATen/ops/view_as_real_native.h>
 #include <ATen/ops/_to_copy_ops.h>
 #include <ATen/ops/copy_native.h>
 #include <c10/core/DeviceGuard.h>
@@ -151,7 +151,7 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
   if (src.is_complex() || dst.is_complex()) {
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
     if (src_type == dst_type) {
-      return TryGemsDeviceCopy(at::view_as_real(src), at::view_as_real(dst));
+      return TryGemsDeviceCopy(at::native::view_as_real(src), at::native::view_as_real(dst));
     }
 #endif
     return false;
