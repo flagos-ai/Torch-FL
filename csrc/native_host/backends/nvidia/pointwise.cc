@@ -42,7 +42,8 @@ at::Tensor TryDivide(const at::Tensor& left, const at::Tensor& right) {
       left.is_neg() || right.is_neg() || left.has_names() || right.has_names()) {
     return {};
   }
-  auto iter = at::TensorIterator::binary_float_op(at::Tensor(), left, right);
+  at::Tensor output;
+  auto iter = at::TensorIterator::binary_float_op(output, left, right);
   if (iter.numel() == 0) return iter.output();
   if (iter.ndim() > DivisionLayout::max_dimensions) return {};
   DivisionLayout layout{};

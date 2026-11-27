@@ -1425,7 +1425,16 @@ def gen_flaggems_python_kernel(
             call = "at::addmm(self, left, right, beta, alpha)"
             if op == "addmm.out":
                 call = "at::addmm_out(out, self, left, right, beta, alpha)"
+            out = "&out" if op.endswith(".out") else "nullptr"
+            returned = "out" if op.endswith(".out") else "product"
             prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (!beta.isComplex() && !alpha.isComplex()) {\n"
+                f"    auto product = ::flagos::nvidia::TryMatrixProduct(mat1, mat2, {out},\n"
+                "        &self, beta.toFloat(), alpha.toFloat());\n"
+                f"    if (product.defined()) return {returned};\n"
+                "  }\n"
+                "#endif\n"
                 "#if defined(FLAGOS_ACCEL_CUDA)\n"
                 "  if (mat1.dim() == 2 && mat2.dim() == 2 && mat1.size(1) > 0 &&\n"
                 "      mat1.size(1) < 16 && mat1.size(1) == mat2.size(0)) {\n"

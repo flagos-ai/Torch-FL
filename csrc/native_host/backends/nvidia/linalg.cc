@@ -4,6 +4,7 @@
 #include "linalg.h"
 
 #include <ATen/ATen.h>
+#include <ATen/ExpandUtils.h>
 #include <ATen/MemoryOverlap.h>
 #include <ATen/native/LinearAlgebraUtils.h>
 #include <ATen/native/Resize.h>
@@ -188,7 +189,8 @@ using GemmStridedBatchedEx = cublasStatus_t (*)(
     const void*, void*, cudaDataType_t, int, long long int, int,
     cublasComputeType_t, cublasGemmAlgo_t);
 
-void MatrixProduct(const at::Tensor& left, const at::Tensor& right, at::Tensor& out) {
+void MatrixProduct(const at::Tensor& left, const at::Tensor& right, at::Tensor& out,
+                   float beta, float alpha) {
   const auto device = left.device().index();
   const auto stream = GetCurrentStreamForDevice(device);
   const c10::DeviceGuard guard(left.device());
@@ -219,7 +221,6 @@ void MatrixProduct(const at::Tensor& left, const at::Tensor& right, at::Tensor& 
     state.math = mode;
   }
 
-  const float alpha = 1.0f, beta = 0.0f;
   const auto handle = state.handle;
   if (bf16 && batches == 1) {
     static const auto gemm = LoadSymbol<GemmEx>(BlasLibrary(), "cublasGemmEx");
@@ -391,7 +392,8 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&> SolveOut(
 }  // namespace
 
 at::Tensor TryMatrixProduct(const at::Tensor& left, const at::Tensor& right,
-                            at::Tensor* out) {
+                            at::Tensor* out, const at::Tensor* bias, float beta,
+                            float alpha) {
   const auto rank = left.dim();
   const auto dtype = left.scalar_type();
   if ((rank != 2 && rank != 3) || right.dim() != rank ||
@@ -407,19 +409,26 @@ at::Tensor TryMatrixProduct(const at::Tensor& left, const at::Tensor& right,
   }
   auto shape = left.sizes().vec();
   shape.back() = right.size(-1);
+  // A single output row takes the non-fused cuBLAS addmm path.
+  if (bias && (rank != 2 || left.size(0) != 1 || dtype != at::kFloat ||
+                 bias->scalar_type() != dtype || bias->device() != left.device() ||
+                 bias->layout() != at::kStrided ||
+                 !at::is_expandable_to(bias->sizes(), shape))) return {};
   at::Tensor result;
   if (out) {
     if (out->device() != left.device() || out->scalar_type() != dtype ||
         !out->is_contiguous() || out->is_neg() || out->has_names() ||
-        out->is_alias_of(left) || out->is_alias_of(right)) return {};
+        out->is_alias_of(left) || out->is_alias_of(right) ||
+        (bias && out->is_alias_of(*bias))) return {};
     at::native::resize_output(*out, shape);
     result = *out;
   } else {
     result = at::empty(shape, left.options());
   }
   if (result.numel() == 0) return result;
-  if (left.size(-1) == 0) return result.zero_();
-  MatrixProduct(left, right, result);
+  if (bias && beta != 0) result.copy_(bias->expand(shape));
+  if (left.size(-1) == 0) return beta == 0 ? result.zero_() : result.mul_(beta);
+  MatrixProduct(left, right, result, beta, alpha);
   return result;
 }
 
