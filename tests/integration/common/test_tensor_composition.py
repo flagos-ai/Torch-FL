@@ -131,6 +131,18 @@ def test_index_copy_preserves_output_layout():
     torch.testing.assert_close(out.cpu(), host.index_copy(-1, index, updates))
 
 
+@pytest.mark.anyplatform
+def test_linear_solve_accepts_vector_and_matrix_rhs():
+    matrix = torch.tensor([[2.0, 1.0], [1.0, -1.0]])
+    vectors = (torch.tensor([3.0, 0.0]), torch.tensor([[3.0, 0.0], [0.0, 3.0]]))
+    gpu_matrix = matrix.to("flagos:0")
+    for rhs in vectors:
+        expected = torch.linalg.solve(matrix, rhs)
+        actual = torch.linalg.solve(gpu_matrix, rhs.to(gpu_matrix.device))
+        assert actual.device == gpu_matrix.device
+        torch.testing.assert_close(actual.cpu(), expected)
+
+
 @pytest.mark.nvidia
 @pytest.mark.flaggems_python
 def test_index_copy_preserves_last_write_without_cpu_fallback():

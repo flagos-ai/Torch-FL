@@ -12,6 +12,19 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("dim", [0, 1])
+def test_empty_mean_keeps_reduction_shape(dim):
+    host = torch.empty((0, 4), dtype=torch.float32)
+    data = host.to("flagos:0")
+    result = data.mean(dim=dim, keepdim=True)
+    assert result.device == data.device
+    torch.testing.assert_close(
+        result.cpu(), host.mean(dim=dim, keepdim=True), equal_nan=True
+    )
+
+
 DEVICE = torch.device("flagos:0")
 OPERATORS = {"argmin": "argmin", "max": "max.dim", "min": "min.dim"}
 
