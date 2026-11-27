@@ -31,6 +31,7 @@
 // Ascend and other platforms with separate attention implementations keep
 // their own registrations.
 
+#include <ATen/Context.h>
 #include <ATen/core/Tensor.h>
 #include <ATen/core/grad_mode.h>
 #include <ATen/ops/full_like.h>
@@ -466,6 +467,16 @@ at::Tensor WrapperScaledDotProductAttention(
     return at::native::scaled_dot_product_attention(
         query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   }
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_FLAGGEMS_PYTHON)
+  if (!attn_mask && dropout_p == 0 && query.dim() == 4 &&
+      query.scalar_type() == at::kBFloat16 && query.size(-1) <= 128 &&
+      at::globalContext().userEnabledCuDNNSDP()) {
+    auto output = at::native::flagos::CallPythonOp_Generic(
+        "torch_fl.accelerator.nvidia._cudnn.attention",
+        {query, key, value, is_causal, scale, enable_gqa});
+    if (output.defined()) return output;
+  }
+#endif
 #if defined(FLAGOS_HAVE_NVIDIA_CUTLASS)
   if (!attn_mask && dropout_p == 0 && !is_causal && !enable_gqa) {
     auto output = ::flagos::nvidia::TryCutlassAttention(query, key, value, scale);
