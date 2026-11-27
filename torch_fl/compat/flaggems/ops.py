@@ -541,14 +541,20 @@ _PATCH_LIBS = []
 
 
 def patch_normal(accelerator: str) -> None:
-    """Forward the generator and layout when calling the FlagGems normal kernel."""
+    """Preserve the generator and layout with the published FlagGems kernel."""
     if accelerator != "nvidia":
         return
     from flag_gems.ops.normal import normal_distribution, transform_func_float_float
 
-    from torch_fl import native_host
+    from torch_fl import _C, native_host
+    from torch_fl.accelerator.nvidia._cuda_compat import _CudaPhiloxGenerator
 
     def normal_(self, mean=0.0, std=1.0, *, generator=None):
+        if self.device.type != "flagos":
+            # An explicit FlagOS generator also contributes a dispatch key.
+            raise RuntimeError(
+                f"Expected a '{self.device.type}' device type for generator but found 'flagos'"
+            )
         if not std >= 0:
             raise RuntimeError("normal_ expects a nonnegative standard deviation")
         if not self.numel():
@@ -559,6 +565,10 @@ def patch_normal(accelerator: str) -> None:
             sample = native_host._hosts.resolve(sample)
             transform = native_host._hosts.resolve(transform)
         with torch.flagos.device(self.device):
+            if generator is not None and generator.device.type != "cuda":
+                # Reserve from the caller's state while keeping the draw on-device.
+                seed = _C._reserve_rng_seed(self.device.index, generator, True)
+                generator = _CudaPhiloxGenerator(seed)
             output = self
             if not self.is_contiguous():
                 output = torch.empty_like(self, memory_format=torch.contiguous_format)

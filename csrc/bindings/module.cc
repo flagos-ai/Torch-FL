@@ -25,6 +25,7 @@
 #include <torch/csrc/autograd/generated/variable_factories.h>
 
 #include <memory>
+#include <mutex>
 #include <flagos.h>
 
 #ifdef USE_MUSA
@@ -186,7 +187,8 @@ static PyObject* _reserveRngSeed(PyObject* self, PyObject* args) {
   HANDLE_TH_ERRORS
   int device_index;
   PyObject* generator_obj = Py_None;
-  if (!PyArg_ParseTuple(args, "i|O", &device_index, &generator_obj)) {
+  int allow_cpu_generator = 0;
+  if (!PyArg_ParseTuple(args, "i|Op", &device_index, &generator_obj, &allow_cpu_generator)) {
     return nullptr;
   }
 
@@ -197,6 +199,10 @@ static PyObject* _reserveRngSeed(PyObject* self, PyObject* args) {
         "_reserve_rng_seed expects a torch.Generator or None, but got ",
         THPUtils_typename(generator_obj));
     generator = THPGenerator_Unwrap(generator_obj);
+  }
+  if (allow_cpu_generator && generator && generator->device().is_cpu()) {
+    std::lock_guard<std::mutex> lock(generator->mutex());
+    return PyLong_FromUnsignedLongLong(generator->get<at::CPUGeneratorImpl>()->random64());
   }
   auto seed = c10::flagos::ReserveSeed(generator, device_index);
   return PyLong_FromUnsignedLongLong(seed);
