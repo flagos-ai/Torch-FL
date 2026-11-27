@@ -1,7 +1,9 @@
 // Copyright (c) 2026, BAAI. All rights reserved.
 
 #include "../../generated/ops.h"
+#include <ATen/ExpandUtils.h>
 #include <ATen/core/Tensor.h>
+#include <ATen/ops/empty_strided.h>
 #include "op_preparation.h"
 #include "op_api_common.h"
 
@@ -26,7 +28,18 @@ std::tuple<at::Tensor, at::Tensor> SortImpl(
 
   EXEC_ASCEND_CMD(aclnnSort, acl_self.get(), stable, d, descending,
                   acl_values.get(), acl_indices.get());
-  return std::make_tuple(values, indices);
+
+  // ACLNN writes contiguous temporaries. Match the dense layout of ATen sort.
+  const auto strides = self.is_non_overlapping_and_dense()
+      ? self.strides().vec()
+      : at::infer_dense_strides(self.sizes(), self.strides());
+  if (values.strides().equals(strides)) return {values, indices};
+  auto restore_layout = [&](const at::Tensor& tensor) {
+    auto out = at::empty_strided(tensor.sizes(), strides, tensor.options());
+    out.copy_(tensor);
+    return out;
+  };
+  return {restore_layout(values), restore_layout(indices)};
 }
 
 } // namespace
