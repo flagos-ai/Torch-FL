@@ -6341,7 +6341,9 @@ at::Tensor & MulOutFlagGems(const at::Tensor & self, const at::Tensor & other, a
   const auto& rhs = self_on_device ? other : self;
   const bool cpu_scalar = rhs.device().is_cpu() && rhs.dim() == 0;
   const auto dtype = out.scalar_type();
-  if (!MulTensorFnSource.Available() || tensor.device() != out.device() ||
+  const bool device_multiply = MulTensorFnSource.Available() ||
+      GetBackendForOp("mul.Tensor") == Backend::kFlagGems;
+  if (!device_multiply || tensor.device() != out.device() ||
       (!cpu_scalar && (rhs.device() != out.device() || rhs.scalar_type() != tensor.scalar_type())) ||
       at::result_type(self, other) != dtype || (dtype != at::kFloat && dtype != at::kHalf &&
           dtype != at::kBFloat16 && dtype != at::kLong && dtype != at::kBool)) {
@@ -6352,6 +6354,7 @@ at::Tensor & MulOutFlagGems(const at::Tensor & self, const at::Tensor & other, a
   at::assert_no_partial_overlap(out, self);
   at::assert_no_partial_overlap(out, other);
   auto result = MulTensorKernelPython(tensor, rhs);
+  TORCH_CHECK(result.device() == out.device(), "out adapter device mismatch");
   at::native::resize_output(out, result.sizes());
   out.copy_(result);
   return out;
