@@ -642,7 +642,8 @@ std::pair<size_t, size_t> CachingDeviceAllocator::get_memory_info(int device) {
   const auto restore_status = backend_->set_device(previous);
   TORCH_CHECK(status == Success, "Failed to query physical device memory");
   TORCH_CHECK(restore_status == Success, "Failed to restore device after memory query");
-  return {free, total};
+  // The device SDK can report an advisory free count above its capacity.
+  return {std::min(free, total), total};
 }
 
 AllocatorStats CachingDeviceAllocator::get_stats(int device) {
