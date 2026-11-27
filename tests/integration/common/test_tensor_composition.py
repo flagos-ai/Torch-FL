@@ -49,3 +49,19 @@ def test_equal_and_mul_out_without_cpu_fallback():
         assert not torch.equal(out, expected.flatten())
     finally:
         torch.ops.flagos.strict_host_routes(not was_allowed)
+
+
+@pytest.mark.nvidia
+@pytest.mark.flaggems_python
+def test_prod_preserves_large_long_values_without_cpu_fallback():
+    host = torch.tensor([[2**30 + 1, 3, 5], [2**27 + 1, 11, 17]])
+    source = host.to("flagos:0")
+    was_allowed = torch.ops.flagos.cpu_fallback_allowed()
+    torch.ops.flagos.strict_host_routes(True)
+    try:
+        result = source.prod(dim=-1, keepdim=True)
+        empty = source[:, :0].prod(dim=-1)
+    finally:
+        torch.ops.flagos.strict_host_routes(not was_allowed)
+    torch.testing.assert_close(result.cpu(), host.prod(dim=-1, keepdim=True))
+    torch.testing.assert_close(empty.cpu(), host[:, :0].prod(dim=-1))

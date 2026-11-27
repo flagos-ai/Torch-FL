@@ -32,7 +32,9 @@
 #include "backends/soft_lowp/format.h"
 #include "backends/soft_lowp/ops.h"
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_FLAGGEMS_PYTHON)
+#include <ATen/MemoryOverlap.h>
 #include <ATen/NamedTensorUtils.h>
+#include <ATen/native/Resize.h>
 #include "backends/flagos/python_op_caller.h"
 #endif
 // TsingMicro's RNG kernels are claimed directly below rather than through a
@@ -330,6 +332,44 @@ bool WrapperEqual(const at::Tensor& self, const at::Tensor& other) {
   if (self.numel() == 0) return true;
   at::NoNamesGuard guard;
   return at::eq(self, other).all().item<bool>();
+}
+
+at::Tensor& WrapperProdOut(const at::Tensor& self, int64_t dim, bool keepdim,
+                          std::optional<at::ScalarType> dtype, at::Tensor& out) {
+  TORCH_CHECK(self.device() == out.device(), "prod(): output device must match the input");
+  TORCH_CHECK(!dtype || *dtype == out.scalar_type(),
+              "prod(): dtype must match the output tensor");
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  dim = at::maybe_wrap_dim(dim, self.dim());
+  if (self.dim() == 0) {
+    at::native::resize_output(out, {});
+    return out.copy_(self);
+  }
+  auto shape = self.sizes().vec();
+  if (keepdim) shape[dim] = 1;
+  else shape.erase(shape.begin() + dim);
+  at::native::resize_output(out, shape);
+  if (out.numel() == 0) return out;
+  if (self.size(dim) == 0) return out.fill_(1);
+
+  // Reduce through FlagGems multiplication and keep the output's integer
+  // precision. The published reduction converts all inputs to float32.
+  auto dtype_out = out.scalar_type();
+  auto accumulation = dtype_out == at::kHalf || dtype_out == at::kBFloat16
+      ? at::kFloat : dtype_out;
+  auto values = self.to(accumulation);
+  while (values.size(dim) > 1) {
+    auto size = values.size(dim);
+    auto half = size / 2;
+    auto next = at::mul(values.narrow(dim, 0, half), values.narrow(dim, half, half));
+    if (size % 2) {
+      auto first = next.narrow(dim, 0, 1);
+      first.copy_(at::mul(first, values.narrow(dim, size - 1, 1)));
+    }
+    values = std::move(next);
+  }
+  return out.copy_(keepdim ? values : values.squeeze(dim));
 }
 
 std::optional<float> NvidiaScalarReciprocal(const at::Tensor& self,
@@ -885,6 +925,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
 #endif
 #if defined(FLAGOS_ACCEL_CUDA)
   m.impl("equal", WrapperEqual);
+  m.impl("prod.int_out", WrapperProdOut);
 #endif
 
 #if defined(USE_TSINGMICRO)
