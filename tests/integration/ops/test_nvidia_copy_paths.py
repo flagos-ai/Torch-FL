@@ -13,12 +13,9 @@ DEVICE = "flagos:0"
 
 @pytest.mark.nvidia
 @pytest.mark.flaggems_python
+@pytest.mark.native_source_host
 @pytest.mark.parametrize("dtype", [torch.float64, torch.complex64, torch.complex128])
 def test_nvidia_same_dtype_transpose_copy_without_cpu_fallback(dtype):
-    from torch_fl import _build_config
-
-    if not _build_config.NATIVE_HOSTS:
-        pytest.skip("NVIDIA native host copy is required")
     host = torch.tensor([[1.25, -1.125, 0.5], [0.0, 2.5, -16777217.0]], dtype=dtype)
     source = host.to(DEVICE)
     out = torch.empty((3, 2), dtype=dtype, device=DEVICE).t()

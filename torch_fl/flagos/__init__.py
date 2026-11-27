@@ -462,7 +462,7 @@ class _HostTimedEvent:
 
 
 class Event(torch.cuda.Event):
-    """Flagos event: a real CUDA event where there is a CUDA runtime.
+    """A FlagOS event backed by the device runtime when available.
 
     Other runtimes use the device's event when available and the host clock as
     a fallback.
@@ -471,13 +471,15 @@ class Event(torch.cuda.Event):
     def __new__(
         cls, enable_timing=False, blocking=False, interprocess=False, external=False
     ):
-        if (
-            _platform() in ("cuda", "musa")
-            and hasattr(_C, "_get_native_current_raw_stream")
-            and not (blocking or interprocess or external)
-        ):
+        platform = _platform()
+        native_event = hasattr(_C, "_get_native_current_raw_stream") and not (
+            blocking or interprocess or external
+        )
+        if platform == "cuda" and native_event:
             return torch.Event(device="flagos", enable_timing=enable_timing)
         if not _has_cuda_runtime():
+            if platform == "musa" and native_event:
+                return torch.Event(device="flagos", enable_timing=enable_timing)
             # One spelling of the host-clock fallback for the arms below, so they
             # differ only in which vendor class they try first.
             host_timed = dict(

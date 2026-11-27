@@ -29,7 +29,7 @@ constexpr auto forward_name = "flash_attn_3::_flash_attn_forward";
 constexpr auto raw_forward_name = "flash_attn_3::fwd";
 
 void CheckCuda(cudaError_t result) {
-  TORCH_CHECK(result == cudaSuccess, "FlashAttention 3 CUDA stream: ",
+  TORCH_CHECK(result == cudaSuccess, "FlashAttention 3 CUDA runtime: ",
               cudaGetErrorString(result));
 }
 
@@ -163,9 +163,17 @@ void Forward(const c10::OperatorHandle& forward, Stack* stack) {
         continue;
       }
       const auto& data = value.toTensor();
+      TORCH_CHECK(data.device() == cuda_device,
+                  "FlashAttention 3 returned a tensor on another device");
       auto output = at::empty_strided(
           data.sizes(), data.strides(), data.options().device(device));
-      if (data.numel()) FlagosToCudaView(output).copy_(data);
+      if (data.numel()) {
+        // The provider allocates outputs on this stream. Both tensors have
+        // the same layout, so the runtime can copy their full strided span.
+        CheckCuda(cudaMemcpyAsync(output.mutable_data_ptr(), data.const_data_ptr(),
+                                  output.storage().nbytes(),
+                                  cudaMemcpyDeviceToDevice, queue));
+      }
       outputs.emplace_back(std::move(output));
     }
   } catch (...) {
