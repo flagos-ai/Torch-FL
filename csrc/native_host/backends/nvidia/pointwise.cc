@@ -20,6 +20,8 @@ cudaError_t LaunchDivide(const float* left, const float* right, float* out,
                          int64_t size, DivisionLayout layout, cudaStream_t stream);
 cudaError_t LaunchMeanLastDim(const float* input, float* output, int rows, int width,
                               float scale, cudaStream_t stream);
+cudaError_t LaunchChannelNorm(const void* input, void* output, int batches,
+                              int channels, int cells, cudaStream_t stream);
 
 at::Tensor TryPointwise(PointwiseOp op, const at::Tensor& input, float scalar) {
   const auto dtype = input.scalar_type();
@@ -92,6 +94,30 @@ at::Tensor TryMeanLastDim(const at::Tensor& input, bool keepdim) {
   const auto status = LaunchMeanLastDim(input.const_data_ptr<float>(), result.mutable_data_ptr<float>(),
                                        rows, width, scale, queue);
   TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK mean launch failed: ",
+              cudaGetErrorString(status));
+  return result;
+}
+
+at::Tensor TryChannelNorm(const at::Tensor& input, bool keepdim) {
+  if (input.scalar_type() != at::kBFloat16 || !input.device().is_privateuseone() ||
+      (input.dim() != 4 && input.dim() != 5) || !input.is_contiguous() ||
+      input.is_neg() || input.has_names()) return {};
+  const auto batches = input.size(0), channels = input.size(1);
+  if (batches < 1 || batches > 65535 || channels < 64 || channels > 1020) return {};
+  const auto cells = input.numel() / (batches * channels);
+  if (cells < 128 || cells > std::numeric_limits<int>::max() - 31 || cells % 4 ||
+      reinterpret_cast<uintptr_t>(input.const_data_ptr()) % 8) return {};
+  auto shape = input.sizes().vec();
+  if (keepdim)
+    shape[1] = 1;
+  else
+    shape.erase(shape.begin() + 1);
+  const c10::OptionalDeviceGuard guard(input.device());
+  auto result = at::empty(shape, input.options());
+  const auto queue = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(input.device().index()));
+  const auto status = LaunchChannelNorm(input.const_data_ptr(), result.mutable_data_ptr(),
+                                        batches, channels, cells, queue);
+  TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK channel norm launch failed: ",
               cudaGetErrorString(status));
   return result;
 }

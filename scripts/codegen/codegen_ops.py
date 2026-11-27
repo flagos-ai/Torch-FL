@@ -1396,7 +1396,8 @@ def gen_flaggems_python_kernel(
         elif op == "convolution_overrideable":
             prelude += (
                 "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
-                "  if (!transposed && input.dim() == 5 && input.scalar_type() == at::kBFloat16) {\n"
+                "  if (!transposed && (input.dim() == 4 || input.dim() == 5) &&\n"
+                "      input.scalar_type() == at::kBFloat16) {\n"
                 '    auto output = CallPythonOp_Generic("torch_fl.accelerator.nvidia._cudnn.convolution",\n'
                 "        {input, weight, bias, stride, padding, dilation, transposed, output_padding, groups});\n"
                 "    if (output.defined()) return output;\n"
@@ -1490,6 +1491,17 @@ def gen_flaggems_python_kernel(
                 "#if defined(USE_DCU)\n"
                 "  const auto output_dtype = dtype.value_or(self.scalar_type());\n"
                 '  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
+                "#endif\n"
+            )
+        elif op == "linalg_vector_norm":
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (ord.equal(2.0) && dim.has_value() && dim->size() == 1 &&\n"
+                "      (dim->front() == 1 || dim->front() == 1 - self.dim()) &&\n"
+                "      (!dtype.has_value() || *dtype == at::kBFloat16)) {\n"
+                "    if (auto result = ::flagos::nvidia::TryChannelNorm(self, keepdim); result.defined())\n"
+                "      return result;\n"
+                "  }\n"
                 "#endif\n"
             )
         elif op == "constant_pad_nd":
@@ -1626,6 +1638,7 @@ def gen_flaggems_python_kernel(
                 "  if (self.scalar_type() == at::kFloat &&\n"
                 "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) && MulTensorFnSource.Available()) {\n"
                 "    const auto power = exponent.toDouble();\n"
+                "    if (power == 1.0) return self.clone(at::MemoryFormat::Preserve);\n"
                 "    if (power == 2.0) return at::mul(self, self);\n"
                 "    if (power == 3.0) return at::mul(at::mul(self, self), self);\n"
                 "  }\n"

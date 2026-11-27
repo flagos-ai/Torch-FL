@@ -75,7 +75,7 @@ record — see [Testing](../../development/testing.md).
 The NVIDIA Native Host wheel builds against CPU PyTorch. Native hosts run
 published FlagGems kernels and use the NVIDIA SDK for device operations such as
 matrix products and linear solves through cuBLAS and cuSOLVER. The NVIDIA
-cuDNN frontend package enables the BF16 Conv3D route. Builds that find
+cuDNN frontend package enables the BF16 convolution routes. Builds that find
 `CUTLASS_INCLUDE_DIR` and cuRAND headers enable the CUDA reference's
 memory-efficient attention algorithm for aligned wide BF16 heads. The kernel
 is instantiated at build time from the published CUTLASS headers and the CPU

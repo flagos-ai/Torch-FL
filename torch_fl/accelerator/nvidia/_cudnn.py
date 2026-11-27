@@ -69,11 +69,12 @@ class _DevicePlans:
 def convolution(
     input, weight, bias, stride, padding, dilation, transposed, output_padding, groups
 ):
+    rank = input.dim()
     if (
         transposed
         or any(output_padding)
-        or input.dim() != 5
-        or weight.dim() != 5
+        or rank not in (4, 5)
+        or weight.dim() != rank
         or weight.device != input.device
         or input.dtype != torch.bfloat16
         or weight.dtype != input.dtype
@@ -97,7 +98,7 @@ def convolution(
     # The convolution API infers groups from the input and filter dimensions.
     if groups * weight.size(1) != input.size(1):
         return None
-    channels_last = torch.channels_last_3d
+    channels_last = torch.channels_last_3d if rank == 5 else torch.channels_last
     memory_format = (
         channels_last
         if any(
@@ -138,5 +139,5 @@ def convolution(
         handle=state.handle,
     )
     if bias is not None:
-        result.add_(bias.reshape(1, -1, 1, 1, 1))
+        result.add_(bias.reshape(1, -1, *(1,) * (rank - 2)))
     return result

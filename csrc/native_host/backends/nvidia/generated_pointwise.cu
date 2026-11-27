@@ -76,6 +76,29 @@ __global__ void MeanLastDim(const float4* input, float* output, int rows, int ve
   if (group.thread_rank() == 0) output[row] = sum * scale;
 }
 
+__global__ void ChannelNorm(const __nv_bfloat16* input, __nv_bfloat16* output,
+                             int channels, int cells) {
+  const auto group = cg::tiled_partition<4>(cg::this_thread_block());
+  const int cell = blockIdx.x * (blockDim.x / 4) + threadIdx.x / 4;
+  if (cell >= cells) return;
+  const auto* data = input + int64_t(blockIdx.y) * channels * cells + cell;
+  float squares[4]{};
+  for (int c = group.thread_rank(); c < channels; c += 16) {
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      const int channel = c + 4 * j;
+      if (channel < channels) {
+        const float value = __bfloat162float(data[int64_t(channel) * cells]);
+        squares[j] = fmaf(value, value, squares[j]);
+      }
+    }
+  }
+  const auto sum = cg::reduce(
+      group, ((squares[0] + squares[1]) + squares[2]) + squares[3], cg::plus<float>());
+  if (group.thread_rank() == 0)
+    output[int64_t(blockIdx.y) * cells + cell] = __float2bfloat16_rn(sqrtf(sum));
+}
+
 }  // namespace
 
 cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* output,
@@ -120,6 +143,16 @@ cudaError_t LaunchMeanLastDim(const float* input, float* output, int rows, int w
   constexpr int rows_per_block = 16;
   MeanLastDim<<<(rows + rows_per_block - 1) / rows_per_block, dim3(32, rows_per_block), 0, stream>>>(
       reinterpret_cast<const float4*>(input), output, rows, width / 4, scale);
+  return cudaGetLastError();
+}
+
+cudaError_t LaunchChannelNorm(const void* input, void* output, int batches,
+                              int channels, int cells, cudaStream_t stream) {
+  constexpr int cells_per_block = 32;
+  const dim3 grid((cells + cells_per_block - 1) / cells_per_block, batches);
+  ChannelNorm<<<grid, cells_per_block * 4, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input), static_cast<__nv_bfloat16*>(output),
+      channels, cells);
   return cudaGetLastError();
 }
 

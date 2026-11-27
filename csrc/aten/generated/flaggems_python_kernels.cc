@@ -1486,7 +1486,8 @@ at::Tensor ConstantPadNdKernelPython(const at::Tensor & self, at::IntArrayRef pa
 static TypedSourceSlot ConvolutionOverrideableFnSource("aten::convolution_overrideable", "flag_gems.convolution_overrideable", "42b174b4f4653ff1481ef845341543f84533a70c90020cafe3f6c6e73c89c520", "{\"abi\": \"42b174b4f4653ff1481ef845341543f84533a70c90020cafe3f6c6e73c89c520\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.convolution_overrideable\", \"op\": \"aten::convolution_overrideable\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ConvolutionOverrideableKernelPython(const at::Tensor & input, const at::Tensor & weight, const ::std::optional<at::Tensor> & bias, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool transposed, at::IntArrayRef output_padding, int64_t groups) {
 #if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
-  if (!transposed && input.dim() == 5 && input.scalar_type() == at::kBFloat16) {
+  if (!transposed && (input.dim() == 4 || input.dim() == 5) &&
+      input.scalar_type() == at::kBFloat16) {
     auto output = CallPythonOp_Generic("torch_fl.accelerator.nvidia._cudnn.convolution",
         {input, weight, bias, stride, padding, dilation, transposed, output_padding, groups});
     if (output.defined()) return output;
@@ -2883,6 +2884,14 @@ at::Tensor & LinalgSolveTriangularOutKernelPython(const at::Tensor & self, const
 
 static TypedSourceSlot LinalgVectorNormFnSource("aten::linalg_vector_norm", "flag_gems.vector_norm", "19ae56bffce8523f631ab32f1215fa207a0d8e8f0903421aec5e55f13699f646", "{\"abi\": \"19ae56bffce8523f631ab32f1215fa207a0d8e8f0903421aec5e55f13699f646\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.vector_norm\", \"op\": \"aten::linalg_vector_norm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LinalgVectorNormKernelPython(const at::Tensor & self, const at::Scalar & ord, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (ord.equal(2.0) && dim.has_value() && dim->size() == 1 &&
+      (dim->front() == 1 || dim->front() == 1 - self.dim()) &&
+      (!dtype.has_value() || *dtype == at::kBFloat16)) {
+    if (auto result = ::flagos::nvidia::TryChannelNorm(self, keepdim); result.defined())
+      return result;
+  }
+#endif
   auto result = LinalgVectorNormFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.vector_norm", {self, ord, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(ord), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
@@ -3838,6 +3847,7 @@ at::Tensor PowTensorScalarKernelPython(const at::Tensor & self, const at::Scalar
   if (self.scalar_type() == at::kFloat &&
       (exponent.isIntegral(false) || exponent.isFloatingPoint()) && MulTensorFnSource.Available()) {
     const auto power = exponent.toDouble();
+    if (power == 1.0) return self.clone(at::MemoryFormat::Preserve);
     if (power == 2.0) return at::mul(self, self);
     if (power == 3.0) return at::mul(at::mul(self, self), self);
   }
