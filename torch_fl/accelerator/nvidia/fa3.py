@@ -9,10 +9,12 @@ import sys
 
 import torch
 
+from ._cuda_compat import cuda_runtime_version
+
 
 def install() -> None:
     name = "flash_attn_3_nv"
-    if torch.version.cuda is not None or name in sys.modules:
+    if torch._C._has_cuda or name in sys.modules:
         return
     if not hasattr(torch.ops.torch_fl_fa3, "fwd"):
         return
@@ -28,3 +30,8 @@ def install() -> None:
     except BaseException:
         sys.modules.pop(name, None)
         raise
+
+    # Some CUDA consumers use the version string as a runtime capability probe.
+    # ATen's compiled CUDA flag continues to describe the installed Torch wheel.
+    if torch.version.cuda is None:
+        torch.version.cuda = cuda_runtime_version()

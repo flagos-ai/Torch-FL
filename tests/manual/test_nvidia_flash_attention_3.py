@@ -35,7 +35,7 @@ def reference():
         pytest.skip("Set FLAGOS_FA3_CUDA_REFERENCE to a CUDA reference from this file")
     import torch_fl  # noqa: F401
 
-    assert torch.version.cuda is None
+    assert not torch._C._has_cuda
     assert not torch.ops.flagos.cpu_fallback_allowed()
     _check_no_cuda_torch()
     yield torch.load(path, weights_only=True)
@@ -124,7 +124,7 @@ def test_flash_attention_3_keeps_inputs_alive_across_streams(reference):
 
 @torch.inference_mode()
 def _write_reference(output):
-    assert torch.version.cuda and torch.cuda.get_device_capability(0)[0] == 9
+    assert torch._C._has_cuda and torch.cuda.get_device_capability(0)[0] == 9
     device = torch.device("cuda:0")
     values = {
         (varlen, str(dtype), causal, side): _forward(

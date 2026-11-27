@@ -91,6 +91,7 @@ def test_cpu_built_nvidia_hosts_accept_a_matching_cuda_torch_release():
     torch = SimpleNamespace(
         __version__="2.10.0+cu130",
         version=SimpleNamespace(cuda="13.0", git_version="same-source"),
+        _C=SimpleNamespace(_has_cuda=True),
         compiled_with_cxx11_abi=lambda: True,
     )
     assert loader._same_torch_cohort(manifest, torch)
@@ -100,6 +101,8 @@ def test_cpu_built_nvidia_hosts_accept_a_matching_cuda_torch_release():
     )
     assert not loader._same_torch_cohort({**manifest, "torch_cxx11_abi": False}, torch)
     assert not loader._same_torch_cohort({**manifest, "backend": {}}, torch)
+    torch._C._has_cuda = False
+    assert not loader._same_torch_cohort(manifest, torch)
 
 
 @pytest.mark.parametrize("vendor", ["unregistered", "gcu", "cuda", "../nvidia"])

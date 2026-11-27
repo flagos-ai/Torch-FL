@@ -117,6 +117,10 @@ initializes under CPU PyTorch. Import PyTorch and Torch-FL before using that API
 with tensors on `flagos`. On a stock CUDA PyTorch installation, the original
 NVIDIA provider remains the CUDA reference.
 
+With the bundled provider enabled, Torch-FL exposes the SDK runtime version as
+`torch.version.cuda` for applications that use it as a capability probe. The
+CPU PyTorch build still reports false for `torch._C._has_cuda`.
+
 Generate a reference on Hopper in the CUDA PyTorch environment.
 
 ```bash

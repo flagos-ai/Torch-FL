@@ -137,7 +137,7 @@ def _same_torch_cohort(manifest, torch):
     return (
         manifest.get("backend", {}).get("vendor") == "nvidia"
         and built_variant == "cpu"
-        and torch.version.cuda is not None
+        and torch._C._has_cuda
         and built_release == torch.__version__.partition("+")[0]
         and bool(revision)
         and revision == torch.version.git_version
@@ -783,7 +783,7 @@ class Hosts:
             "+cpu"
         ) and _same_torch_cohort(self.manifest, torch)
         if (
-            torch.version.cuda is not None
+            torch._C._has_cuda
             and not matched_cpu_build
             or "boxing" in _build_config.KERNELS
         ):

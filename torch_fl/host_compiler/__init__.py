@@ -58,7 +58,7 @@ def enable(cache_dir: Union[str, os.PathLike], *, mode: str = "compile") -> None
         raise RuntimeError("host compiler requires the NVIDIA FlagGems build")
     if torch.__version__.split("+")[0] != "2.10.0":
         raise RuntimeError("host compiler currently requires PyTorch 2.10.0")
-    if "boxing" in _build_config.KERNELS or torch.version.cuda is not None:
+    if "boxing" in _build_config.KERNELS or torch._C._has_cuda:
         raise RuntimeError(
             "host compiler validation requires the CPU-Torch vendor build"
         )

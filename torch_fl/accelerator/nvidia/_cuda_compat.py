@@ -402,19 +402,32 @@ def _get_props(device=None) -> _CudaDeviceProperties:
 
 
 def _load_cudart():
-    """Load libcudart.so for cudaDeviceSynchronize, cached."""
+    """Load the CUDA runtime from the loader or the toolkit, cached."""
     global _cudart
     if _cudart is not None:
         return _cudart
-    try:
-        _cudart = ctypes.CDLL("libcudart.so")
-    except OSError:
-        cuda_home = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+    cuda_home = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+    for path in (
+        "libcudart.so.13",
+        "libcudart.so.12",
+        "libcudart.so",
+        f"{cuda_home}/lib64/libcudart.so",
+    ):
         try:
-            _cudart = ctypes.CDLL(f"{cuda_home}/lib64/libcudart.so")
+            _cudart = ctypes.CDLL(path)
         except OSError:
-            _cudart = None
+            continue
+        break
     return _cudart
+
+
+def cuda_runtime_version() -> str | None:
+    """Return the CUDA Toolkit runtime version available to the NVIDIA shim."""
+    runtime = _load_cudart()
+    version = ctypes.c_int()
+    if runtime is None or runtime.cudaRuntimeGetVersion(ctypes.byref(version)) != 0:
+        return None
+    return f"{version.value // 1000}.{version.value % 1000 // 10}"
 
 
 def _real_stream(device_index=0):
