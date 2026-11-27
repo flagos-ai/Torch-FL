@@ -19,7 +19,7 @@ setup_platform: metax
 
 # Official MACA 3.8.1.3 runtime 2.3.0 (OCI index with an amd64 image).
 # The host driver is independent of the container; the release lists 3.9.6.
-ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-metax-maca3.8.1.3:2.3.0@sha256:77f066000a100aac41c62a4b3cb3eae2a99185725039b84bdfc4d6b421550cd9
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-metax-maca3.8.1.3:2.3.0@sha256:5f50cffe62f0e142b35f3058e9b869441d5cdffbd5bbb90ae37ced43d54ce628
 
 runner_labels:
   - mx-8g-cicd-pytorch
