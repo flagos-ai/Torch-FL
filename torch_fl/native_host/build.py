@@ -14,6 +14,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import json
+import os
 from pathlib import Path
 import symtable
 import sys
@@ -1064,11 +1065,20 @@ def main():
             record = manifest["modules"].get(resolved.__module__)
             if record and resolved.__name__ in record["functions"]:
                 manifest["ops"][name] = [resolved.__module__, resolved.__name__]
+        cython_cache = bool(os.environ.get("CYTHON_CACHE_DIR"))
+        if cython_cache:
+            # Cython fingerprints source paths. The layout relative to the
+            # staging directory is stable across fresh CI build directories.
+            for extension in cython_extensions:
+                extension.sources = [
+                    os.path.relpath(path) for path in extension.sources
+                ]
         extensions.extend(
             cythonize(
                 cython_extensions,
                 compiler_directives={"language_level": 3, "annotation_typing": False},
                 nthreads=args.jobs,
+                cache=cython_cache,
             )
         )
     (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

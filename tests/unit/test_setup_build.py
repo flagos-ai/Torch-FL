@@ -393,6 +393,12 @@ def test_native_host_build_uses_staged_package(
     namespace, kwargs = _load_setup(monkeypatch)
     globals_ = namespace["BuildExtWithCmake"]._build_native_hosts.__globals__
     monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", vendor)
+    if vendor == "hygon":
+        monkeypatch.setenv("_TORCH_FL_NATIVE_HOST_CCACHE", "/compiler tools/ccache")
+        monkeypatch.setenv("CC", "gcc -pthread")
+        monkeypatch.setenv("CXX", "g++")
+        monkeypatch.setenv("CFLAGS", "-g")
+        monkeypatch.setenv("CXXFLAGS", "-O2")
     native_precision = vendor in {"nvidia", "hygon", "dcu", "metax"}
     monkeypatch.setitem(
         globals_,
@@ -430,6 +436,13 @@ def test_native_host_build_uses_staged_package(
     assert options["env"]["_TORCH_FL_BUILDING_NATIVE_HOST"] == "1"
     assert options["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert options["env"]["PYTHONPATH"].startswith(command.build_lib)
+    if vendor == "hygon":
+        for _, call in calls:
+            assert call["env"]["CC"] == "'/compiler tools/ccache' gcc -pthread"
+            assert call["env"]["CXX"] == "'/compiler tools/ccache' g++"
+            assert call["env"]["CFLAGS"] == f"-g -ffile-prefix-map={ROOT}=."
+            assert call["env"]["CXXFLAGS"] == f"-O2 -ffile-prefix-map={ROOT}=."
+        assert os.environ["CC"] == "gcc -pthread"
     assert len(calls) == 1 + native_precision
     if native_precision:
         vendor_args, _ = calls[1]
