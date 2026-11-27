@@ -4,7 +4,8 @@
 #include "cudnn_attention.h"
 
 #include <ATen/ops/empty.h>
-#include <ATen/ops/empty_like.h>
+#include <ATen/ops/empty_strided.h>
+#include <ATen/ExpandUtils.h>
 #include <c10/core/DeviceGuard.h>
 #include <c10/util/hash.h>
 #include <cudnn_frontend.h>
@@ -12,6 +13,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -20,7 +22,7 @@ namespace flagos::nvidia {
 namespace {
 
 namespace fe = cudnn_frontend;
-using PlanKey = std::array<int64_t, 4 * 4 * 2 + 1>;
+using PlanKey = std::array<int64_t, 4 * 4 * 2 + 2>;
 constexpr size_t kPlanLimit = 128;
 
 enum Operand : int64_t {
@@ -28,7 +30,6 @@ enum Operand : int64_t {
   kKey,
   kValue,
   kOutput,
-  kScale,
 };
 
 bool SupportsTensor(const at::Tensor& tensor, c10::Device device) {
@@ -58,9 +59,6 @@ struct PlanKeyHash {
 struct AttentionPlan {
   fe::graph::Graph graph;
   int64_t workspace_size = 0;
-  std::unordered_map<int64_t, void*> pointers{
-      {kQuery, nullptr}, {kKey, nullptr}, {kValue, nullptr},
-      {kOutput, nullptr}, {kScale, nullptr}};
 };
 
 struct DevicePlans {
@@ -79,7 +77,7 @@ struct DevicePlans {
 
 std::unique_ptr<AttentionPlan> BuildPlan(
     cudnnHandle_t handle, const at::Tensor& query, const at::Tensor& key,
-    const at::Tensor& value, const at::Tensor& output, bool causal) {
+    const at::Tensor& value, const at::Tensor& output, bool causal, float scale) {
   auto plan = std::make_unique<AttentionPlan>();
   auto& graph = plan->graph;
   graph.set_io_data_type(fe::DataType_t::BFLOAT16)
@@ -89,9 +87,6 @@ std::unique_ptr<AttentionPlan> BuildPlan(
     return graph.tensor(fe::graph::Tensor_attributes()
         .set_uid(uid).set_dim(t.sizes().vec()).set_stride(DescriptorStrides(t)));
   };
-  const auto scale = graph.tensor(fe::graph::Tensor_attributes()
-      .set_uid(kScale).set_dim({1, 1, 1, 1}).set_stride({1, 1, 1, 1})
-      .set_data_type(fe::DataType_t::FLOAT).set_is_pass_by_value(true));
   auto options = fe::graph::SDPA_attributes().set_generate_stats(false)
       .set_causal_mask(causal).set_attn_scale(scale);
   const auto [result, stats] = graph.sdpa(
@@ -126,7 +121,7 @@ at::Tensor TryCuDnnAttention(const at::Tensor& query, const at::Tensor& key,
       (!enable_gqa && query.size(1) != key.size(1))) {
     return {};
   }
-  float factor = scale.value_or(1.0 / std::sqrt(query.size(3)));
+  const float factor = scale.value_or(1.0 / std::sqrt(query.size(3)));
   if (!std::isfinite(factor)) return {};
   const c10::OptionalDeviceGuard guard(device);
   const auto stream = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device.index()));
@@ -138,31 +133,35 @@ at::Tensor TryCuDnnAttention(const at::Tensor& query, const at::Tensor& key,
     state.stream = stream;
   }
 
-  auto output = at::empty_like(query);
+  const auto strides = query.is_non_overlapping_and_dense() ? query.strides().vec() :
+      at::infer_dense_strides(query.sizes(), query.strides());
+  auto output = at::empty_strided(query.sizes(), strides, query.options());
   PlanKey signature{};
   auto item = signature.begin();
   for (const auto* tensor : {&query, &key, &value, static_cast<const at::Tensor*>(&output)}) {
     for (const auto size : tensor->sizes()) *item++ = size;
     for (const auto stride : tensor->strides()) *item++ = stride;
   }
-  *item = causal;
+  *item++ = causal;
+  uint32_t scale_bits;
+  std::memcpy(&scale_bits, &factor, sizeof(scale_bits));
+  *item = scale_bits;
   auto plan = state.plans.find(signature);
   if (plan == state.plans.end()) {
     if (state.plans.size() == kPlanLimit) state.plans.clear();
     plan = state.plans.emplace(signature,
-        BuildPlan(state.handle, query, key, value, output, causal)).first;
+        BuildPlan(state.handle, query, key, value, output, causal, factor)).first;
   }
   if (!plan->second) return {};
   auto& compiled = *plan->second;
   at::Tensor workspace;
   if (compiled.workspace_size)
     workspace = at::empty({compiled.workspace_size}, query.options().dtype(at::kByte));
-  auto& pointers = compiled.pointers;
-  pointers[kQuery] = const_cast<void*>(query.const_data_ptr());
-  pointers[kKey] = const_cast<void*>(key.const_data_ptr());
-  pointers[kValue] = const_cast<void*>(value.const_data_ptr());
-  pointers[kOutput] = output.mutable_data_ptr();
-  pointers[kScale] = &factor;
+  std::unordered_map<int64_t, void*> pointers{
+      {kQuery, const_cast<void*>(query.const_data_ptr())},
+      {kKey, const_cast<void*>(key.const_data_ptr())},
+      {kValue, const_cast<void*>(value.const_data_ptr())},
+      {kOutput, output.mutable_data_ptr()}};
   auto status = compiled.graph.execute(
       state.handle, pointers, workspace.defined() ? workspace.mutable_data_ptr() : nullptr);
   TORCH_CHECK(status.is_good(), "cuDNN attention failed: ", status.get_message());
