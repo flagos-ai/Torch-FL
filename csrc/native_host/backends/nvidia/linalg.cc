@@ -392,10 +392,12 @@ void MatrixProduct(const at::Tensor& left, const at::Tensor& right, at::Tensor& 
 at::Tensor Scale(const at::Tensor& input, float alpha) {
   static const auto create = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtCreate);
   static const auto destroy = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtDestroy);
-  static const auto init_transform =
-      FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixTransformDescInit);
-  static const auto init_layout =
-      FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixLayoutInit);
+  static const auto make_transform =
+      FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixTransformDescCreate);
+  static const auto drop_transform =
+      FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixTransformDescDestroy);
+  static const auto make_layout = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixLayoutCreate);
+  static const auto drop_layout = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixLayoutDestroy);
   static const auto transform = FLAGOS_SDK_FUNCTION(BlasLtLibrary(), cublasLtMatrixTransform);
   using Handle = decltype(LtDescriptor<cublasLtHandle_t>(create, destroy));
   static thread_local std::map<int, Handle> handles;
@@ -407,16 +409,16 @@ at::Tensor Scale(const at::Tensor& input, float alpha) {
   }
   const auto dtype = input.scalar_type() == at::kBFloat16 ? CUDA_R_16BF : CUDA_R_32F;
   const auto size = input.numel();
-  cublasLtMatrixTransformDescOpaque_t descriptor;
-  cublasLtMatrixLayoutOpaque_t layout;
-  Check(init_transform(&descriptor, CUDA_R_32F), "cublasLtMatrixTransformDescInit");
-  Check(init_layout(&layout, dtype, size, 1, size), "cublasLtMatrixLayoutInit");
+  static thread_local const auto descriptor =
+      LtDescriptor<cublasLtMatrixTransformDesc_t>(make_transform, drop_transform, CUDA_R_32F);
+  const auto layout = LtDescriptor<cublasLtMatrixLayout_t>(
+      make_layout, drop_layout, dtype, size, 1, size);
   auto output = at::empty_strided(input.sizes(), input.strides(), input.options());
   const auto queue = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device.index()));
   constexpr float zero = 0;
-  const auto status = transform(handle->second.get(), &descriptor, &alpha,
-      input.const_data_ptr(), &layout, &zero, nullptr, nullptr,
-      output.mutable_data_ptr(), &layout, queue);
+  const auto status = transform(handle->second.get(), descriptor.get(), &alpha,
+      input.const_data_ptr(), layout.get(), &zero, nullptr, nullptr,
+      output.mutable_data_ptr(), layout.get(), queue);
   if (status == CUBLAS_STATUS_NOT_SUPPORTED || status == CUBLAS_STATUS_ARCH_MISMATCH)
     return {};
   Check(status, "cublasLtMatrixTransform");
