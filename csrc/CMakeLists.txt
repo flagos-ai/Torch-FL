@@ -607,8 +607,11 @@ endif()
 
 set(_torch_fl_link_libs torch_cpu_library torch_python_library flagos ${CUDA_RUNTIME_LIB})
 if(_flagos_is_cuda)
-  target_sources(${LIBRARY_NAME} PRIVATE native_host/backends/nvidia/flash_attention.cc)
   if(FLAGOS_NATIVE_HOSTS)
+    if(NOT "$ENV{FLAGOS_NVIDIA_FA3_SOURCE}" STREQUAL "")
+      include("${CMAKE_SOURCE_DIR}/cmake/nvidia_fa3.cmake")
+      flagos_add_nvidia_fa3(${LIBRARY_NAME} "$ENV{FLAGOS_NVIDIA_FA3_SOURCE}")
+    endif()
     target_sources(${LIBRARY_NAME} PRIVATE
       native_host/backends/nvidia/linalg.cc
       native_host/backends/nvidia/pointwise.cc

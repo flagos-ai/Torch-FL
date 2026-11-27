@@ -308,6 +308,12 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "wheel. Requires FlagGems, Cython and the platform SDK at build time. "
         "FlagGems C++ and TileOPs must be disabled",
     ),
+    "FLAGOS_NVIDIA_FA3_SOURCE": (
+        SCOPE_BUILD,
+        "Unset",
+        "Source checkout of the published NVIDIA FlashAttention 3 v1.0.3 provider, "
+        "including its CUTLASS submodule, for a Hopper Native Host wheel",
+    ),
     "FLAGOS_NATIVE_HOST_DEVICE_BUNDLE": (
         SCOPE_BUILD,
         "Unset",

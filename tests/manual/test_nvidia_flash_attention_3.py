@@ -1,109 +1,145 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compare the optional FlashAttention 3 forward route with native CUDA."""
+"""Check the Hopper FA3 wheel against a reference from stock CUDA PyTorch."""
 
 from contextlib import nullcontext
-from importlib import import_module
-from importlib.util import find_spec
-from inspect import signature
+from itertools import product
+import os
+from pathlib import Path
+import sys
 
 import pytest
 import torch
-import torch_fl  # noqa: F401
+
+
+_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _provider():
+    from flash_attn_3_nv import flash_attn_interface
+
+    return flash_attn_interface
+
+
+def _check_no_cuda_torch():
+    mappings = Path("/proc/self/maps").read_text()
+    for library in ("libtorch_cuda.so", "libc10_cuda.so"):
+        assert library not in mappings
 
 
 @pytest.fixture(scope="module")
-def flash_attention():
-    if not torch.version.cuda or not torch.cuda.is_available():
-        pytest.skip("FlashAttention 3 requires CUDA PyTorch on NVIDIA")
-    if torch.cuda.get_device_capability(0)[0] != 9:
-        pytest.skip("The FlashAttention 3 parity cases use Hopper")
-    for package in ("flash_attn_3_nv", "flash_attn_3"):
-        if find_spec(package) is not None:
-            return import_module(f"{package}.flash_attn_interface")
-    if find_spec("flash_attn_interface") is not None:
-        return import_module("flash_attn_interface")
-    pytest.skip("Install FlashAttention 3 to run CUDA parity")
+def reference():
+    path = os.environ.get("FLAGOS_FA3_CUDA_REFERENCE")
+    if not path:
+        pytest.skip("Set FLAGOS_FA3_CUDA_REFERENCE to a CUDA reference from this file")
+    import torch_fl  # noqa: F401
+
+    assert torch.version.cuda is None
+    assert not torch.ops.flagos.cpu_fallback_allowed()
+    _check_no_cuda_torch()
+    yield torch.load(path, weights_only=True)
+    _check_no_cuda_torch()
 
 
-@pytest.mark.parametrize("side_stream", [False, True], ids=["default", "side-stream"])
-@pytest.mark.parametrize("causal", [False, True], ids=["noncausal", "causal"])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "packed-varlen"])
-@torch.inference_mode()
-def test_flash_attention_3_forward(flash_attention, varlen, dtype, causal, side_stream):
+def _forward(device, varlen, dtype, causal, side_stream):
     rng = torch.Generator().manual_seed(42)
     inputs = [
         torch.randn((37, 4, 64), dtype=dtype, generator=rng),
         torch.randn((42, 2, 64), dtype=dtype, generator=rng),
         torch.randn((42, 2, 64), dtype=dtype, generator=rng),
     ]
-    if varlen:
-        attention = flash_attention.flash_attn_varlen_func
-        cu_q = torch.tensor([0, 17, 37], dtype=torch.int32)
-        cu_k = torch.tensor([0, 13, 42], dtype=torch.int32)
-    else:
-        attention = flash_attention.flash_attn_func
-        inputs = [tensor.unsqueeze(0) for tensor in inputs]
-
-    def run(device):
-        options = {"causal": causal}
+    provider = _provider()
+    options = dict(causal=causal, return_attn_probs=True)
+    with torch.Stream(device=device) if side_stream else nullcontext():
         if varlen:
+            attention = provider.flash_attn_varlen_func
             options.update(
-                cu_seqlens_q=cu_q.to(device),
-                cu_seqlens_k=cu_k.to(device),
+                cu_seqlens_q=torch.tensor([0, 17, 37], dtype=torch.int32).to(device),
+                cu_seqlens_k=torch.tensor([0, 13, 42], dtype=torch.int32).to(device),
                 max_seqlen_q=20,
                 max_seqlen_k=29,
             )
-        if "return_attn_probs" in signature(attention).parameters:
-            options["return_attn_probs"] = True
-        return attention(*(tensor.to(device) for tensor in inputs), **options)
+        else:
+            attention = provider.flash_attn_func
+            inputs = [tensor.unsqueeze(0) for tensor in inputs]
+        result = attention(*(tensor.to(device) for tensor in inputs), **options)
+        assert all(tensor.device == device for tensor in result)
+        return [(tensor.stride(), tensor.cpu()) for tensor in result]
 
-    expected = run("cuda:0")
-    cuda_stream_before = torch._C._cuda_getCurrentStream(0)
-    flagos = torch.device("flagos:0")
-    with torch.Stream(device=flagos) if side_stream else nullcontext():
-        actual = run(flagos)
 
-    assert torch._C._cuda_getCurrentStream(0) == cuda_stream_before
-    output, lse = actual
-    for result, reference in zip((output, lse), expected):
-        assert result.device == flagos
-        assert result.stride() == reference.stride()
-        assert result.dtype == reference.dtype
+def _assert_exact(actual, expected):
+    assert len(actual) == len(expected)
+    for (stride, value), (reference_stride, reference) in zip(actual, expected):
+        assert stride == reference_stride
+        assert value.dtype == reference.dtype
+        assert value.shape == reference.shape
         assert torch.equal(
-            result.cpu().contiguous().view(torch.uint8),
-            reference.cpu().contiguous().view(torch.uint8),
+            value.contiguous().view(torch.uint8),
+            reference.contiguous().view(torch.uint8),
         )
 
 
+@pytest.mark.parametrize("side_stream", [False, True], ids=["default", "side-stream"])
+@pytest.mark.parametrize("causal", [False, True], ids=["noncausal", "causal"])
+@pytest.mark.parametrize("dtype", _DTYPES)
+@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "packed-varlen"])
 @torch.inference_mode()
-def test_flash_attention_3_keeps_inputs_alive_across_streams(flash_attention):
-    from torch_fl.flagos._streams import get_raw_stream
+def test_flash_attention_3_forward(reference, varlen, dtype, causal, side_stream):
+    device = torch.device("flagos:0")
+    result = _forward(device, varlen, dtype, causal, side_stream)
+    _assert_exact(result, reference[(varlen, str(dtype), causal, side_stream)])
 
-    attention = flash_attention.flash_attn_func
-    shape = (1, 128, 4, 64)
+
+def _lifetime_inputs():
     rng = torch.Generator().manual_seed(91)
-    inputs = [torch.randn(shape, dtype=torch.bfloat16, generator=rng) for _ in range(3)]
-    expected = attention(*(tensor.cuda() for tensor in inputs)).cpu()
-    flagos = torch.device("flagos:0")
+    return [
+        torch.randn((1, 128, 4, 64), dtype=torch.bfloat16, generator=rng)
+        for _ in range(3)
+    ]
+
+
+@torch.inference_mode()
+def test_flash_attention_3_keeps_inputs_alive_across_streams(reference):
+    device = torch.device("flagos:0")
     main = torch.accelerator.current_stream(0)
-    side = torch.Stream(device=flagos)
-    transferred = [tensor.to(flagos) for tensor in inputs]
+    side = torch.Stream(device=device)
+    inputs = [tensor.to(device) for tensor in _lifetime_inputs()]
+    scratch = torch.ones((4096, 4096), device=device, dtype=torch.bfloat16)
     side.wait_stream(main)
     with side:
-        previous = torch._C._cuda_getCurrentStream(0)
-        torch.cuda.set_stream(torch.cuda.ExternalStream(get_raw_stream(0), device=0))
-        try:
-            torch.cuda._sleep(20_000_000)
-        finally:
-            torch.cuda._set_stream_by_id(*previous)
-        actual = attention(*transferred)
-    del transferred
+        delayed = scratch
+        for _ in range(4):
+            delayed = scratch @ delayed
+        actual = _provider().flash_attn_func(*inputs)
+    del inputs
     replacements = [
-        torch.zeros(shape, dtype=torch.bfloat16, device=flagos) for _ in inputs
+        torch.zeros((1, 128, 4, 64), dtype=torch.bfloat16, device=device)
+        for _ in range(3)
     ]
     main.wait_stream(side)
-    assert torch.equal(actual.cpu(), expected)
+    _assert_exact([(actual.stride(), actual.cpu())], reference["lifetime"])
     assert all(not tensor.cpu().any() for tensor in replacements)
+
+
+@torch.inference_mode()
+def _write_reference(output):
+    assert torch.version.cuda and torch.cuda.get_device_capability(0)[0] == 9
+    device = torch.device("cuda:0")
+    values = {
+        (varlen, str(dtype), causal, side): _forward(
+            device, varlen, dtype, causal, side
+        )
+        for varlen, dtype, causal, side in product(
+            (False, True), _DTYPES, (False, True), (False, True)
+        )
+    }
+    lifetime = _provider().flash_attn_func(
+        *(tensor.to(device) for tensor in _lifetime_inputs())
+    )
+    values["lifetime"] = [(lifetime.stride(), lifetime.cpu())]
+    torch.save(values, output)
+
+
+if __name__ == "__main__":
+    _write_reference(Path(sys.argv[1]))

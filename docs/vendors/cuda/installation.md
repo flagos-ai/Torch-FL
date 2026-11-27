@@ -97,27 +97,37 @@ The Native Host build without vendor PyTorch kernels serves single-rank
 collectives on local device buffers. Multi-rank FlagOS groups in this build
 require FlagCX.
 
-The optional FlashAttention 3 package supplies the CUDA forward
-operator and its CUDA PyTorch runtime dependencies.
-The CUDA PyTorch used with such a wheel must share the build's PyTorch release,
-source revision, and C++ ABI.
-The dispatcher bridges the package's dense and packed variable-length forward
-APIs on FlagOS tensors after checking its registered forward and CUDA schemas.
-Use the installed package's usual Python API with tensors on `flagos`.
-
-The parity suite exercises FP16 and BF16, causal and non-causal attention, and
-the default and a separate FlagOS stream. The forward route runs the CUDA kernel
-on the active FlagOS stream and uses the CUDA runtime to copy the result into
-FlagOS-owned storage on that stream. The supported scope is eager forward
-inference with read-only inputs.
-The vendor kernel supplies the packed variable-length FlashAttention 3 ABI and
-rounding required by these inference paths. Replace the bridge when a published
-FlagGems route passes the same output and performance checks for this ABI.
-
-Run the parity suite on Hopper with CUDA PyTorch and FlashAttention 3 installed.
+An optional Hopper build compiles the published NVIDIA FlashAttention 3 v1.0.3
+forward kernels and their CUTLASS headers. The generated host calls those
+kernels with FlagOS tensor storage, its allocator and its current stream. The
+wheel uses CPU PyTorch and links the CUDA runtime. The supported scope is
+read-only FP16 and BF16 forward inference, including dense and packed
+variable-length attention.
 
 ```bash
-FLAGOS_LOG=fallback python -m pytest -q tests/manual/test_nvidia_flash_attention_3.py
+git clone --depth 1 --branch v1.0.3 --recurse-submodules \
+  https://github.com/alihassanijr/flash_attn_3_nv.git
+FLAGOS_ACCELERATOR=nvidia FLAGOS_BUILD_NATIVE_HOST=1 \
+  FLAGOS_NVIDIA_FA3_SOURCE="$PWD/flash_attn_3_nv" \
+  python -m build --wheel --no-isolation
+```
+
+The wheel supplies the `flash_attn_3_nv` Python forward API when Torch-FL
+initializes under CPU PyTorch. Import PyTorch and Torch-FL before using that API
+with tensors on `flagos`. On a stock CUDA PyTorch installation, the original
+NVIDIA provider remains the CUDA reference.
+
+Generate a reference on Hopper in the CUDA PyTorch environment.
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python tests/manual/test_nvidia_flash_attention_3.py /tmp/fa3-cuda.pt
+```
+
+Run the comparisons in the CPU PyTorch environment with the Torch-FL wheel.
+
+```bash
+FLAGOS_DISABLE_CPU_FALLBACK=1 FLAGOS_FA3_CUDA_REFERENCE=/tmp/fa3-cuda.pt \
+  python -m pytest -q tests/manual/test_nvidia_flash_attention_3.py
 ```
 
 ## Verification
