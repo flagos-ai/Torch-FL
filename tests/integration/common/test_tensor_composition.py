@@ -5,6 +5,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
+from torch_fl._platform import detect_platform
+
+
+requires_nvidia = pytest.mark.skipif(
+    detect_platform() != "cuda", reason="requires NVIDIA's strict GPU routes"
+)
 
 
 @pytest.mark.anyplatform
@@ -41,7 +47,7 @@ def test_zero_pad_strided_tensor(dtype):
     torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 
 
-@pytest.mark.nvidia
+@requires_nvidia
 @pytest.mark.flaggems_python
 def test_equal_and_mul_out_without_cpu_fallback():
     source = torch.arange(24, dtype=torch.float32).reshape(4, 6)[:, ::2]
@@ -60,7 +66,7 @@ def test_equal_and_mul_out_without_cpu_fallback():
         torch.ops.flagos.strict_host_routes(not was_allowed)
 
 
-@pytest.mark.nvidia
+@requires_nvidia
 @pytest.mark.flaggems_python
 def test_float_arithmetic_accepts_cpu_scalar_tensors():
     host = torch.linspace(-2, 2, 30).reshape(5, 6)
@@ -83,7 +89,7 @@ def test_float_arithmetic_accepts_cpu_scalar_tensors():
         torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 
 
-@pytest.mark.nvidia
+@requires_nvidia
 @pytest.mark.flaggems_python
 def test_prod_preserves_large_long_values_without_cpu_fallback():
     host = torch.tensor([[2**30 + 1, 3, 5], [2**27 + 1, 11, 17]])
@@ -99,7 +105,7 @@ def test_prod_preserves_large_long_values_without_cpu_fallback():
     torch.testing.assert_close(empty.cpu(), host[:, :0].prod(dim=-1))
 
 
-@pytest.mark.nvidia
+@requires_nvidia
 @pytest.mark.flaggems_python
 def test_index_selection_and_advanced_indexing_without_cpu_fallback():
     host = torch.arange(60).reshape(3, 4, 5)
@@ -154,7 +160,7 @@ def test_linear_solve_accepts_vector_and_matrix_rhs():
         torch.testing.assert_close(actual.cpu(), expected)
 
 
-@pytest.mark.nvidia
+@requires_nvidia
 @pytest.mark.flaggems_python
 def test_index_copy_preserves_last_write_without_cpu_fallback():
     host = torch.arange(24, dtype=torch.bfloat16).reshape(4, 6).t()
@@ -178,7 +184,7 @@ def test_index_copy_preserves_last_write_without_cpu_fallback():
     torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
 
 
-@pytest.mark.nvidia
+@requires_nvidia
 @pytest.mark.flaggems_python
 def test_small_addmm_writes_to_the_supplied_output_on_device():
     bias = torch.arange(4, dtype=torch.bfloat16)
@@ -197,7 +203,7 @@ def test_small_addmm_writes_to_the_supplied_output_on_device():
     )
 
 
-@pytest.mark.nvidia
+@requires_nvidia
 @pytest.mark.flaggems_python
 @pytest.mark.parametrize("layout", [torch.contiguous_format, torch.channels_last])
 def test_nearest_exact_uses_device_indices(layout):
