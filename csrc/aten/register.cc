@@ -334,8 +334,8 @@ bool WrapperEqual(const at::Tensor& self, const at::Tensor& other) {
   return at::eq(self, other).all().item<bool>();
 }
 
-at::Tensor& WrapperProdOut(const at::Tensor& self, int64_t dim, bool keepdim,
-                          std::optional<at::ScalarType> dtype, at::Tensor& out) {
+at::Tensor& DeviceProdDimOut(const at::Tensor& self, int64_t dim, bool keepdim,
+                            std::optional<at::ScalarType> dtype, at::Tensor& out) {
   TORCH_CHECK(self.device() == out.device(), "prod(): output device must match the input");
   TORCH_CHECK(!dtype || *dtype == out.scalar_type(),
               "prod(): dtype must match the output tensor");
@@ -925,7 +925,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
 #endif
 #if defined(FLAGOS_ACCEL_CUDA)
   m.impl("equal", WrapperEqual);
-  m.impl("prod.int_out", WrapperProdOut);
+  m.impl("prod.int_out", DeviceProdDimOut);
 #endif
 
 #if defined(USE_TSINGMICRO)
