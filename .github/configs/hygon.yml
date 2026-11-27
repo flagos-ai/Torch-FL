@@ -70,9 +70,10 @@ container_options: >-
   --cap-add=SYS_PTRACE
 
 timeout_minutes: 90
-# The ordinary suites and AOT wheel build used almost 90 minutes in run
-# 44884257846. Allow time for native-host conformance and evidence upload.
-integration_timeout_minutes: 105
+# Run 45939018602 reached 31 of 35 common regression cases at the 105-minute
+# job limit. Allow time for the remaining eager and Native Host conformance
+# suites and their evidence uploads.
+integration_timeout_minutes: 135
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-dcu
 
