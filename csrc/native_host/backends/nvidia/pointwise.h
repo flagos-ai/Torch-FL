@@ -11,7 +11,7 @@ namespace c10 { template <typename T> class ArrayRef; }
 
 namespace flagos::nvidia {
 
-enum class PointwiseOp { PowScalar, Reciprocal, Rsqrt, Silu };
+enum class PointwiseOp { PowScalar, Reciprocal, Rsqrt, Silu, Sqrt };
 
 at::Tensor TryPointwise(PointwiseOp op, const at::Tensor& input,
                        float scalar = 0);

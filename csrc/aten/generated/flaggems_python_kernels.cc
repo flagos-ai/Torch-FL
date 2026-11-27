@@ -4839,6 +4839,11 @@ at::Tensor SpecialXlog1pyKernelPython(const at::Tensor & self, const at::Tensor 
 
 static TypedSourceSlot SqrtFnSource("aten::sqrt", "flag_gems.sqrt", "edf09cbc8203c2207f87e0ecf81d088987ddd6a38e09432e49978c0be644e891", "{\"abi\": \"edf09cbc8203c2207f87e0ecf81d088987ddd6a38e09432e49978c0be644e891\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sqrt\", \"op\": \"aten::sqrt\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SqrtKernelPython(const at::Tensor & self) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = ::flagos::nvidia::TryPointwise(
+      ::flagos::nvidia::PointwiseOp::Sqrt, self); result.defined())
+    return result;
+#endif
   auto result = SqrtFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sqrt", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;

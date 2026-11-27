@@ -1367,12 +1367,13 @@ def gen_flaggems_python_kernel(
                 f"    return {returned};\n"
                 "#endif\n"
             )
-        elif op in ("pow.Scalar", "reciprocal", "rsqrt", "silu"):
+        elif op in ("pow.Scalar", "reciprocal", "rsqrt", "silu", "sqrt"):
             operation = {
                 "pow.Scalar": "PowScalar",
                 "reciprocal": "Reciprocal",
                 "rsqrt": "Rsqrt",
                 "silu": "Silu",
+                "sqrt": "Sqrt",
             }[op]
             operands = "self"
             if op == "pow.Scalar":
@@ -2610,6 +2611,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         ("reciprocal", "functional_pure", set()),
         ("rsqrt", "functional_pure", set()),
         ("silu", "functional_pure", set()),
+        ("sqrt", "functional_pure", set()),
         ("full", "factory", {"size", "fill_value"}),
         ("index_copy_", "inplace", set()),
         ("nll_loss_backward", "functional_pure", set()),
@@ -2662,6 +2664,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "reciprocal": "reciprocal",
                 "rsqrt": "rsqrt",
                 "silu": "silu",
+                "sqrt": "sqrt",
                 "full": "full",
                 "index_copy_": "index_copy_",
                 "nll_loss_backward": "nll_loss_backward",

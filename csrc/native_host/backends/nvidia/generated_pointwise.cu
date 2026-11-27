@@ -92,6 +92,7 @@ __device__ float Evaluate(float value, float scalar) {
   if constexpr (Op == PointwiseOp::Reciprocal) return __frcp_rn(value);
   if constexpr (Op == PointwiseOp::Rsqrt) return rsqrtf(value);
   if constexpr (Op == PointwiseOp::Silu) return __fdiv_rn(value, 1.0f + expf(-value));
+  if constexpr (Op == PointwiseOp::Sqrt) return sqrtf(value);
 }
 
 template <PointwiseOp Op, typename T>
@@ -251,7 +252,9 @@ cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* 
                             int64_t size, float scalar, cudaStream_t stream) {
   constexpr int threads = 256;
   const auto blocks = std::min<int64_t>(65535, (size - 1) / threads + 1);
-  if (bf16) {
+  if (bf16 && op == PointwiseOp::Sqrt) {
+    Launch<PointwiseOp::Sqrt, __nv_bfloat16>(blocks, threads, stream, input, output, size, scalar);
+  } else if (bf16) {
     Launch<PointwiseOp::Silu, __nv_bfloat16>(blocks, threads, stream, input, output, size, scalar);
   } else {
     switch (op) {
@@ -266,6 +269,9 @@ cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* 
         break;
       case PointwiseOp::Silu:
         Launch<PointwiseOp::Silu, float>(blocks, threads, stream, input, output, size, scalar);
+        break;
+      case PointwiseOp::Sqrt:
+        Launch<PointwiseOp::Sqrt, float>(blocks, threads, stream, input, output, size, scalar);
         break;
     }
   }

@@ -23,6 +23,7 @@ NVIDIA_POINTWISE = {
     "Reciprocal": "__frcp_rn(value)",
     "Rsqrt": "rsqrtf(value)",
     "Silu": "__fdiv_rn(value, 1.0f + expf(-value))",
+    "Sqrt": "sqrtf(value)",
 }
 
 NVIDIA_CUDA_POINTWISE = """\
@@ -276,7 +277,9 @@ cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* 
                             int64_t size, float scalar, cudaStream_t stream) {
   constexpr int threads = 256;
   const auto blocks = std::min<int64_t>(65535, (size - 1) / threads + 1);
-  if (bf16) {
+  if (bf16 && op == PointwiseOp::Sqrt) {
+    Launch<PointwiseOp::Sqrt, __nv_bfloat16>(blocks, threads, stream, input, output, size, scalar);
+  } else if (bf16) {
     Launch<PointwiseOp::Silu, __nv_bfloat16>(blocks, threads, stream, input, output, size, scalar);
   } else {
     switch (op) {

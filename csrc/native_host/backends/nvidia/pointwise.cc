@@ -37,9 +37,11 @@ cudaError_t LaunchChannelNorm(const void* input, void* output, int groups,
 at::Tensor TryPointwise(PointwiseOp op, const at::Tensor& input, float scalar) {
   const auto dtype = input.scalar_type();
   const bool bf16 = dtype == at::kBFloat16;
+  const bool sdk_dtype = dtype == at::kFloat ||
+      (bf16 && (op == PointwiseOp::Silu || op == PointwiseOp::Sqrt));
   if (!input.device().is_privateuseone() || input.layout() != at::kStrided ||
       input.is_neg() || input.has_names() || !input.is_non_overlapping_and_dense() ||
-      (dtype != at::kFloat && !(bf16 && op == PointwiseOp::Silu))) {
+      !sdk_dtype) {
     return {};
   }
   const c10::OptionalDeviceGuard guard(input.device());
