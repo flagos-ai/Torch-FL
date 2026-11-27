@@ -3313,10 +3313,13 @@ static TypedSourceSlot MulTensorFnSource("aten::mul.Tensor", "flag_gems.mul", "8
 at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
   const auto& tensor = self.device().is_cpu() ? other : self;
   const auto& scalar = self.device().is_cpu() ? self : other;
+  const auto dtype = tensor.scalar_type();
+  const bool low_precision = dtype == at::kHalf || dtype == at::kBFloat16;
   if (tensor.device().is_privateuseone() &&
-      (tensor.scalar_type() == at::kHalf || tensor.scalar_type() == at::kBFloat16) &&
+      (low_precision || dtype == at::kFloat) &&
       scalar.device().is_cpu() && scalar.dim() == 0 && scalar.is_floating_point() &&
-      (!scalar.unsafeGetTensorImpl()->is_wrapped_number() || !tensor.is_contiguous())) {
+      (!scalar.unsafeGetTensorImpl()->is_wrapped_number() ||
+       (low_precision && !tensor.is_contiguous()))) {
     const auto output_dtype = at::result_type(tensor, scalar);
     const auto accumulation = output_dtype == at::kDouble ? at::kDouble : at::kFloat;
     auto result = at::mul(tensor.to(accumulation), scalar.item()).to(output_dtype);

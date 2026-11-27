@@ -131,18 +131,18 @@ class TestMulPythonNumberOperand:
 
     @pytest.mark.nvidia
     @pytest.mark.flaggems_python
-    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
     @pytest.mark.parametrize("layout", ["dense", "transpose"])
-    @pytest.mark.parametrize("explicit_tensor", [False, True])
-    def test_host_scalar_preserves_precision(self, dtype, layout, explicit_tensor):
+    @pytest.mark.parametrize("scalar_dtype", [None, torch.float32, torch.float64])
+    def test_host_scalar_preserves_precision(self, dtype, layout, scalar_dtype):
         values = torch.linspace(-5, 5, 63, dtype=dtype).reshape(7, 9)
         device_values = values.to(DEVICE)
         if layout == "transpose":
             values = values.t()
             device_values = device_values.t()
         scale = 1.01
-        if explicit_tensor:
-            scale = torch.tensor(scale, dtype=torch.float64)
+        if scalar_dtype is not None:
+            scale = torch.tensor(scale, dtype=scalar_dtype)
         expected = values * scale
         was_allowed = torch.ops.flagos.cpu_fallback_allowed()
         torch.ops.flagos.strict_host_routes(True)
