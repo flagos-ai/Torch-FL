@@ -1393,6 +1393,16 @@ def gen_flaggems_python_kernel(
             if op == "pow.Scalar":
                 prelude += "  }\n"
             prelude += "#endif\n"
+        elif op == "convolution_overrideable":
+            prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (!transposed && input.dim() == 5 && input.scalar_type() == at::kBFloat16) {\n"
+                '    auto output = CallPythonOp_Generic("torch_fl.accelerator.nvidia._cudnn.convolution",\n'
+                "        {input, weight, bias, stride, padding, dilation, transposed, output_padding, groups});\n"
+                "    if (output.defined()) return output;\n"
+                "  }\n"
+                "#endif\n"
+            )
         elif op == "add.Tensor":
             prelude += (
                 "#if defined(USE_DCU)\n"
@@ -1540,6 +1550,10 @@ def gen_flaggems_python_kernel(
         elif op == "div.Tensor":
             # Match GPU true division's rounding for a CPU scalar divisor.
             prelude += (
+                "#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)\n"
+                "  if (auto result = ::flagos::nvidia::TryDivide(self, other); result.defined())\n"
+                "    return result;\n"
+                "#endif\n"
                 "#if defined(FLAGOS_ACCEL_CUDA)\n"
                 "  if (self.device().is_privateuseone() && self.is_floating_point() &&\n"
                 "      other.device().is_cpu() && other.dim() == 0 && other.is_floating_point()) {\n"
@@ -2518,6 +2532,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         ("addmm", "functional_pure", {"beta", "alpha"}),
         ("addmm.out", "out_variant_gemskwout", {"beta", "alpha", "out"}),
         ("constant_pad_nd", "functional_pure", set()),
+        ("convolution_overrideable", "functional_pure", set()),
         ("mean.dim", "functional_pure", {"dtype"}),
         ("linalg_vector_norm", "functional_pure", {"dtype"}),
         ("mm.out", "out_variant_gemskwout", {"out"}),
@@ -2568,6 +2583,7 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "addmm": "addmm",
                 "addmm.out": "addmm_out",
                 "constant_pad_nd": "constant_pad_nd",
+                "convolution_overrideable": "convolution_overrideable",
                 "mean.dim": "mean_dim",
                 "linalg_vector_norm": "vector_norm",
                 "mm.out": "mm_out",

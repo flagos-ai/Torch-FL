@@ -3,6 +3,7 @@
 
 #include "pointwise.h"
 
+#include <ATen/TensorIterator.h>
 #include <ATen/ops/empty_like.h>
 #include <c10/core/DeviceGuard.h>
 #include <cuda_runtime_api.h>
@@ -12,6 +13,8 @@ namespace flagos::nvidia {
 
 cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* output,
                             const int64_t size, float scalar, cudaStream_t stream);
+cudaError_t LaunchDivide(const float* left, const float* right, float* out,
+                         int64_t size, DivisionLayout layout, cudaStream_t stream);
 
 at::Tensor TryPointwise(PointwiseOp op, const at::Tensor& input, float scalar) {
   const auto dtype = input.scalar_type();
@@ -30,6 +33,35 @@ at::Tensor TryPointwise(PointwiseOp op, const at::Tensor& input, float scalar) {
   TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK pointwise launch failed: ",
               cudaGetErrorString(status));
   return output;
+}
+
+at::Tensor TryDivide(const at::Tensor& left, const at::Tensor& right) {
+  if (left.scalar_type() != at::kFloat || right.scalar_type() != at::kFloat ||
+      !left.device().is_privateuseone() || left.device() != right.device() ||
+      left.layout() != at::kStrided || right.layout() != at::kStrided ||
+      left.is_neg() || right.is_neg() || left.has_names() || right.has_names()) {
+    return {};
+  }
+  auto iter = at::TensorIterator::binary_float_op(at::Tensor(), left, right);
+  if (iter.numel() == 0) return iter.output();
+  if (iter.ndim() > DivisionLayout::max_dimensions) return {};
+  DivisionLayout layout{};
+  if (!iter.is_contiguous()) {
+    layout.dimensions = iter.ndim();
+    for (int dim = 0; dim < iter.ndim(); ++dim) {
+      layout.sizes[dim] = iter.shape()[dim];
+      for (int arg = 0; arg < 3; ++arg)
+        layout.strides[arg][dim] = iter.strides(arg)[dim] / sizeof(float);
+    }
+  }
+  const c10::OptionalDeviceGuard guard(left.device());
+  const auto queue = reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(left.device().index()));
+  const auto status = LaunchDivide(
+      static_cast<const float*>(iter.data_ptr(1)), static_cast<const float*>(iter.data_ptr(2)),
+      static_cast<float*>(iter.data_ptr(0)), iter.numel(), layout, queue);
+  TORCH_CHECK(status == cudaSuccess, "NVIDIA SDK divide launch failed: ",
+              cudaGetErrorString(status));
+  return iter.output();
 }
 
 }  // namespace flagos::nvidia

@@ -613,6 +613,9 @@ if(_flagos_is_cuda)
       native_host/backends/nvidia/linalg.cc
       native_host/backends/nvidia/pointwise.cc
       native_host/backends/nvidia/generated_pointwise.cu)
+    # Carry device binaries for both NVIDIA hardware lanes. A CUDA minor
+    # compatibility driver can load these without compiling newer-toolkit PTX.
+    set_property(TARGET ${LIBRARY_NAME} APPEND PROPERTY CUDA_ARCHITECTURES 80-real 90-real)
     list(APPEND _torch_fl_link_libs ${CMAKE_DL_LIBS})
   endif()
 endif()

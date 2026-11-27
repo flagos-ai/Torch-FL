@@ -32,6 +32,27 @@ void Launch(int blocks, int threads, cudaStream_t stream, const void* input,
       static_cast<const T*>(input), static_cast<T*>(output), size, scalar);
 }
 
+template <bool Dense>
+__global__ void Divide(const float* left, const float* right, float* result,
+                       int64_t count, DivisionLayout layout) {
+  const auto step = int64_t(blockDim.x) * gridDim.x;
+  for (auto i = int64_t(blockDim.x) * blockIdx.x + threadIdx.x; i < count; i += step) {
+    if constexpr (Dense) {
+      result[i] = __fdiv_rn(left[i], right[i]);
+    } else {
+      int64_t offsets[3]{};
+      auto linear = i;
+      for (int dim = 0; dim < layout.dimensions; ++dim) {
+        const auto coordinate = linear % layout.sizes[dim];
+        linear /= layout.sizes[dim];
+        for (int argument = 0; argument < 3; ++argument)
+          offsets[argument] += coordinate * layout.strides[argument][dim];
+      }
+      result[offsets[0]] = __fdiv_rn(left[offsets[1]], right[offsets[2]]);
+    }
+  }
+}
+
 }  // namespace
 
 cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* output,
@@ -55,6 +76,18 @@ cudaError_t LaunchPointwise(PointwiseOp op, bool bf16, const void* input, void* 
         Launch<PointwiseOp::Silu, float>(blocks, threads, stream, input, output, size, scalar);
         break;
     }
+  }
+  return cudaGetLastError();
+}
+
+cudaError_t LaunchDivide(const float* left, const float* right, float* out,
+                         int64_t size, DivisionLayout layout, cudaStream_t stream) {
+  constexpr int threads = 256;
+  const auto blocks = std::min<int64_t>(65535, (size - 1) / threads + 1);
+  if (layout.dimensions == 0) {
+    Divide<true><<<blocks, threads, 0, stream>>>(left, right, out, size, layout);
+  } else {
+    Divide<false><<<blocks, threads, 0, stream>>>(left, right, out, size, layout);
   }
   return cudaGetLastError();
 }

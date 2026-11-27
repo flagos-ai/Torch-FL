@@ -1471,6 +1471,13 @@ at::Tensor ConstantPadNdKernelPython(const at::Tensor & self, at::IntArrayRef pa
 
 static TypedSourceSlot ConvolutionOverrideableFnSource("aten::convolution_overrideable", "flag_gems.convolution_overrideable", "42b174b4f4653ff1481ef845341543f84533a70c90020cafe3f6c6e73c89c520", "{\"abi\": \"42b174b4f4653ff1481ef845341543f84533a70c90020cafe3f6c6e73c89c520\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.convolution_overrideable\", \"op\": \"aten::convolution_overrideable\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ConvolutionOverrideableKernelPython(const at::Tensor & input, const at::Tensor & weight, const ::std::optional<at::Tensor> & bias, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool transposed, at::IntArrayRef output_padding, int64_t groups) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (!transposed && input.dim() == 5 && input.scalar_type() == at::kBFloat16) {
+    auto output = CallPythonOp_Generic("torch_fl.accelerator.nvidia._cudnn.convolution",
+        {input, weight, bias, stride, padding, dilation, transposed, output_padding, groups});
+    if (output.defined()) return output;
+  }
+#endif
   auto result = ConvolutionOverrideableFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.convolution_overrideable", {input, weight, bias, stride, padding, dilation, transposed, output_padding, groups}); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(dilation), static_cast<const bool&>(transposed), static_cast<const at::IntArrayRef&>(output_padding), static_cast<const int64_t&>(groups));
   UnboxToFlagos(result);
   return result;
@@ -1681,6 +1688,10 @@ at::Tensor DivScalarModeKernelPython(const at::Tensor & self, const at::Scalar &
 
 static TypedSourceSlot DivTensorFnSource("aten::div.Tensor", "flag_gems.true_divide", "d5196e9829770e9ea743df195e4a82aaf91d1b83d51bf46cb849724582875754", "{\"abi\": \"d5196e9829770e9ea743df195e4a82aaf91d1b83d51bf46cb849724582875754\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.true_divide\", \"op\": \"aten::div.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DivTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
+#if defined(FLAGOS_ACCEL_CUDA) && defined(FLAGOS_NATIVE_HOSTS)
+  if (auto result = ::flagos::nvidia::TryDivide(self, other); result.defined())
+    return result;
+#endif
 #if defined(FLAGOS_ACCEL_CUDA)
   if (self.device().is_privateuseone() && self.is_floating_point() &&
       other.device().is_cpu() && other.dim() == 0 && other.is_floating_point()) {
