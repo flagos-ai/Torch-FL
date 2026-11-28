@@ -10,7 +10,8 @@ from typing import Any, Optional
 
 import pytest
 
-PATH = Path(__file__).resolve().parents[2] / "torch_fl/native_host/compiler/bindings.py"
+PACKAGE = Path(importlib.util.find_spec("torch_fl").origin).parent
+PATH = PACKAGE / "native_host/compiler/bindings.py"
 SPEC = importlib.util.spec_from_file_location("scalar_bindings", PATH)
 bindings = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bindings)

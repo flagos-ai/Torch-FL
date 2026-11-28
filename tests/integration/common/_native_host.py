@@ -94,14 +94,20 @@ def run_native_host_case(case, pytestconfig):
         [
             sys.executable,
             "-c",
-            "import runpy, sys\n"
+            "import os, runpy, sys\n"
+            "from contextlib import nullcontext\n"
             "from pathlib import Path\n"
             "package = Path(sys.argv[1]).resolve()\n"
             "sys.path.insert(0, str(package.parent))\n"
-            "import torch_fl\n"
-            "assert Path(torch_fl.__file__).resolve().parent == package\n"
-            "assert torch_fl.native_host._model_runtime() is not None\n"
-            "runpy.run_path(sys.argv[2])[sys.argv[3]]()\n",
+            "measurement = nullcontext()\n"
+            "if os.environ.get('FLAGCICD_NATIVE_HOST_COVERAGE_DIR'):\n"
+            "    from flagcicd_coverage import native_host_coverage\n"
+            "    measurement = native_host_coverage(package)\n"
+            "with measurement:\n"
+            "    import torch_fl\n"
+            "    assert Path(torch_fl.__file__).resolve().parent == package\n"
+            "    assert torch_fl.native_host._model_runtime() is not None\n"
+            "    runpy.run_path(sys.argv[2])[sys.argv[3]]()\n",
             str(package),
             case.__code__.co_filename,
             case.__name__,

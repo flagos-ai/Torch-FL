@@ -307,6 +307,21 @@ jobs:
           fi
           python .github/scripts/run_integration_tests.py
 
+      - name: Measure selected NVIDIA wheel unit tests
+        if: inputs.platform == 'nvidia' && steps.coverage-setup.outcome == 'success' && steps.integration-tests.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          FLAGCICD_NVIDIA_UNIT_PROBE: '1'
+          FLAGCICD_TEST_GROUP: NVIDIA installed-wheel unit probe
+          TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
+        run: >-
+          cd "$INTEGRATION_WORKDIR" &&
+          PYTHONPATH="$GITHUB_WORKSPACE/.github/scripts/pytest_reporting${PYTHONPATH:+:$PYTHONPATH}"
+          PYTEST_PLUGINS=flagcicd_coverage
+          python -m pytest -q --tb=short -p no:cacheprovider
+          tests/unit/test_native_scalar_bindings.py tests/unit/test_tileops_runtime.py
+
       # Preserve failed sessions too; reporting never changes the test verdict.
       - name: Merge pytest reports
         id: merge-report

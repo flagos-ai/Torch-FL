@@ -112,14 +112,251 @@ def _group(name, file):
     return {"name": name, "command": f"{PYTHON} -m pytest {file} -q"}
 
 
-def _merge(reports, outcome="success"):
+def _merge(reports, outcome="success", platform="cuda"):
     output = reports.parent / "coverage.json"
-    REPORTING.merge(reports, output, "cuda", outcome, "flagos-ai/Torch-FL", "a" * 40)
+    REPORTING.merge(reports, output, platform, outcome, "flagos-ai/Torch-FL", "a" * 40)
     return json.loads(output.read_text())
 
 
 def _metadata(reports):
     return json.loads((reports / "metadata.json").read_text())
+
+
+@pytest.fixture
+def native_host_wheel(tmp_path):
+    workdir, reports, environment = _setup(tmp_path)
+    runner_temp = tmp_path / "runner"
+    install = runner_temp / "torch-fl-native-host-install"
+    package = install / "torch_fl"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "from types import SimpleNamespace\n"
+        "native_host = SimpleNamespace(_model_runtime=lambda: True)\n"
+    )
+    (package / "model.py").write_text(
+        "def common():\n"
+        "    return 'common'\n"
+        "def eager():\n"
+        "    return 'eager'\n"
+        "def sample():\n"
+        "    return 'sample'\n"
+    )
+    evidence = runner_temp / "torch-fl-native-host-evidence"
+    evidence.mkdir()
+    (evidence / "wheel.json").write_text(
+        json.dumps({"package": str(package), "sha256": "1" * 64, "plan": {}})
+    )
+    environment.update(
+        RUNNER_TEMP=str(runner_temp), REPORT_PLATFORM="nvidia", CI_PLAN_CONTEXT=""
+    )
+    return workdir, reports, environment, install
+
+
+def test_nvidia_pilot_collects_eager_and_common_child_in_their_own_wheel(
+    native_host_wheel,
+):
+    workdir, reports, environment, install = native_host_wheel
+    helper = ROOT / "tests/integration/common/_native_host.py"
+    sample = (
+        f"import sys; sys.path.insert(0, {str(install)!r}); "
+        "from torch_fl import model; model.sample()"
+    )
+    (workdir / "torch.py").touch()
+    (workdir / "test_common.py").write_text(
+        "import runpy, subprocess, sys\n"
+        "from torch_fl import model\n"
+        "def common_child():\n"
+        "    assert model.common() == 'common'\n"
+        "def test_common(pytestconfig):\n"
+        "    assert model.choose(True) == 'yes'\n"
+        f"    runpy.run_path({str(helper)!r})['run_native_host_case'](common_child, pytestconfig)\n"
+        f"    subprocess.run([sys.executable, '-c', {sample!r}], check=True)\n"
+    )
+    (workdir / "test_eager.py").write_text(
+        "from torch_fl import model\ndef test_eager(): assert model.eager() == 'eager'\n"
+    )
+    common = {
+        **_group("Common regression", "test_common.py"),
+        "group_id": "common_regression",
+    }
+    eager = {
+        **_group("Eager operator regression", "test_eager.py"),
+        "group_id": "eager_ops_regression",
+        "environment": {
+            "PYTHONPATH": os.pathsep.join((str(install), environment["PYTHONPATH"]))
+        },
+    }
+    result = _run(environment, [common, eager])
+    assert result.returncode == 0, result.stdout + result.stderr
+    ordinary = _merge(reports, platform="nvidia")
+    native = reports / "native-host"
+    report = json.loads((native / "coverage-native-host.json").read_text())
+    metadata = json.loads((native / "native-host-metadata.json").read_text())
+    assert metadata["complete"]
+    assert metadata["wheel_variant"] == "native-host"
+    assert metadata["wheel_sha256"] == "1" * 64
+    assert {s["group"] for s in metadata["sessions"]} == {
+        "Common regression",
+        "Eager operator regression",
+    }
+    assert len(metadata["sessions"]) == 2
+    assert report["files"]["torch_fl/model.py"]["executed_lines"] == [1, 2, 3, 4, 5]
+    assert report["files"]["torch_fl/model.py"]["missing_lines"] == [6]
+    assert report["files"]["torch_fl/__init__.py"]["executed_lines"] == [1, 2]
+    assert ordinary["files"]["torch_fl/model.py"]["missing_lines"] == [4, 7]
+    assert [s["group"] for s in _metadata(reports)["sessions"]] == ["Common regression"]
+    assert list(reports.rglob("metadata.json")) == [reports / "metadata.json"]
+
+    warning = "Common regression: Native-host child uses a different wheel"
+    (native / "collection-warnings.txt").write_text(f"{warning}\n")
+    _merge(reports, platform="nvidia")
+    metadata = json.loads((native / "native-host-metadata.json").read_text())
+    assert not metadata["complete"]
+    assert metadata["collection_warnings"] == [warning]
+    assert _metadata(reports)["complete"]
+
+
+def test_nvidia_pilot_rejects_wrong_eager_wheel_without_losing_ordinary_coverage(
+    native_host_wheel, capsys
+):
+    workdir, reports, environment, _ = native_host_wheel
+    (workdir / "test_good.py").write_text(
+        "from torch_fl import model\ndef test_good(): assert model.choose(True)\n"
+    )
+    result = _run(
+        environment,
+        [
+            _group("Ordinary regression", "test_good.py"),
+            {
+                **_group("Eager operator regression", "test_good.py"),
+                "group_id": "eager_ops_regression",
+            },
+        ],
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    warnings = (reports / "native-host/collection-warnings.txt").read_text()
+    assert "Eager operator regression imports a different wheel" in warnings
+    _merge(reports, platform="nvidia")
+    assert "Cannot report native-host Python coverage" in capsys.readouterr().err
+    assert not (reports / "native-host/coverage-native-host.json").exists()
+    metadata = _metadata(reports)
+    assert metadata["complete"]
+    assert [s["group"] for s in metadata["sessions"]] == ["Ordinary regression"]
+
+
+def test_nvidia_experiment_counts_matching_lines_once_and_isolates_unit_probe(
+    native_host_wheel,
+):
+    workdir, reports, environment, install = native_host_wheel
+    ordinary_package = Path(
+        json.loads((reports / "manifest.json").read_text())["package_root"]
+    )
+    native_package = install / "torch_fl"
+    shared = (
+        "def baseline():\n    return 1\n"
+        "def native():\n    return 2\n"
+        "def unit():\n    return 3\n"
+    )
+    for package in (ordinary_package, native_package):
+        (package / "shared.py").write_text(shared)
+    (native_package / "native_only.py").write_text("VALUE = 1\n")
+    (workdir / "test_base.py").write_text(
+        "from torch_fl import shared\ndef test_base(): assert shared.baseline() == 1\n"
+    )
+    (workdir / "test_eager.py").write_text(
+        "from torch_fl import model, native_only, shared\n"
+        "def test_eager():\n"
+        "    assert (shared.baseline(), shared.native()) == (1, 2)\n"
+        "    assert model.eager() == 'eager' and native_only.VALUE == 1\n"
+    )
+    (workdir / "test_units.py").write_text(
+        "from torch_fl import shared\n"
+        "def test_units(): assert (shared.native(), shared.unit()) == (2, 3)\n"
+    )
+    eager = {
+        **_group("Eager operator regression", "test_eager.py"),
+        "group_id": "eager_ops_regression",
+        "environment": {
+            "PYTHONPATH": os.pathsep.join((str(install), environment["PYTHONPATH"]))
+        },
+    }
+    integration = _run(environment, [_group("Ordinary", "test_base.py"), eager])
+    assert integration.returncode == 0, integration.stdout + integration.stderr
+
+    probe = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "test_units.py"],
+        cwd=workdir,
+        env={
+            **environment,
+            "PYTEST_PLUGINS": "flagcicd_coverage",
+            "FLAGCICD_NVIDIA_UNIT_PROBE": "1",
+            "FLAGCICD_TEST_GROUP": "Wheel unit probe",
+        },
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    baseline = _merge(reports, platform="nvidia")
+    path = "torch_fl/shared.py"
+    assert baseline["files"][path]["executed_lines"] == [1, 2, 3, 5]
+    summary = reports / "nvidia-experiment.json"
+    experiment = json.loads(summary.read_text())
+    assert experiment["native_host"]["new_lines_by_file"] == {path: [4]}
+    assert (
+        experiment["native_host"]["omitted_files"]["torch_fl/model.py"]
+        == "different_source"
+    )
+    assert (
+        experiment["native_host"]["omitted_files"]["torch_fl/native_only.py"]
+        == "outside_ordinary_wheel"
+    )
+    assert experiment["unit_probe"]["relative_to"] == "native_host"
+    assert experiment["unit_probe"]["new_lines_by_file"] == {path: [6]}
+    assert (
+        experiment["unit_probe"]["covered_lines"]
+        == baseline["totals"]["covered_lines"] + 2
+    )
+    assert list(reports.rglob("metadata.json")) == [reports / "metadata.json"]
+    complete = next((reports / "unit-probe").glob("coverage-*.complete"))
+    complete.write_text('{"exitcode":1}')
+    assert _merge(reports, platform="nvidia")["totals"] == baseline["totals"]
+    experiment = json.loads(summary.read_text())
+    assert experiment["native_host"]["added_lines"] == 1
+    assert experiment["unit_probe"] == {
+        "available": False,
+        "reason": "incomplete_evidence",
+    }
+
+
+@pytest.fixture
+def scoped_wheel(tmp_path):
+    workdir, reports, environment = _setup(tmp_path)
+    package = tmp_path / "installed wheel/torch_fl"
+    modules = {
+        "accelerator/__init__.py": "",
+        "accelerator/nvidia/__init__.py": "CUDA = True\n",
+        "accelerator/ascend/__init__.py": "ASCEND = True\n",
+        "native_host/__init__.py": "",
+        "native_host/backends/__init__.py": "",
+        "native_host/backends/driver.py": "SHARED = True\n",
+        "native_host/backends/metax.py": "METAX = True\n",
+        "compile/__init__.py": "",
+        "compile/metal.py": "METAL = True\n",
+        "compile/flagtree_ascend_policy.py": "ASCEND = True\n",
+        "compile/flagtree_ascend_tle.py": "SHARED = True\n",
+    }
+    for name, source in modules.items():
+        path = package / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    excluded_files = {
+        "torch_fl/accelerator/ascend/__init__.py",
+        "torch_fl/native_host/backends/metax.py",
+        "torch_fl/compile/metal.py",
+        "torch_fl/compile/flagtree_ascend_policy.py",
+    }
+    return workdir, reports, environment, excluded_files
 
 
 def test_preparation_resolves_installed_wheel_without_importing_it(tmp_path):
@@ -252,10 +489,16 @@ def test_no_pytest_or_no_measured_package_does_not_fabricate_coverage(tmp_path):
         _merge(reports)
 
 
-def test_workflow_merger_and_uploader_use_same_container_relative_report(tmp_path):
-    workdir, reports, environment = _setup(tmp_path)
+def test_workflow_merger_and_uploader_use_same_container_relative_report(
+    tmp_path, scoped_wheel
+):
+    workdir, reports, environment, vendor_files = scoped_wheel
     (workdir / "test_good.py").write_text(
-        "from torch_fl import model\ndef test_good(): assert model.choose(True)\n"
+        "from torch_fl import model\n"
+        "from torch_fl.accelerator import nvidia\n"
+        "from torch_fl.compile import flagtree_ascend_tle\n"
+        "def test_good():\n"
+        "    assert model.choose(True) and nvidia.CUDA and flagtree_ascend_tle.SHARED\n"
     )
     result = _run(environment, [_group("good", "test_good.py")])
     assert result.returncode == 0, result.stdout + result.stderr
@@ -272,7 +515,7 @@ def test_workflow_merger_and_uploader_use_same_container_relative_report(tmp_pat
             **environment,
             "GITHUB_WORKSPACE": str(workspace),
             "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
-            "REPORT_PLATFORM": "cuda",
+            "REPORT_PLATFORM": "nvidia",
             "TEST_OUTCOME": "success",
             "SOURCE_REPOSITORY": "flagos-ai/Torch-FL",
             "SOURCE_REF": "b" * 40,
@@ -289,14 +532,81 @@ def test_workflow_merger_and_uploader_use_same_container_relative_report(tmp_pat
     assert upload["continue-on-error"] is True
     assert "steps.merge-coverage.outcome == 'success'" in upload["if"]
     assert "steps.flagcicd-auth.outputs.available == 'true'" in upload["if"]
-    filename = upload["with"]["report_path"].replace("${{ inputs.platform }}", "cuda")
+    filename = upload["with"]["report_path"].replace("${{ inputs.platform }}", "nvidia")
     output = workspace / filename
     report = json.loads(output.read_text())
-    assert _metadata(reports)["source_ref"] == "b" * 40
+    metadata = _metadata(reports)
+    assert metadata["source_ref"] == "b" * 40
+    assert metadata["scope_version"] == "nvidia-v1"
+    assert metadata["complete"]
+    assert set(metadata["excluded_files"]) == vendor_files
+    assert metadata["excluded_statements"] == 4
+    assert metadata["scope_conflicts"] == []
+    full = json.loads((reports / "coverage-full-wheel.json").read_text())
+    assert set(full["files"]) - set(report["files"]) == vendor_files
+    assert report["files"]["torch_fl/unimported.py"]["summary"]["num_statements"] == 2
+    assert report["files"]["torch_fl/unimported.py"]["executed_lines"] == []
+    assert "torch_fl/native_host/backends/driver.py" in report["files"]
+    assert report["totals"]["covered_lines"] == full["totals"]["covered_lines"]
+    assert report["totals"]["num_statements"] == full["totals"]["num_statements"] - 4
+    replay = REPORTING.summarize_nvidia(full, metadata, "b" * 40)
+    assert replay["applicable"]["available"]
+    assert replay["applicable"]["covered_lines"] == report["totals"]["covered_lines"]
+    assert replay["applicable"]["num_statements"] == report["totals"]["num_statements"]
+    assert replay["applicable"]["percent_covered"] == pytest.approx(
+        report["totals"]["percent_covered"]
+    )
+    with pytest.raises(ValueError, match="Expected full-wheel coverage"):
+        REPORTING.summarize_nvidia(report, metadata, "b" * 40)
     assert report["totals"]["percent_covered"] > 0
     assert (
         upload["with"]["report_path"] in steps["Retain Python coverage"]["with"]["path"]
     )
+
+
+@pytest.mark.parametrize(
+    "change", [{"platform": "ascend"}, {"source_ref": "c" * 40}, {"complete": False}]
+)
+def test_nvidia_replay_rejects_incomplete_or_wrong_metadata(change):
+    metadata = {
+        "platform": "nvidia",
+        "source_ref": "b" * 40,
+        "complete": True,
+        **change,
+    }
+    with pytest.raises(ValueError, match="Expected complete NVIDIA line coverage"):
+        REPORTING.summarize_nvidia({}, metadata, "b" * 40)
+
+
+def test_non_nvidia_report_keeps_its_full_wheel_scope(scoped_wheel):
+    workdir, reports, environment, vendor_files = scoped_wheel
+    (workdir / "test_good.py").write_text(
+        "from torch_fl import model\ndef test_good(): assert model.choose(True)\n"
+    )
+    result = _run(environment, [_group("good", "test_good.py")])
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = _merge(reports, platform="ascend")
+    assert vendor_files <= set(report["files"])
+    assert "scope_version" not in _metadata(reports)
+    assert not (reports / "coverage-full-wheel.json").exists()
+
+
+def test_nvidia_report_flags_execution_outside_its_scope(scoped_wheel):
+    workdir, reports, environment, vendor_files = scoped_wheel
+    (workdir / "test_good.py").write_text(
+        "from torch_fl.accelerator import ascend\n"
+        "def test_good(): assert ascend.ASCEND\n"
+    )
+    result = _run(environment, [_group("good", "test_good.py")])
+    assert result.returncode == 0, result.stdout + result.stderr
+    with pytest.raises(ValueError, match="NVIDIA coverage executed excluded files"):
+        _merge(reports, platform="nvidia")
+    metadata = _metadata(reports)
+    assert not metadata["complete"]
+    assert metadata["scope_conflicts"] == ["torch_fl/accelerator/ascend/__init__.py"]
+    full = json.loads((reports / "coverage-full-wheel.json").read_text())
+    assert set(metadata["excluded_files"]) == vendor_files
+    assert full["files"][metadata["scope_conflicts"][0]]["executed_lines"] == [1]
 
 
 def test_uploaded_json_matches_native_coverage_json_export(tmp_path):

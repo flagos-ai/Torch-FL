@@ -15,14 +15,100 @@
 """Prepare and merge line coverage of the installed torch_fl wheel."""
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import os
+import sys
 from pathlib import Path
 
-import coverage
-
 ROOT = Path(__file__).resolve().parents[2]
+
+# These adapters belong to other devices, even when setuptools ships them in
+# the NVIDIA wheel. Common modules and mixed-platform files remain in scope.
+NVIDIA_EXCLUDED_VENDORS = (
+    "apple",
+    "ascend",
+    "bpu",
+    "cambricon",
+    "enflame",
+    "hygon",
+    "iluvatar",
+    "kunlunxin",
+    "metax",
+    "mthreads",
+    "thead",
+    "tsingmicro",
+)
+NVIDIA_OMIT_DIRECTORIES = tuple(
+    f"torch_fl/accelerator/{vendor}/" for vendor in NVIDIA_EXCLUDED_VENDORS
+)
+NVIDIA_OMIT_MODULES = {
+    *(
+        f"torch_fl/native_host/backends/{vendor}.py"
+        for vendor in NVIDIA_EXCLUDED_VENDORS
+    ),
+    "torch_fl/compile/flagtree_ascend_policy.py",
+    "torch_fl/compile/metal.py",
+}
+NVIDIA_SCOPE_VERSION = "nvidia-v1"
+
+
+def nvidia_scope(full_report):
+    """Describe wheel files excluded from the NVIDIA line-coverage report."""
+    excluded = {
+        name: {
+            "covered_lines": entry["summary"]["covered_lines"],
+            "num_statements": entry["summary"]["num_statements"],
+        }
+        for name, entry in sorted(full_report["files"].items())
+        if name.startswith(NVIDIA_OMIT_DIRECTORIES) or name in NVIDIA_OMIT_MODULES
+    }
+    return {
+        "scope": "installed torch_fl Python files applicable to NVIDIA",
+        "scope_version": NVIDIA_SCOPE_VERSION,
+        "excluded_files": excluded,
+        "excluded_statements": sum(
+            data["num_statements"] for data in excluded.values()
+        ),
+        "scope_conflicts": [
+            name for name, data in excluded.items() if data["covered_lines"]
+        ],
+    }
+
+
+def summarize_nvidia(report, metadata, source_ref):
+    """Recalculate the NVIDIA scope from a complete full-wheel artifact."""
+    if (
+        metadata.get("platform") not in {"nvidia", "cuda"}
+        or metadata.get("source_ref") != source_ref
+        or metadata.get("complete") is not True
+        or report["meta"]["branch_coverage"]
+    ):
+        raise ValueError("Expected complete NVIDIA line coverage for the source ref")
+    if set(metadata.get("excluded_files", ())).difference(report["files"]):
+        raise ValueError("Expected full-wheel coverage, see coverage-full-wheel.json")
+
+    scope = nvidia_scope(report)
+    totals = report["totals"]
+    statements = totals["num_statements"] - scope["excluded_statements"]
+    available = statements > 0 and not scope["scope_conflicts"]
+    return {
+        "platform": metadata["platform"],
+        "source_ref": source_ref,
+        "profile": metadata.get("context", {}).get("profile"),
+        "run_attempt": metadata["run_attempt"],
+        "full_wheel": totals,
+        "applicable": {
+            "available": available,
+            "covered_lines": totals["covered_lines"] if available else None,
+            "num_statements": statements,
+            "percent_covered": 100 * totals["covered_lines"] / statements
+            if available
+            else None,
+        },
+        **scope,
+    }
 
 
 def prepare(directory, env_file):
@@ -43,9 +129,130 @@ def prepare(directory, env_file):
 
 
 def merge(directory, output, platform, outcome, source_repository, source_ref):
-    """Combine executed lines, preserving missing sessions as incomplete."""
+    """Report the ordinary wheel and the optional NVIDIA native-host pilot."""
+    from coverage.exceptions import CoverageException
+
     directory = Path(directory).resolve()
-    output = Path(output).resolve()
+    run = {
+        "platform": platform,
+        "outcome": outcome,
+        "source_repository": source_repository,
+        "source_ref": source_ref,
+        "context": json.loads(os.environ.get("CI_PLAN_CONTEXT") or "{}"),
+        "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
+    }
+    native = directory / "native-host"
+    units = directory / "unit-probe"
+    inputs = {}
+    for variant, evidence, filename in (
+        ("native_host", native, "coverage-native-host.json"),
+        ("unit_probe", units, "coverage-unit-probe.json"),
+    ):
+        if platform != "nvidia" or not evidence.is_dir():
+            continue
+        try:
+            inputs[variant] = merge_wheel(
+                evidence, evidence / filename, run, variant=variant
+            )
+        except (OSError, ValueError, KeyError, TypeError, CoverageException) as error:
+            print(
+                f"::warning::Cannot report {evidence.name} Python coverage: {error}",
+                file=sys.stderr,
+            )
+    ordinary = merge_wheel(directory, Path(output).resolve(), run)
+    try:
+        if platform == "nvidia" and (native.is_dir() or units.is_dir()):
+            nvidia_experiment(directory, ordinary, run, inputs)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(
+            f"::warning::Cannot compare NVIDIA Python coverage: {error}",
+            file=sys.stderr,
+        )
+
+
+def source_hashes(files, package):
+    return {
+        name: hashlib.sha256((package.parent / name).read_bytes()).hexdigest()
+        for name in files
+    }
+
+
+def coverage_delta(base_files, extra_files, base_hashes, extra_hashes, covered):
+    """Attribute new lines only when both byte content and statements agree."""
+    omitted, new_lines = {}, {}
+    for name, extra in extra_files.items():
+        if name not in base_files:
+            omitted[name] = "outside_ordinary_wheel"
+            continue
+        if base_hashes[name] != extra_hashes[name]:
+            omitted[name] = "different_source"
+            continue
+        base = base_files[name]
+        base_statements = set(base["executed_lines"]) | set(base["missing_lines"])
+        extra_statements = set(extra["executed_lines"]) | set(extra["missing_lines"])
+        if base_statements != extra_statements:
+            omitted[name] = "different_statements"
+            continue
+        added = set(extra["executed_lines"]) - covered[name]
+        if added:
+            new_lines[name] = sorted(added)
+            covered[name].update(added)
+    return {
+        "available": True,
+        "added_lines": sum(map(len, new_lines.values())),
+        "covered_lines": sum(map(len, covered.values())),
+        "new_lines_by_file": new_lines,
+        "omitted_files": omitted,
+    }
+
+
+def nvidia_experiment(directory, ordinary, run, inputs):
+    report, metadata, package = ordinary
+    files = report["files"]
+    covered = {name: set(data["executed_lines"]) for name, data in files.items()}
+    hashes = source_hashes(files, package)
+    result = {
+        **run,
+        "scope_version": metadata["scope_version"],
+        "ordinary": {
+            "complete": metadata["complete"],
+            "covered_lines": report["totals"]["covered_lines"],
+            "num_statements": report["totals"]["num_statements"],
+        },
+        "source_sha256": {"ordinary": hashes},
+    }
+    previous = "ordinary"
+    for variant in ("native_host", "unit_probe"):
+        if variant not in inputs:
+            result[variant] = {"available": False, "reason": "report_unavailable"}
+            continue
+        extra, extra_metadata, extra_package = inputs[variant]
+        if (
+            not metadata["complete"]
+            or not extra_metadata["complete"]
+            or any(
+                session.get("exitcode") != 0 for session in extra_metadata["sessions"]
+            )
+        ):
+            result[variant] = {"available": False, "reason": "incomplete_evidence"}
+            continue
+        extra_files = extra["files"]
+        extra_hashes = source_hashes(extra_files, extra_package)
+        result["source_sha256"][variant] = extra_hashes
+        result[variant] = {
+            "relative_to": previous,
+            **coverage_delta(files, extra_files, hashes, extra_hashes, covered),
+        }
+        previous = variant
+    (directory / "nvidia-experiment.json").write_text(
+        json.dumps(result, indent=2), encoding="utf-8"
+    )
+
+
+def merge_wheel(directory, output, run, *, variant=""):
+    """Combine executed lines from a single installed wheel."""
+    import coverage
+
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     package = Path(manifest["package_root"]).resolve()
     if not package.is_dir():
@@ -78,9 +285,14 @@ def merge(directory, output, platform, outcome, source_repository, source_ref):
     if not data_files:
         raise ValueError("No pytest coverage data was saved; no report to upload")
 
-    # Initialize/report from site-packages so the native coverage.py JSON uses
-    # portable torch_fl/... filenames, while its denominator is the wheel's
-    # Python source, including modules no test imported. Never import torch_fl.
+    # Report from site-packages for portable torch_fl/... paths. Starting with
+    # the whole wheel also finds in-scope modules no test imported.
+    is_nvidia = run["platform"] in {"nvidia", "cuda"}
+    prefix = variant.replace("_", "-") + "-" if variant else ""
+    full_output = (
+        directory / f"coverage-{prefix}full-wheel.json" if is_nvidia else output
+    )
+    scope = {}
     previous = Path.cwd()
     try:
         os.chdir(package.parent)
@@ -96,29 +308,48 @@ def merge(directory, output, platform, outcome, source_repository, source_ref):
         data = combined.get_data()
         if not any(data.lines(filename) for filename in data.measured_files()):
             raise ValueError("No installed torch_fl Python files were measured")
-        combined.json_report(outfile=str(output))
+        combined.json_report(outfile=str(full_output))
+        if is_nvidia:
+            scope = nvidia_scope(json.loads(full_output.read_text(encoding="utf-8")))
+            combined.json_report(
+                outfile=str(output), omit=list(scope["excluded_files"])
+            )
     finally:
         os.chdir(previous)
     report = json.loads(output.read_text(encoding="utf-8"))
     metadata = {
-        "platform": platform,
-        "context": json.loads(os.environ.get("CI_PLAN_CONTEXT") or "{}"),
-        "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
+        **run,
         "scope": "installed torch_fl Python files; line coverage",
-        "outcome": outcome,
-        "source_repository": source_repository,
-        "source_ref": source_ref,
-        "complete": outcome == "success" and not incomplete,
+        "complete": run["outcome"] == "success"
+        and not incomplete
+        and not scope.get("scope_conflicts"),
         "sessions": sessions,
         "incomplete_sessions": incomplete,
+        **scope,
     }
-    (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    if variant == "native_host":
+        warning_file = directory / "collection-warnings.txt"
+        warnings = (
+            warning_file.read_text(encoding="utf-8").splitlines()
+            if warning_file.is_file()
+            else []
+        )
+        metadata["wheel_variant"] = "native-host"
+        metadata["wheel_sha256"] = manifest["wheel_sha256"]
+        metadata["collection_warnings"] = warnings
+        metadata["complete"] = metadata["complete"] and not warnings
+    metadata_file = directory / f"{prefix}metadata.json"
+    metadata_file.write_text(json.dumps(metadata), encoding="utf-8")
+    if scope.get("scope_conflicts"):
+        paths = ", ".join(scope["scope_conflicts"])
+        raise ValueError(f"NVIDIA coverage executed excluded files: {paths}")
     print(
         f"Merged {len(data_files)} coverage sessions into {output}: "
         f"{report['totals']['percent_covered']:.2f}% Python line coverage"
     )
     if not metadata["complete"]:
-        print("::warning::Python coverage is partial; see coverage metadata.json.")
+        print(f"::warning::Python coverage is partial; see {metadata_file.name}.")
+    return report, metadata, package
 
 
 def main():
@@ -134,9 +365,23 @@ def main():
     combine.add_argument("--outcome", choices=["success", "failure"], required=True)
     combine.add_argument("--source-repository", required=True)
     combine.add_argument("--source-ref", required=True)
+    summarize = subcommands.add_parser("summarize-nvidia")
+    summarize.add_argument("--report", type=Path, required=True)
+    summarize.add_argument("--metadata", type=Path, required=True)
+    summarize.add_argument("--source-ref", required=True)
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.report_dir, args.env_file)
+    elif args.command == "summarize-nvidia":
+        try:
+            summary = summarize_nvidia(
+                json.loads(args.report.read_text(encoding="utf-8")),
+                json.loads(args.metadata.read_text(encoding="utf-8")),
+                args.source_ref,
+            )
+        except (OSError, ValueError, KeyError) as error:
+            raise SystemExit(str(error)) from error
+        print(json.dumps(summary, indent=2))
     else:
         merge(
             args.report_dir,

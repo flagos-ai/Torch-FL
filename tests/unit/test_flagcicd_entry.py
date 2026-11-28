@@ -553,8 +553,9 @@ def test_matrix_failure_with_a_passing_report_is_infrastructure(tmp_path):
 
 
 @pytest.mark.parametrize("complete,available", [(True, True), (False, False)])
+@pytest.mark.parametrize("scoped", [False, True])
 def test_coverage_is_per_platform_and_partial_data_is_unavailable(
-    tmp_path, complete, available
+    tmp_path, complete, available, scoped
 ):
     raw_reports(tmp_path)
     directory = tmp_path / "coverage"
@@ -570,21 +571,26 @@ def test_coverage_is_per_platform_and_partial_data_is_unavailable(
             }
         )
     )
-    (directory / "metadata.json").write_text(
-        json.dumps(
-            {
-                "source_repository": "flagos-ai/Torch-FL",
-                "source_ref": SHA,
-                "platform": "nvidia",
-                "complete": complete,
-                "context": plan(),
-                "run_attempt": 1,
-            }
-        )
-    )
+    metadata = {
+        "source_repository": "flagos-ai/Torch-FL",
+        "source_ref": SHA,
+        "platform": "nvidia",
+        "complete": complete,
+        "context": plan(),
+        "run_attempt": 1,
+        "scope": "installed torch_fl Python files; line coverage",
+    }
+    if scoped:
+        metadata["scope"] = "installed torch_fl Python files applicable to NVIDIA"
+        metadata["scope_version"] = "nvidia-v1"
+    (directory / "metadata.json").write_text(json.dumps(metadata))
     report = REPORTER.platform_report(plan(), "nvidia", jobs(), tmp_path, 1)
     assert report["status"] == "passed"
-    assert report["metrics"]["coverage"]["available"] is available
+    metrics = report["metrics"]["coverage"]
+    assert metrics["available"] is available
+    if available:
+        assert metrics["scope"] == metadata["scope"].removesuffix("; line coverage")
+        assert metrics.get("scope_version") == metadata.get("scope_version")
 
 
 def test_duplicate_report_in_the_latest_attempt_blocks_success(tmp_path):
