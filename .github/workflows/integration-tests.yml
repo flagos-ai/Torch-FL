@@ -293,6 +293,7 @@ jobs:
           REPORT_PLATFORM: ${{ inputs.platform }}
           INTEGRATION_TESTS: ${{ needs.configuration.outputs.integration_tests }}
           INTEGRATION_ENVIRONMENT: ${{ needs.configuration.outputs.integration_environment }}
+          TORCH_FL_CI_IMAGE: ${{ needs.configuration.outputs.ci_image }}
           METAL_DEVICE_WRAPPER_TYPE: ${{ env.METAL_DEVICE_WRAPPER_TYPE }}
           TORCH_FL_MPS_HIGH_WATERMARK_RATIO: ${{ env.TORCH_FL_MPS_HIGH_WATERMARK_RATIO }}
           TORCH_FL_MPS_LOW_WATERMARK_RATIO: ${{ env.TORCH_FL_MPS_LOW_WATERMARK_RATIO }}

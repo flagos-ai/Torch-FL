@@ -34,6 +34,16 @@ that the CPU environment cannot execute. Filtered pytest selections do not
 claim a whole file. Test directories and device-dependent unit files stay in
 place; direct invocations without the option still run every matching file.
 
+The Hygon integration lane stores Native Host compiler objects and Cython
+output alongside the runner's working directories. The build uses a fresh
+source tree and reports cache hits and wheel build time in
+`native-host-cache.json`. The installed wheel still goes through preflight and
+the hardware tests. For cold and warm measurements, set
+`TORCH_FL_CI_NATIVE_HOST_CACHE_DIR` to a fresh directory and reuse that directory
+on the same runner. During a manual `build_native_hosts_ci.sh --test-install`
+run, set `TORCH_FL_CI_NATIVE_HOST_CACHE=1` to use the caches or `0` to measure
+the regular build path.
+
 CPU Torch installation may choose a faster mirror. If that installation fails,
 the existing retry helper falls back to the pinned primary index with the same
 version and options. An explicitly empty `TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL`

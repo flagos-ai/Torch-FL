@@ -63,7 +63,13 @@ unset FLAGOS_FORCE_BACKEND FLAGOS_BACKEND_CONFIG FLAGOS_METAX_CUDART_SHIM
 
 source "$GITHUB_WORKSPACE/.github/scripts/lib/set_env_common.sh"
 PIP_RETRY_PYTHON="$(command -v python)" pip_retry 'Cython==3.2.4'
-python setup.py bdist_wheel --dist-dir "$evidence" 2>&1 | tee "$evidence/build.log"
+if [[ "${1:-}" == --test-install && "${TORCH_FL_CI_NATIVE_HOST_CACHE:-0}" == 1 &&
+      ( "$FLAGOS_ACCELERATOR" == hygon || "$FLAGOS_ACCELERATOR" == dcu ) ]]; then
+  python "$GITHUB_WORKSPACE/.github/scripts/hygon_native_host_cache.py" "$evidence" \
+    2>&1 | tee "$evidence/build.log"
+else
+  python setup.py bdist_wheel --dist-dir "$evidence" 2>&1 | tee "$evidence/build.log"
+fi
 python "$preflight" --wheel "$evidence"/*.whl \
   --platform "$FLAGOS_ACCELERATOR" --check-build-env --check-native-host-backend \
   | tee "$evidence/preflight.log"

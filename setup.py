@@ -20,6 +20,7 @@ import multiprocessing
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1110,6 +1111,12 @@ class BuildExtWithCmake(_build_ext):
         env["_TORCH_FL_BUILDING_NATIVE_HOST"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONPATH"] = destination + os.pathsep + env.get("PYTHONPATH", "")
+        if ccache := env.get("_TORCH_FL_NATIVE_HOST_CCACHE"):
+            prefix_map = shlex.quote(f"-ffile-prefix-map={BASE_DIR}=.")
+            for compiler, flags in (("CC", "CFLAGS"), ("CXX", "CXXFLAGS")):
+                if command := env.get(compiler) or sysconfig.get_config_var(compiler):
+                    env[compiler] = f"{shlex.quote(ccache)} {command}"
+                    env[flags] = f"{env.get(flags, '')} {prefix_map}".strip()
         subprocess.check_call(
             [
                 sys.executable,

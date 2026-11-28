@@ -50,7 +50,8 @@ paths_watch:
 container_volumes:
   - /usr/local/hyhal:/usr/local/hyhal:ro
 
-integration_environment: {}
+integration_environment:
+  TORCH_FL_CI_NATIVE_HOST_CACHE: "1"
 
 # The per-file unit suite executes CI checkout resolution with the real jq.
 # Reuse it when present; provision it before tests in older DCU images.
