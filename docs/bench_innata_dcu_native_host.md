@@ -74,7 +74,7 @@ was the ops that stayed on the Python bridge and the missing fused kernel.
    package installed elsewhere.
 2. **Use `enable_gqa`** in the SDPA backend instead of expanding KV heads.
 3. **Move the measured hot operators to the `cuda` route** with per-op
-   overrides. The DCU profile in this workload reroutes 58 operators
+   overrides. The DCU profile in this workload reroutes 72 operators
    (`mean.dim`, `pow.Tensor_Scalar`, `rsqrt`, `neg`, `silu`, `_unsafe_view`,
    `constant_pad_nd`, `clamp_min`, `scalar_tensor`, `fill_.Scalar`,
    `fill_.Tensor`, `uniform_`, `erfinv_`, `clamp_`, `zero_`, `pow.Scalar`,
@@ -86,8 +86,11 @@ was the ops that stayed on the Python bridge and the missing fused kernel.
    `native_group_norm`, `native_layer_norm`, `sigmoid`, `tanh`, `exp`,
    `gelu`, `sqrt`, `_softmax`, `avg_pool2d`, `clamp`, `index_add`,
    `reflection_pad2d`, `where.self`, `zeros_like`, `any`,
-   `repeat_interleave.Tensor`, `sum.dim_IntList`) from `flaggems` to `cuda`.
-   The resulting table has 406 flaggems / 1636 cuda routes and no
+   `repeat_interleave.Tensor`, `sum.dim_IntList`, `eq.Scalar`, `abs`,
+   `masked_fill.Tensor`, `floor_divide`, `full`, `bitwise_or.Tensor`, `ones`,
+   `max`, `prod.dim_int`, `new_ones`, `masked_fill_.Scalar`, `ge.Scalar`,
+   `argmax`, `masked_scatter`) from `flaggems` to `cuda`.
+   The resulting table has 387 flaggems / 1650 cuda routes and no
    `cpu_fallback` entries.
 4. **Rewrite two model-side spots that route poorly.** The VAE `RMS_norm`
    layer computes `(x*x).sum(dim, keepdim=True).sqrt().clamp_min(1e-12)`
@@ -105,7 +108,7 @@ version is faster than vendor.
 
 | Fixed request | Old torch-fl | Vendor torch 2.10 | Old vs vendor | Optimized torch-fl | Optimized vs vendor |
 |---|---:|---:|---:|---:|---:|
-| Understanding, BLINK image | 0.414 s | 0.168 s | 0.41x | 0.174 s | **0.96x** |
+| Understanding, BLINK image | 0.414 s | 0.166 s | 0.40x | 0.167 s | **0.99x** |
 | Understanding, MMSI 9 frames | 12.14 s | 4.48 s | 0.37x | 4.31 s | **1.04x** |
 | ACWM, 73-frame video | 117.9 s | 20.02 s | 0.17x | 19.97 s | **1.00x** |
 | WAM-RoboDojo, 16x14 actions | 28.8 s | 23.7 s | 0.82x | 24.0 s | **0.99x** |
@@ -119,12 +122,35 @@ old image's Understanding and RoboCasa numbers were re-measured with the same
 instrumentation so the columns are comparable.
 
 Dispatch audit over complete runs: ACWM 161148 dispatch lines, RoboDojo
-25414, `[flagos cpu_fallback]` = **0** in both. The only operators left on the
-Python bridge in the sampling loop are `ge.Tensor` and `abs`, once per step.
-The Understanding path still makes about 50 bridge calls per request
-(`eq.Scalar`, `floor_divide`, `full`, `bitwise_or.Tensor`, `ones`, `max`,
-`argmax` and a few more); moving those to the `cuda` route is the remaining
-lever for the short single-image request, which sits at 0.96x.
+25414, `[flagos cpu_fallback]` = **0** in both. After the 72-operator table,
+ACWM and the single-image Understanding request run with **zero**
+`flagos_python` calls; RoboDojo still makes one `ge.Tensor` call per step.
+The 14 operators added in the final pass are exactly those the census found in
+the generation loop, and `eq.Scalar` alone moved from 191 us to 11 us per call
+(26 calls per single-image request), which took BLINK from 0.96x to 0.99x.
+
+### Where the remaining time goes
+
+Per-operator microbenchmarks at the model's shapes (same tensor, both routes)
+show that the CUDA-boxing route is at parity or slightly ahead for every
+operator that reaches a vendor kernel: `unsqueeze` 2.60 us vs 2.34 us,
+`transpose` 2.88 vs 2.60, `empty_like` 3.60 vs 4.01, `mm` 228 vs 229,
+`addmm` 319 vs 322, `cat` 190 vs 188, `conv3d` 152 vs 144, `sdpa` 440 vs 441.
+Only operators still on the FlagGems Python bridge differ:
+
+| Operator | torch-fl | vendor | delta |
+|---|---:|---:|---:|
+| `eq.Scalar` | 191.5 us | 12.3 us | +179 us |
+| `masked_fill.Tensor` | 248.1 us | 101.2 us | +147 us |
+| `abs` (inside sqrt/rsqrt paths) | ~140 us extra | - | +140 us |
+| `linalg_vector_norm` | 140.4 us | 23.1 us | +117 us |
+
+The device operator stream is the same on both routes: a two-step ACWM run
+issues 20.3k device ops through torch-fl against 19.5k kernel launches under
+vendor torch, with no math decomposition or extra copies. Because the two
+routes execute the same DTK kernels with the same op count in eager mode,
+parity is the ceiling of this implementation; going faster means doing less
+work (fusion, `torch.compile`, CUDA graphs) rather than tuning dispatch.
 
 Functional output is unchanged within bf16/flash rounding: ACWM stays
 736x544, 73 frames at 16 fps with mean |delta| 0.657/255 against the
@@ -157,7 +183,7 @@ max |delta| 0.0077.
 
 ## Scope
 
-The 58-operator list is a profile of this model's shapes on this hardware,
+The 72-operator list is a profile of this model's shapes on this hardware,
 not a proposal for the DCU default table; each entry should be re-measured
 before becoming a default. Raw benchmark JSON and dispatch logs are kept
 outside the repository.
