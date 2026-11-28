@@ -229,12 +229,16 @@ def platform_report(plan, platform, jobs, raw, attempt):
             raise ValueError("invalid coverage percentage")
         metrics["coverage"] = {
             "available": True,
-            "scope": "installed torch_fl Python files",
+            "scope": metadata.get(
+                "scope", "installed torch_fl Python files"
+            ).removesuffix("; line coverage"),
             "metric_type": "line",
             "covered": covered,
             "total": total,
             "percent": percent,
         }
+        if "scope_version" in metadata:
+            metrics["coverage"]["scope_version"] = metadata["scope_version"]
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
         coverage_errors.append(str(error))
     return {

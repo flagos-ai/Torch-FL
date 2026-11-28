@@ -437,29 +437,55 @@ Hardware jobs also collect real line coverage with coverage.py 7.10.7 and upload
 separate upload. Test pass rate, workflow pass rate, Python line coverage and
 operator support are different metrics.
 
-The scope is **all Python source in the installed `torch_fl` wheel**, including
+Collection covers Python source in the installed `torch_fl` wheel, including
 modules no test imports. Preparation resolves that directory through distribution
 metadata without importing the accelerator. The collector starts before initial
 conftest/test-module imports and writes a unique coverage.py data file for each
 top-level pytest invocation, including DCU's per-file runs. Fixture-launched
-sample subprocesses do not inherit activation. Python code executed only in
-subprocesses spawned by a test, C/C++ extensions, external dependencies and
-device kernels are outside this first implementation's scope. Source-tree unit
-tests only contribute when they execute the installed package, not a checkout or
-a fake package.
+sample subprocesses do not inherit activation. Collection measures Python in
+the selected installed package. C/C++ extensions, external dependencies and
+device kernels require their own measurements.
 
-`python_coverage.py merge` combines executed-line sets with coverage.py, rather
-than averaging session percentages. JSON filenames are portable `torch_fl/...`
-paths; the denominator remains the installed wheel's Python files. No coverage
-threshold is enforced. Failures retain the coverage saved before the failure;
-missing/corrupt process data and the integration outcome are recorded in the
-artifact's `metadata.json`. Its `complete` flag is false when the integration run failed or a
-started coverage session did not finalize. No executed package lines means no
+The NVIDIA pilot collects the eager operator regression and the common
+regression's explicitly instrumented native-host children against the verified
+native-host wheel. The coverage artifact contains their separate report under
+`native-host/coverage-native-host.json`. Its `native-host-metadata.json` records
+the wheel SHA-256, source revision, scope and session status. The regular
+FlagCICD upload represents the ordinary wheel. Pilot setup warnings are saved
+under `native-host/collection-warnings.txt`. A pilot collection or reporting
+failure leaves the ordinary coverage available.
+
+`python_coverage.py merge` combines executed-line sets with coverage.py. JSON
+filenames use portable `torch_fl/...` paths. NVIDIA's published report uses the
+`nvidia-v1` scope: shared and NVIDIA-applicable Python files, including
+applicable files no test executed. It excludes dedicated accelerator
+directories, native-host adapters, and compiler modules for other devices.
+Mixed-platform modules remain in scope. The artifact includes the full-wheel
+diagnostic report as `coverage-full-wheel.json`. Its `metadata.json` records the
+scope version, omitted files, and counts. Executed code in an omitted file
+makes the NVIDIA metric unavailable until the scope is reviewed. Other
+platforms report coverage for their full wheel.
+
+Coverage remains an observation metric. Failures retain saved coverage.
+Missing or corrupt process data and the integration outcome are recorded in the
+artifact's `metadata.json`. Its `complete` flag is false when the integration run
+failed, a started coverage session did not finalize, or the NVIDIA scope has a
+conflict. No executed package lines means no
 report, rather than a fabricated 0%/100% result. A killed process can lose its
 unsaved coverage. Raw data, session markers and the merged JSON are retained in
 `coverage-<platform>-<run_attempt>` artifacts, including on fork PRs. The uploaded
 JSON itself is the unmodified native coverage.py report (`meta`, `files`,
 `totals`); provenance/completeness metadata stays in the separate artifact file.
+
+Recalculate an NVIDIA result offline by passing the full-wheel JSON and its
+matching `metadata.json` from the extracted artifact. For older artifacts, the
+full-wheel report is named `coverage-nvidia.json`.
+
+```bash
+python3 .github/scripts/python_coverage.py summarize-nvidia \
+  --report coverage-full-wheel.json --metadata metadata.json \
+  --source-ref "$SOURCE_SHA"
+```
 
 Both uploads keep the same optional-token/fork boundary and nonblocking error
 policy. The MetaX job installs missing `curl` and CA certificates through its
