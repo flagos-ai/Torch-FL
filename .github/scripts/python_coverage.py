@@ -15,6 +15,7 @@
 """Prepare and merge line coverage of the installed torch_fl wheel."""
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -141,20 +142,114 @@ def merge(directory, output, platform, outcome, source_repository, source_ref):
         "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
     }
     native = directory / "native-host"
-    if platform == "nvidia" and native.is_dir():
+    units = directory / "unit-probe"
+    inputs = {}
+    for variant, evidence, filename in (
+        ("native_host", native, "coverage-native-host.json"),
+        ("unit_probe", units, "coverage-unit-probe.json"),
+    ):
+        if platform != "nvidia" or not evidence.is_dir():
+            continue
         try:
-            merge_wheel(
-                native, native / "coverage-native-host.json", run, native_host=True
+            inputs[variant] = merge_wheel(
+                evidence, evidence / filename, run, variant=variant
             )
         except (OSError, ValueError, KeyError, TypeError, CoverageException) as error:
             print(
-                f"::warning::Cannot report native-host Python coverage: {error}",
+                f"::warning::Cannot report {evidence.name} Python coverage: {error}",
                 file=sys.stderr,
             )
-    merge_wheel(directory, Path(output).resolve(), run)
+    ordinary = merge_wheel(directory, Path(output).resolve(), run)
+    try:
+        if platform == "nvidia" and (native.is_dir() or units.is_dir()):
+            nvidia_experiment(directory, ordinary, run, inputs)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(
+            f"::warning::Cannot compare NVIDIA Python coverage: {error}",
+            file=sys.stderr,
+        )
 
 
-def merge_wheel(directory, output, run, *, native_host=False):
+def source_hashes(files, package):
+    return {
+        name: hashlib.sha256((package.parent / name).read_bytes()).hexdigest()
+        for name in files
+    }
+
+
+def coverage_delta(base_files, extra_files, base_hashes, extra_hashes, covered):
+    """Attribute new lines only when both byte content and statements agree."""
+    omitted, new_lines = {}, {}
+    for name, extra in extra_files.items():
+        if name not in base_files:
+            omitted[name] = "outside_ordinary_wheel"
+            continue
+        if base_hashes[name] != extra_hashes[name]:
+            omitted[name] = "different_source"
+            continue
+        base = base_files[name]
+        base_statements = set(base["executed_lines"]) | set(base["missing_lines"])
+        extra_statements = set(extra["executed_lines"]) | set(extra["missing_lines"])
+        if base_statements != extra_statements:
+            omitted[name] = "different_statements"
+            continue
+        added = set(extra["executed_lines"]) - covered[name]
+        if added:
+            new_lines[name] = sorted(added)
+            covered[name].update(added)
+    return {
+        "available": True,
+        "added_lines": sum(map(len, new_lines.values())),
+        "covered_lines": sum(map(len, covered.values())),
+        "new_lines_by_file": new_lines,
+        "omitted_files": omitted,
+    }
+
+
+def nvidia_experiment(directory, ordinary, run, inputs):
+    report, metadata, package = ordinary
+    files = report["files"]
+    covered = {name: set(data["executed_lines"]) for name, data in files.items()}
+    hashes = source_hashes(files, package)
+    result = {
+        **run,
+        "scope_version": metadata["scope_version"],
+        "ordinary": {
+            "complete": metadata["complete"],
+            "covered_lines": report["totals"]["covered_lines"],
+            "num_statements": report["totals"]["num_statements"],
+        },
+        "source_sha256": {"ordinary": hashes},
+    }
+    previous = "ordinary"
+    for variant in ("native_host", "unit_probe"):
+        if variant not in inputs:
+            result[variant] = {"available": False, "reason": "report_unavailable"}
+            continue
+        extra, extra_metadata, extra_package = inputs[variant]
+        if (
+            not metadata["complete"]
+            or not extra_metadata["complete"]
+            or any(
+                session.get("exitcode") != 0 for session in extra_metadata["sessions"]
+            )
+        ):
+            result[variant] = {"available": False, "reason": "incomplete_evidence"}
+            continue
+        extra_files = extra["files"]
+        extra_hashes = source_hashes(extra_files, extra_package)
+        result["source_sha256"][variant] = extra_hashes
+        result[variant] = {
+            "relative_to": previous,
+            **coverage_delta(files, extra_files, hashes, extra_hashes, covered),
+        }
+        previous = variant
+    (directory / "nvidia-experiment.json").write_text(
+        json.dumps(result, indent=2), encoding="utf-8"
+    )
+
+
+def merge_wheel(directory, output, run, *, variant=""):
     """Combine executed lines from a single installed wheel."""
     import coverage
 
@@ -193,7 +288,7 @@ def merge_wheel(directory, output, run, *, native_host=False):
     # Report from site-packages for portable torch_fl/... paths. Starting with
     # the whole wheel also finds in-scope modules no test imported.
     is_nvidia = run["platform"] in {"nvidia", "cuda"}
-    prefix = "native-host-" if native_host else ""
+    prefix = variant.replace("_", "-") + "-" if variant else ""
     full_output = (
         directory / f"coverage-{prefix}full-wheel.json" if is_nvidia else output
     )
@@ -232,7 +327,7 @@ def merge_wheel(directory, output, run, *, native_host=False):
         "incomplete_sessions": incomplete,
         **scope,
     }
-    if native_host:
+    if variant == "native_host":
         warning_file = directory / "collection-warnings.txt"
         warnings = (
             warning_file.read_text(encoding="utf-8").splitlines()
@@ -254,6 +349,7 @@ def merge_wheel(directory, output, run, *, native_host=False):
     )
     if not metadata["complete"]:
         print(f"::warning::Python coverage is partial; see {metadata_file.name}.")
+    return report, metadata, package
 
 
 def main():

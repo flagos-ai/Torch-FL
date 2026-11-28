@@ -116,6 +116,11 @@ def warn_native_host(directory, group, error):
         )
 
 
+def imports_package(package):
+    spec = importlib.util.find_spec("torch_fl")
+    return spec and spec.origin and Path(spec.origin).resolve().parent == package
+
+
 @contextmanager
 def native_host_coverage(package):
     """Collect a common regression's native-host child before its first import."""
@@ -140,6 +145,7 @@ def native_host_coverage(package):
 @pytest.hookimpl(tryfirst=True)
 def pytest_load_initial_conftests(early_config):
     directory = os.environ.pop("FLAGCICD_COVERAGE_DIR", "")
+    unit_probe = os.environ.pop("FLAGCICD_NVIDIA_UNIT_PROBE", "") == "1"
     if not directory:
         return
     # Only actual groups/per-file runs inherit activation from their runner.
@@ -159,19 +165,22 @@ def pytest_load_initial_conftests(early_config):
         package = Path(manifest["package_root"])
         group_id = os.environ.get("FLAGCICD_GROUP_ID")
         group = os.environ.get("FLAGCICD_TEST_GROUP", "")
-        if os.environ.get("REPORT_PLATFORM") == "nvidia" and group_id in {
+        if unit_probe:
+            directory /= "unit-probe"
+            directory.mkdir(exist_ok=True)
+            if not imports_package(package):
+                raise ValueError("Unit probe imports a different wheel")
+            (directory / "manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+        elif os.environ.get("REPORT_PLATFORM") == "nvidia" and group_id in {
             "common_regression",
             "eager_ops_regression",
         }:
             try:
                 native, native_package = native_host_directory(directory, package)
                 if group_id == "eager_ops_regression":
-                    spec = importlib.util.find_spec("torch_fl")
-                    if (
-                        not spec
-                        or not spec.origin
-                        or Path(spec.origin).resolve().parent != native_package
-                    ):
+                    if not imports_package(native_package):
                         raise ValueError(
                             "Eager operator regression imports a different wheel"
                         )

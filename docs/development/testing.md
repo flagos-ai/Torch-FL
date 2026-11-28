@@ -455,6 +455,16 @@ FlagCICD upload represents the ordinary wheel. Pilot setup warnings are saved
 under `native-host/collection-warnings.txt`. A pilot collection or reporting
 failure leaves the ordinary coverage available.
 
+The NVIDIA coverage artifact also contains `nvidia-experiment.json` after a
+successful comparison. It uses the ordinary wheel's NVIDIA denominator and
+records the incremental executed lines from Native Host and then from the
+installed-wheel unit probe. Only files with the same relative path, SHA-256
+and executable line set contribute to each increment. The JSON records
+skipped files and why they could not be compared. If one input is missing or
+incomplete, its increment is marked unavailable. The unit probe reuses the
+TileOPs runtime and Native Host scalar binding tests in the wheel-only test
+workspace. Its result lives under `unit-probe/` and is diagnostic.
+
 `python_coverage.py merge` combines executed-line sets with coverage.py. JSON
 filenames use portable `torch_fl/...` paths. NVIDIA's published report uses the
 `nvidia-v1` scope: shared and NVIDIA-applicable Python files, including

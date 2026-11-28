@@ -244,6 +244,91 @@ def test_nvidia_pilot_rejects_wrong_eager_wheel_without_losing_ordinary_coverage
     assert [s["group"] for s in metadata["sessions"]] == ["Ordinary regression"]
 
 
+def test_nvidia_experiment_counts_matching_lines_once_and_isolates_unit_probe(
+    native_host_wheel,
+):
+    workdir, reports, environment, install = native_host_wheel
+    ordinary_package = Path(
+        json.loads((reports / "manifest.json").read_text())["package_root"]
+    )
+    native_package = install / "torch_fl"
+    shared = (
+        "def baseline():\n    return 1\n"
+        "def native():\n    return 2\n"
+        "def unit():\n    return 3\n"
+    )
+    for package in (ordinary_package, native_package):
+        (package / "shared.py").write_text(shared)
+    (native_package / "native_only.py").write_text("VALUE = 1\n")
+    (workdir / "test_base.py").write_text(
+        "from torch_fl import shared\ndef test_base(): assert shared.baseline() == 1\n"
+    )
+    (workdir / "test_eager.py").write_text(
+        "from torch_fl import model, native_only, shared\n"
+        "def test_eager():\n"
+        "    assert (shared.baseline(), shared.native()) == (1, 2)\n"
+        "    assert model.eager() == 'eager' and native_only.VALUE == 1\n"
+    )
+    (workdir / "test_units.py").write_text(
+        "from torch_fl import shared\n"
+        "def test_units(): assert (shared.native(), shared.unit()) == (2, 3)\n"
+    )
+    eager = {
+        **_group("Eager operator regression", "test_eager.py"),
+        "group_id": "eager_ops_regression",
+        "environment": {
+            "PYTHONPATH": os.pathsep.join((str(install), environment["PYTHONPATH"]))
+        },
+    }
+    integration = _run(environment, [_group("Ordinary", "test_base.py"), eager])
+    assert integration.returncode == 0, integration.stdout + integration.stderr
+
+    probe = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "test_units.py"],
+        cwd=workdir,
+        env={
+            **environment,
+            "PYTEST_PLUGINS": "flagcicd_coverage",
+            "FLAGCICD_NVIDIA_UNIT_PROBE": "1",
+            "FLAGCICD_TEST_GROUP": "Wheel unit probe",
+        },
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    baseline = _merge(reports, platform="nvidia")
+    path = "torch_fl/shared.py"
+    assert baseline["files"][path]["executed_lines"] == [1, 2, 3, 5]
+    summary = reports / "nvidia-experiment.json"
+    experiment = json.loads(summary.read_text())
+    assert experiment["native_host"]["new_lines_by_file"] == {path: [4]}
+    assert (
+        experiment["native_host"]["omitted_files"]["torch_fl/model.py"]
+        == "different_source"
+    )
+    assert (
+        experiment["native_host"]["omitted_files"]["torch_fl/native_only.py"]
+        == "outside_ordinary_wheel"
+    )
+    assert experiment["unit_probe"]["relative_to"] == "native_host"
+    assert experiment["unit_probe"]["new_lines_by_file"] == {path: [6]}
+    assert (
+        experiment["unit_probe"]["covered_lines"]
+        == baseline["totals"]["covered_lines"] + 2
+    )
+    assert list(reports.rglob("metadata.json")) == [reports / "metadata.json"]
+    complete = next((reports / "unit-probe").glob("coverage-*.complete"))
+    complete.write_text('{"exitcode":1}')
+    assert _merge(reports, platform="nvidia")["totals"] == baseline["totals"]
+    experiment = json.loads(summary.read_text())
+    assert experiment["native_host"]["added_lines"] == 1
+    assert experiment["unit_probe"] == {
+        "available": False,
+        "reason": "incomplete_evidence",
+    }
+
+
 @pytest.fixture
 def scoped_wheel(tmp_path):
     workdir, reports, environment = _setup(tmp_path)
