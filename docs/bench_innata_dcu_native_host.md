@@ -1,13 +1,13 @@
 # InNata-0 torch-fl inference parity on Hygon DCU
 
 **Status: measured parity.** On a single Hygon DCU (DTK 6.3) the `flagos`
-CUDA-boxing route runs InNata-0 inference at the same speed as the vendor
-torch build of the same version: ACWM 30 denoise steps take **19.970 s** on
-torch-fl versus **20.021 s** on vendor torch (three measured rounds, averaged),
-VAE decode **3.871 s** versus **3.877 s**, and RoboDojo 30 steps **23 s**
-versus **23 s**. Full-run dispatch audits report **zero `cpu_fallback`** ops.
-This document records the baseline, the four measured causes, the delivered
-levers, and the parts of the recipe that generalise.
+CUDA-boxing route runs InNata-0 inference at 0.96-1.04x of the vendor torch
+build of the same version across the five fixed requests: ACWM 30 denoise
+steps take **19.970 s** versus **20.021 s** (three measured rounds, averaged),
+the 9-frame Understanding request **4.31 s** versus **4.48 s**, and both WAM
+requests within 3% of vendor. Full-run dispatch audits report **zero
+`cpu_fallback`** ops. This document records the baseline, the four measured
+causes, the delivered levers, and the parts of the recipe that generalise.
 
 Acceptance line: sampling and decode each within 0.95x of vendor torch, with
 no CPU fallback.
@@ -27,8 +27,8 @@ host programs. The same accounting of causes applies to both.
 | flag_gems | 5.4.0rc2 |
 | flash_attn | 2.8.3+das185.dtk2604.torch2100 |
 | DTK | 6.3 (dtk2604) |
-| Model | InNata-0 ACWM and WAM-RoboDojo, bf16, eager |
-| Bench | model CLI, `--benchmark --warmup 1 --num-iterations 3`, one card |
+| Model | InNata-0 Understanding, ACWM, WAM-RoboDojo, WAM-RoboCasa365, bf16, eager |
+| Bench | model CLI; built-in `--benchmark` timer for ACWM, 30-step progress timing for the WAM requests, a per-generate hook for Understanding; one card |
 
 Vendor torch runs from the same image (its DTK wheel, `device=cuda`) with the
 application source copied and the `flagos` device name rewritten to `cuda`.
@@ -36,8 +36,9 @@ Both routes run the same request JSON, seed, and `--no-use-torch-compile`.
 
 ## Baseline
 
-Before the change the ACWM request took **117 s / 30 steps** (3.93 s/it) on
-the `flagos` route.
+Before the change the ACWM request took **117.9 s / 30 steps** (3.93 s/it),
+RoboDojo **28.8 s**, RoboCasa365 **41.4 s**, Understanding BLINK **0.414 s**
+and the 9-frame request **12.14 s** on the `flagos` route.
 
 ## Measured causes
 
@@ -96,24 +97,34 @@ was the ops that stayed on the Python bridge and the missing fused kernel.
 
 ## Results
 
-Interleaved on two cards, same request and seed:
+Same host, same request and seed. Understanding is the per-request
+`model.generate` time (mean of 3-5 runs after a warmup), the generation rows
+are 30-step denoise sampling; neither includes checkpoint loading or VAE
+decode. Relative performance is vendor / version, so values above 1 mean the
+version is faster than vendor.
 
-| Request | Metric | torch-fl | vendor torch | ratio |
-|---|---|---:|---:|---:|
-| ACWM, 30 steps | `generate_samples_from_batch` | 19.970 s | 20.021 s | 1.003 |
-| ACWM | `decode` | 3.871 s | 3.877 s | 1.002 |
-| ACWM | `generate_batch` | 24.547 s | 24.605 s | 1.002 |
-| ACWM | end-to-end (incl. weight load) | 325 s | 321 s | 0.988 |
-| RoboDojo, 30 steps | sampling | 23 s | 23 s | ~0.98 |
-| RoboDojo | end-to-end | 403 s | 400 s | 0.993 |
+| Fixed request | Old torch-fl | Vendor torch 2.10 | Old vs vendor | Optimized torch-fl | Optimized vs vendor |
+|---|---:|---:|---:|---:|---:|
+| Understanding, BLINK image | 0.414 s | 0.168 s | 0.41x | 0.174 s | **0.96x** |
+| Understanding, MMSI 9 frames | 12.14 s | 4.48 s | 0.37x | 4.31 s | **1.04x** |
+| ACWM, 73-frame video | 117.9 s | 20.02 s | 0.17x | 19.97 s | **1.00x** |
+| WAM-RoboDojo, 16x14 actions | 28.8 s | 23.7 s | 0.82x | 24.0 s | **0.99x** |
+| WAM-RoboCasa365, 16x12 actions | 41.4 s | 35.1 s | 0.85x | 36.2 s | **0.97x** |
 
-ACWM sampling improved from 117 s to 20 s (**~5.9x**) against the previous
-delivery image. The weight-load phase (~3-5 min from shared storage) is
-identical on both routes and dominates the end-to-end ratios.
+Supporting ACWM timer readings: `generate_samples_from_batch` 19.970 s versus
+20.021 s, `decode` 3.871 s versus 3.877 s, `generate_batch` 24.547 s versus
+24.605 s; end-to-end (including the shared checkpoint load) 325 s versus
+321 s. ACWM sampling improved **5.9x** over the old delivery image, and the
+old image's Understanding and RoboCasa numbers were re-measured with the same
+instrumentation so the columns are comparable.
 
 Dispatch audit over complete runs: ACWM 161148 dispatch lines, RoboDojo
 25414, `[flagos cpu_fallback]` = **0** in both. The only operators left on the
 Python bridge in the sampling loop are `ge.Tensor` and `abs`, once per step.
+The Understanding path still makes about 50 bridge calls per request
+(`eq.Scalar`, `floor_divide`, `full`, `bitwise_or.Tensor`, `ones`, `max`,
+`argmax` and a few more); moving those to the `cuda` route is the remaining
+lever for the short single-image request, which sits at 0.96x.
 
 Functional output is unchanged within bf16/flash rounding: ACWM stays
 736x544, 73 frames at 16 fps with mean |delta| 0.657/255 against the
