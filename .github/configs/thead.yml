@@ -17,7 +17,7 @@ display_name: PPU
 setup_script: .github/scripts/set_env.sh
 setup_platform: thead
 
-ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260811-ppu-dev
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-thead-ppu2.1.0:2.3.0@sha256:35fcbd0c3777f0af1f936fc725a91be76279ea77849d192ea11d6f90c12172bc
 
 runner_labels:
   - flagcicd-810e
@@ -33,9 +33,9 @@ paths_watch:
   # the allocator header it actually compiles.
   - csrc/runtime/accelerator/nvidia/
   - csrc/runtime/allocator/backends/nvidia_memory.h
+  - .github/requirements-thead.txt
   - .github/scripts/hooks/set_env_thead.sh
   - .github/scripts/set_env_thead.sh
-  - scripts/vendor/bundle_thead_libtorch.sh
 
 container_volumes: []
 # The Qwen3 steps need a checkpoint, and the runner pod was the only place one
@@ -90,6 +90,7 @@ wheel_artifact_name: wheel-ppu
 # that script; the values are this platform's.
 #
 environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
   torch_path_forbidden:
@@ -104,4 +105,4 @@ environment_check:
   forbid_build_kernels:
     - boxing
   flagos_devices:
-    more_than: 0
+    at_least: 2

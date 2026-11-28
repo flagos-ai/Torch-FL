@@ -18,14 +18,9 @@ display_name: CUDA
 setup_script: .github/scripts/set_env.sh
 setup_platform: nvidia
 
-# Carries CUDA PyTorch, the FlagGems C++ operators, and an Ubuntu 24.04 userland
-# recent enough for the FlagTree wheels the job installs (they bind GLIBC_2.38).
-# Both CUDA entry points use it: the integration pipeline takes the digest from
-# this file, and the manual Build Wheel path reaches it through the shared,
-# vendor-agnostic workflows, which also need Python and git in the image.
-# set_env_nvidia.sh checks the image glibc before installing FlagTree, so a future
-# rebuild on an older userland fails naming the requirement.
-ci_image: harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-cuda-dev
+# Both CUDA workflows use this image's development toolkit and isolated CI venv.
+# The hook validates the bundled CPU Torch, FlagTree and FlagGems before build.
+ci_image: harbor.baai.ac.cn/flagos-dev/torch-fl:nvidia-ci-image-2.3.0@sha256:2abb3119ad2ba7513923484428ec402f927cab85cfb969d5415266c3880129a4
 
 # The fleet-wide label for the A100 40G host this lane builds on. The host is
 # shared with vllm-plugin-FL's `a100` lane, which is why the label is not
@@ -44,6 +39,7 @@ paths_watch:
   - csrc/runtime/allocator/backends/nvidia_memory.h
   - .github/scripts/hooks/set_env_nvidia.sh
   - .github/scripts/set_env_nvidia.sh
+  - .github/requirements-nvidia.txt
   - scripts/vendor/with_nvidia_libtorch.sh
 
 container_volumes:
@@ -70,6 +66,7 @@ wheel_artifact_name: wheel-cuda
 # the hand-written heredoc that used to sit here did.
 #
 environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
   torch_path_forbidden:
@@ -82,6 +79,6 @@ environment_check:
     - boxing
   flagtree:
     version_env: FLAGTREE_VERSION
-    version_default: 0.7.0rc2
+    version_default: 0.7.0
     triton_prefix: "3.6."
   model_dir: true

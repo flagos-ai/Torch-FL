@@ -10,6 +10,77 @@ Ascend NPU uses native CANN ACLNN operator kernels, not CUDA boxing. The platfor
 - **Operating System**: Linux (aarch64 verified in CI; x86_64 on real hardware)
 - **Device node**: `/dev/davinci_manager` and `/dev/davinci*` devices must be accessible
 
+CI uses `harbor.baai.ac.cn/flagos-runtime/flagos-runtime-ascend-cann9.0.0-910c:2.3.0@sha256:274909c4a51f99d7aef06349555cd8481e068f40b3213c3facc2d1c90cf155e4`
+directly. The Ascend setup hook creates an isolated venv and copies the runtime's
+CPU PyTorch, FlagTree, FlagGems and NumPy wheels when their versions match the
+CI requirements. Copies are limited to each distribution's recorded files;
+neither the runtime's site-packages directory nor its real `torch_npu` is exposed
+to the CI interpreter. Pip fills missing dependencies without upgrading already
+satisfied packages. The setup log reports reused wheels and local copy time.
+When the workflow delivers the CPU PyTorch, FlagTree and FlagGems wheels, the
+hook installs those three from the wheelhouse after checksum verification.
+Matching NumPy and Python tools can still be copied from the image.
+
+Baseline CI defers FlagCX. Ascend alone also runs a separate, non-required FlagCX
+admission check after the regular integration tests. This check verifies the
+published wheel's exact version and SHA256, inspects ELF dependencies, and blocks
+a wheel requiring `libtorch_npu.so` before importing it. An admitted wheel and
+the ordinary Torch-FL wheel are installed into a temporary package overlay
+visible only to the experimental children. The workers require the FlagCX tier
+of Torch-FL's `flagos` process group and check two-device all-reduce/all-gather.
+No vendor Torch package is added
+to the baseline venv. The `flagcx-experiment-ascend-<attempt>` artifact and job
+summary retain passed, failed or blocked results; baseline success does not imply
+FlagCX support. `blocked` is an environment-policy decision: import and communication
+have not been attempted, and runtime compatibility remains untested. The pinned
+`0.14.0+cann9.0.0.910c` wheel currently requires `libtorch_npu.so` and is blocked
+under this policy. The Torch-FL release wheel declares
+`flagcx==0.14.1+cann9.0.0.910c`. Expanding admission requires a suitable published build or an
+explicitly reviewed integration contract; CI does not supply replacement vendor
+libraries. Torch-FL's own Python `torch_npu` shim is allowed; real vendor modules
+and a loaded `libtorch_npu.so` are excluded from the collective probe.
+
+After the image initializes its SDK environment, the hook
+sets and persists `BASH_ENV=/dev/null` so later workflow shells cannot replay
+the image's profile scripts and replace the CI Python or compiler paths. SDK
+and host-driver library paths prepared by the hook remain exported. CANN/ATB
+settings, including `ASCEND_HOME_PATH`, `ASCEND_OPP_PATH`, `TOOLCHAIN_HOME` and
+`CMAKE_PREFIX_PATH`, are also persisted across workflow steps.
+
+The same reuse process also covers the Python tools listed in
+`.github/requirements-ascend.txt`, including pybind11, PyYAML, packaging,
+SQLAlchemy, the build frontend and pytest. That file is used both for source
+version checks and for pip's remaining installs. Matching installed tools are
+copied; missing, incompatible or non-copyable distributions are supplied by pip.
+Before pip is invoked, the hook checks the installed requirement and its dependency
+closure locally, so a fully prepared tool does not need an index/network probe.
+Pip fills the copied packages' missing dependencies. Unknown wheel-owned files
+outside site-packages cause reuse to be skipped rather than silently omitted;
+console scripts are regenerated for the CI interpreter. System commands such
+as gcc, g++ and make are used from the image directly. CMake is also listed as a
+Python build-system requirement in `pyproject.toml`, so the build frontend needs
+its distribution metadata even when the image already has a cmake executable.
+The workflow installs `pytest-json-report==1.5.0` and `coverage==7.10.7` for
+reporting. It omits the FlagGems Ascend extras to keep vendor `torch_npu` outside
+the venv.
+
+The migration accepts runtime-compatible dependency updates within the declared
+requirements; it does not require every tool version to match the old image.
+The initial runtime validation recorded pybind11 3.0.3. The old-image run
+recorded pybind11 3.1.0.
+CPU Torch 2.10.0, FlagTree 0.7.0+ascend3.5 and FlagGems 5.4.0 remain the CI pins.
+The image digest fixes the SDK and system toolchain used by each run; later
+image upgrades need a new digest and validation.
+
+After all dependency preparation, `pip check` must pass before compilation.
+The hook then logs a JSON environment inventory with Python identity, every
+installed distribution's version/location and the system/build tool paths and
+versions. Earlier log entries identify copied packages and pip fallbacks. These
+records describe the actual prepared environment, rather than promising that
+unbounded tool requirements always resolve to the same version. Recreated
+console commands are registered in the copied distribution's `RECORD` with
+their target paths, hashes and sizes so normal pip uninstallation removes them.
+
 ## Installation
 
 ### 1. Install CPU PyTorch
@@ -351,9 +422,12 @@ The Ascend CI runner image does not carry the Triton toolchain, so
 validated only by hand on hardware that has it installed. The results
 quoted above are point measurements, not a continuously enforced gate.
 
-### Distributed support is architectural only
+### Distributed collectives
 
-Distributed collectives route through FlagCX (recommended) or an HCCL fallback. The routing architecture is in place (see [`docs/architecture/distributed-flagcx.md`](../../architecture/distributed-flagcx.md) lines 204-208), but collective-level CI tests on Ascend hardware do not yet exist. The HCCL fallback and the `flagos→npu` zero-copy view are routing logic, not on-hardware-verified collectives (same document, lines 67-75).
+Distributed collectives route through FlagCX or an HCCL fallback. The optional
+Ascend CI experiment exercises the FlagCX path when the published wheel passes
+admission. Its current pinned wheel is blocked, and the HCCL fallback remains
+outside the experiment. See the [distributed routing design](../../architecture/distributed-flagcx.md).
 
 ## Reference Documentation
 

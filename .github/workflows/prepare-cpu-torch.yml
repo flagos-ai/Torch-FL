@@ -49,8 +49,7 @@ jobs:
             --torch-wheel "$CPU_TORCH_WHEEL_ascend" \
             --sha256 "$CPU_TORCH_WHEEL_SHA256_ascend" \
             --release-wheel flagtree "$FLAGTREE_VERSION_ascend" "$FLAGTREE_INDEX_URL_DEFAULT" "$FLAGTREE_WHEEL_ascend" "$FLAGTREE_WHEEL_SHA256_ascend" \
-            --release-wheel flag-gems "$FLAGGEMS_VERSION_DEFAULT" "$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple" "$FLAGGEMS_WHEEL_ascend" "$FLAGGEMS_WHEEL_SHA256_ascend" \
-            --release-wheel flagcx "$FLAGCX_VERSION_ascend" "$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple" "$FLAGCX_WHEEL_ascend" "$FLAGCX_WHEEL_SHA256_ascend"
+            --release-wheel flag-gems "$FLAGGEMS_VERSION_DEFAULT" "$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple" "$FLAGGEMS_WHEEL_ascend" "$FLAGGEMS_WHEEL_SHA256_ascend"
           suffix="$(python -c 'import uuid; print(uuid.uuid4().hex)')"
           printf 'artifact_name=published-wheels-ascend-%s\n' "$suffix" >> "$GITHUB_OUTPUT"
           printf 'directory=%s\n' "$directory" >> "$GITHUB_OUTPUT"

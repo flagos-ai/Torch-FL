@@ -398,7 +398,7 @@ def test_cache_cleanup_actions_and_setup_share_one_directory(
 
 def test_cuda_installs_cpu_torch_without_bootstrapping_vendor_torch():
     hook = (ROOT / ".github/scripts/hooks/set_env_nvidia.sh").read_text()
-    assert re.search(r"^install_cpu_torch\s*$", hook, re.M)
+    assert re.search(r"^\s*repair_runtime_cpu_torch\s*$", hook, re.M)
     assert "bootstrap_vendor_python" not in hook
     assert "TORCH_FL_VENDOR_TORCH_LIB" in hook or "FLAGOS_VENDOR_TORCH_LIB" in hook
 

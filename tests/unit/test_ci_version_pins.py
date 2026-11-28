@@ -26,6 +26,8 @@ environments), but the pin wiring is fully visible in their source.
 """
 
 import json
+import importlib.machinery
+import importlib.util
 import os
 import re
 import subprocess
@@ -49,6 +51,7 @@ PLATFORMS = [
     "hygon",
     "enflame",
     "iluvatar",
+    "kunlunxin",
     "metax",
     "mthreads",
     "thead",
@@ -217,6 +220,54 @@ def test_the_wheel_declares_the_flagtree_pin_its_platform_script_installs():
         assert f"flagtree=={version}" in _declared(platform), platform
 
 
+@pytest.mark.parametrize("compiler_present", [True, False])
+def test_kunlunxin_wheel_validates_its_xpu_compiler_without_stock_triton(
+    monkeypatch, compiler_present
+):
+    """The installed-wheel gate must accept XPU FlagTree and reject its absence."""
+    globals_ = _setup_globals()
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "kunlunxin")
+    kwargs = globals_["_get_setup_kwargs"]()
+    loader = importlib.machinery.SourceFileLoader(
+        "kunlunxin_preflight_test", str(REPO_ROOT / "scripts/tools/torch-fl-preflight")
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    preflight = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(preflight)
+    versions = {
+        "torch": "2.10.0+cpu",
+        "packaging": "26.3",
+        "flagtree": _pins()["FLAGTREE_VERSION_kunlunxin"],
+        "flag_gems": _pins()["FLAGGEMS_VERSION_DEFAULT"],
+    }
+    monkeypatch.setattr(preflight, "installed_version", versions.get)
+    manifest = preflight.make_manifest(
+        platform="kunlunxin",
+        wheel_version=kwargs["version"],
+        kernels=["vendor", "flaggems"],
+        bundle_libdir="lib",
+        vendor_torch_libraries=False,
+        requirements=kwargs["install_requires"],
+        torch_abi=True,
+    )
+    if not compiler_present:
+        versions.pop("flagtree")
+    errors, _ = preflight.check_environment(
+        manifest,
+        platform="kunlunxin",
+        check_installed=True,
+        check_build_env=True,
+    )
+    if compiler_present:
+        assert not errors, errors
+    else:
+        assert any(
+            error.startswith("Required flagtree==") and error.endswith("missing")
+            for error in errors
+        ), errors
+    assert kwargs["python_requires"] == ">=3.10,<3.11"
+
+
 def test_flag_gems_is_declared_everywhere_at_the_pinned_version():
     pins = _pins()
     version = pins["FLAGGEMS_VERSION_DEFAULT"]
@@ -271,50 +322,24 @@ def test_cuda_package_metadata_makes_flagcx_an_explicit_extra(tmp_path, accelera
     assert "cuda-comm" in metadata.get_all("Provides-Extra", [])
 
 
-@pytest.mark.parametrize(
-    ("enabled", "cuda_version", "expected_code"),
-    [("0", "13.0.88", 0), ("0", "13.3.0", 0), ("1", "13.3.0", 0), ("1", "13.0.88", 1)],
-)
-def test_cuda_flagcx_provisioning_requires_explicit_compatible_opt_in(
-    enabled, cuda_version, expected_code, tmp_path
-):
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_cuda_flagcx_is_deferred_even_with_the_former_opt_in(enabled):
     hook = (HOOKS_DIR / "set_env_nvidia.sh").read_text()
-    branch = hook.split("# CUDA functional CI", 1)[1].split(
-        "# Install the published FlagGems wheel", 1
-    )[0]
-    branch = "# CUDA functional CI" + branch
-    script = (
-        'set -euo pipefail\nsource "$1"\npip_retry() { printf "INSTALL %s\\n" "$*"; }\n'
-        + branch
-        + "\nexport_ci_env FLAGCX_TORCH_BACKEND\n"
-        + '\nprintf "AUTOLOAD=%s TLE=%s\\n" "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" "${USE_TLE_DIST:-}"\n'
+    branch = (
+        "# FlagCX is deferred across CI."
+        + hook.split("# FlagCX is deferred across CI.", 1)[1].split(
+            "# Install the published FlagGems wheel", 1
+        )[0]
     )
     result = subprocess.run(
-        ["bash", "-c", script, "cuda-test", str(SCRIPTS_DIR / "lib/set_env_common.sh")],
-        env={
-            "PATH": "/usr/bin:/bin",
-            "TORCH_FL_CUDA_FLAGCX_WHEEL": enabled,
-            "CUDA_VERSION": cuda_version,
-            "VENV_PYTHON": sys.executable,
-            "FLAGGEMS_INDEX_URL": "https://example.invalid/simple",
-            "FLAGCX_VERSION": _pins()["FLAGCX_VERSION_cuda"],
-            "GITHUB_ENV": str(tmp_path / "github-env"),
-        },
+        ["bash", "-c", "set -euo pipefail\n" + branch + '\ntest "$USE_TLE_DIST" = 0'],
+        env={"PATH": "/usr/bin:/bin", "TORCH_FL_CUDA_FLAGCX_WHEEL": enabled},
         capture_output=True,
         text=True,
     )
-    assert result.returncode == expected_code, result.stdout + result.stderr
-    if enabled == "0":
-        assert "INSTALL" not in result.stdout
-        assert "FlagCX communication is not validated" in result.stdout
-        assert "TLE=0" in result.stdout
-        assert (tmp_path / "github-env").read_text() == "FLAGCX_TORCH_BACKEND=vendor\n"
-    elif expected_code == 0:
-        assert f"flagcx==={_pins()['FLAGCX_VERSION_cuda']}" in result.stdout
-        assert "AUTOLOAD=0" in result.stdout
-    else:
-        assert "INSTALL" not in result.stdout
-        assert "CUDA 13.3" in result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FlagCX communication is deferred" in result.stdout
+    assert "TORCH_FL_CUDA_FLAGCX_WHEEL" not in hook
 
 
 def test_triton_is_declared_only_where_no_flagtree_build_is_pinned():
@@ -388,24 +413,20 @@ def test_requires_python_is_the_platforms_pinned_interpreter():
             assert declared == ">=3.8", (platform, declared)
 
 
-def test_sdk_segments_and_interpreter_pins_describe_published_artifacts():
-    """An SDK segment requires a pin. A wheel tag can be known on its own.
+def test_published_sdk_or_flagtree_cohort_has_an_interpreter_pin():
+    """Interpreter restrictions follow the published compiler or SDK cohort.
 
-    The TsingMicro FlagTree wheel publishes a cp310 tag while the TX SDK
-    release is unknown. Platform-only wheel segments such as mps identify a
-    build without FlagTree.
+    Kunlunxin and TsingMicro depend on cp310-only FlagTree wheels without SDK
+    segments. Apple MPS uses a platform-only segment and has no FlagTree pin.
     """
     pins = _pins()
     for platform in _platforms_in_the_table():
         segment = _wheel_local(platform)
-        interpreter = pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
-        if segment == platform:
-            assert interpreter is None, platform
-            continue
-        if segment:
-            assert interpreter, platform
-        elif interpreter:
-            assert pins.get(f"FLAGTREE_VERSION_{platform}"), platform
+        compiler = pins.get(f"FLAGTREE_VERSION_{_table_vendor(platform)}")
+        needs_pin = bool(compiler) or bool(segment and segment != platform)
+        assert bool(pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")) == needs_pin, (
+            platform
+        )
 
 
 def test_torch_fl_and_flagcx_use_the_same_sdk_segment():

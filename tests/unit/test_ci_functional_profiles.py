@@ -211,10 +211,7 @@ def test_identity_native_import_failure_keeps_diagnostic_json(
 
     monkeypatch.setattr(builtins, "__import__", broken_import)
     output = tmp_path / "hardware.json"
-    monkeypatch.setattr(
-        sys, "argv", ["identity", "--platform", "nvidia", "--output", str(output)]
-    )
-    module.main()
+    module.collect_identity(output, {})
     identity = json.loads(output.read_text())
     assert identity["sdk_version"] == "unknown"
     assert identity["accelerator_count"] == 0
@@ -243,14 +240,45 @@ def test_identity_device_count_failure_keeps_diagnostic_json(
     monkeypatch.setitem(sys.modules, "torch_fl", package)
     monkeypatch.setitem(sys.modules, "torch_fl.flagos", flagos)
     output = tmp_path / "hardware.json"
-    monkeypatch.setattr(
-        sys, "argv", ["identity", "--platform", "nvidia", "--output", str(output)]
-    )
-    module.main()
+    module.collect_identity(output, {})
     identity = json.loads(output.read_text())
     assert identity["sdk_version"] == "unknown"
     assert identity["accelerator_count"] == 0
     assert identity["current_device"] == 0
+
+
+def test_identity_timeout_retains_partial_report_without_blocking_tests(tmp_path):
+    package = tmp_path / "torch_fl"
+    package.mkdir()
+    (package / "__init__.py").write_text("from . import flagos\n")
+    (package / "compatibility.json").write_text('{"build":{"sdk_version":"test"}}')
+    (package / "flagos.py").write_text(
+        "import time\ndef device_count():\n    time.sleep(60)\n"
+    )
+    output = tmp_path / "hardware.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "record_hardware_identity.py"),
+            "--platform",
+            "iluvatar",
+            "--output",
+            str(output),
+            "--timeout",
+            "1",
+        ],
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+    identity = json.loads(output.read_text())
+    assert identity["available"] is False
+    assert identity["sdk_version"] == "test"
+    assert identity["accelerator_count"] is None
+    assert "Collecting hardware identity: accelerator_count" in result.stdout
+    assert "probe did not finish" in result.stdout
 
 
 def test_nightly_keeps_all_existing_groups_and_isolates_cuda_profiling():

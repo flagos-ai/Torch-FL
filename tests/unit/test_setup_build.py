@@ -470,7 +470,7 @@ def test_native_metax_rejects_staged_vendor_libtorch(
         command._build_native_hosts()
 
 
-@pytest.mark.parametrize("vendor", ["metax", "ascend"])
+@pytest.mark.parametrize("vendor", ["metax", "ascend", "dcu", "iluvatar"])
 @pytest.mark.parametrize("different_owner", [False, True])
 def test_native_host_ci_build_excludes_the_default_build(
     tmp_path, clean_kernel_env, vendor, different_owner
@@ -523,12 +523,20 @@ def test_native_host_ci_build_excludes_the_default_build(
         "if sys.argv[1] == 'setup.py':\n"
         "    root = Path.cwd()\n"
         "    assert (root / 'setup.py').read_text() == '# tracked source\\n'\n"
-        "    assert not (root / 'build').exists(), 'inherited build cache'\n"
+        "    assert not (root / 'build/stale.so').exists(), 'inherited build output'\n"
+        "    if os.environ['FLAGOS_ACCELERATOR'] == 'iluvatar':\n"
+        "        cache = (root / 'build/CMakeCache.txt').read_text().strip()\n"
+        "        assert cache == 'CUDA_OCCUPANCY_INCLUDE_DIR:PATH='\n"
+        "    else:\n"
+        "        assert not (root / 'build').exists(), 'inherited build cache'\n"
         "    assert not (root / 'torch_fl/lib_metax').exists(), 'inherited vendor bundle'\n"
         "    assert os.environ['FLAGOS_BUILD_NATIVE_HOST'] == '1'\n"
         "    if os.environ['FLAGOS_ACCELERATOR'] == 'metax':\n"
         "        assert 'FLAGOS_VENDOR_TORCH_LIB' not in os.environ, 'inherited optional vendor cohort'\n"
         "        assert os.environ['FLAGOS_BUILD_VENDOR'] == '1'\n"
+        "    if os.environ['FLAGOS_ACCELERATOR'] == 'dcu':\n"
+        "        assert os.environ['FLAGOS_BUILD_VENDOR'] == '1'\n"
+        "        assert Path(os.environ['FLAGOS_VENDOR_TORCH_LIB']).is_dir()\n"
         "    Path(os.environ['BUILD_RECEIPT']).write_text(str(root))\n"
         "    output = Path(sys.argv[sys.argv.index('--dist-dir') + 1])\n"
         "    with zipfile.ZipFile(output / 'native.whl', 'w') as wheel:\n"
@@ -550,6 +558,7 @@ def test_native_host_ci_build_excludes_the_default_build(
     runner_temp = tmp_path / "runner"
     runner_temp.mkdir()
     receipt = tmp_path / "receipt"
+    github_env = tmp_path / "github-env"
     git_config = tmp_path / "gitconfig"
     git_config.write_text("")
     git_environment = {
@@ -577,6 +586,7 @@ def test_native_host_ci_build_excludes_the_default_build(
         env={
             **git_environment,
             "GITHUB_WORKSPACE": str(workspace),
+            "GITHUB_ENV": str(github_env),
             "RUNNER_TEMP": str(runner_temp),
             "FLAGOS_ACCELERATOR": vendor,
             "FLAGOS_VENDOR_TORCH_LIB": str(workspace / "torch_fl/lib_metax"),
@@ -590,10 +600,13 @@ def test_native_host_ci_build_excludes_the_default_build(
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert git_config.read_text() == ""
-    assert Path(receipt.read_text()).parent == runner_temp
+    build_source = Path(receipt.read_text())
+    assert build_source.parent == runner_temp
+    assert not build_source.exists()
     assert (workspace / "dist/default.whl").read_text() == "previous default build\n"
     assert (workspace / "torch_fl/lib_metax/libtorch_cuda.so").is_file()
     evidence = runner_temp / "torch-fl-native-host-evidence"
+    assert github_env.read_text() == f"TORCH_FL_NATIVE_HOST_EVIDENCE={evidence}\n"
     assert (evidence / "native.whl").is_file()
     wheel_record = json.loads((evidence / "wheel.json").read_text())
     assert wheel_record["wheel"] == "native.whl"

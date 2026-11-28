@@ -4,7 +4,20 @@
 
 The NVIDIA wheel uses FlagGems and the CUDA runtime. Operators outside the configured routes reach CPU fallback.
 
-**Status:** Stable. CI builds and validates the **default** wheel — FlagGems-primary, no boxing kernels, no bundled `libtorch_cuda.so` — running the FlagGems operator suite, factory ops, profiler parity, and Qwen3-0.6B inference/training on 8-GPU A100 runners. The boxing build is not on the CUDA lane.
+CI builds and tests the ordinary FlagGems-primary wheel on A100 runners.
+
+## CI environment preparation
+
+The lane retains `harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-cuda-dev`.
+It uses the [shared CI preparation](../../development/ci-controls.md#runtime-environment-preparation)
+for fresh isolated venvs, compatible Python-package reuse, missing-package
+installation, download-cache recovery and final environment reports.
+`.github/requirements-nvidia.txt` retains CUDA's existing build-frontend
+restrictions; other small components follow the common version ranges.
+Python 3.12, CPU Torch 2.10, FlagTree and FlagGems pins, image-provided
+CUDA libraries, native FlagGems selection and hardware test groups are retained.
+No runtime-image migration or source-built Torch is introduced. FlagCX
+installation and collective validation remain deferred.
 
 ## Prerequisites
 

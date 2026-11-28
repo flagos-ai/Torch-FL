@@ -8,6 +8,39 @@ The ordinary MetaX wheel uses FlagGems on the MACA runtime. The optional native-
 
 ## Prerequisites
 
+### Runtime-image CI
+
+The MetaX CI lane uses the official
+[`metax-maca3.8.1.3` runtime 2.3.0](https://flagos-ai.github.io/release-info/zh-cn/runtime/metax-maca3.8.1.3/),
+pinned by OCI-index digest in `.github/configs/metax.yml`. The release lists
+host driver 3.9.6; replacing the image does not replace the host kernel driver.
+The hook prints `mx-smi` when available for hardware-runner verification.
+
+The image carries Python 3.12 and vendor Torch 2.10.0+metax3.8.1.0. CI
+creates a separate job-owned venv with CPU Torch 2.10.0+cpu. The shared
+`seed_runtime.py` copies compatible individual distributions; requirements in
+`.github/requirements-metax.txt` are checked before pip supplies missing tools
+or dependencies. GCC, G++, make, MACA and cu-bridge remain image-provided.
+FlagTree remains pinned to 0.7.0.post2+metax3.6: the image's older
+0.7.0+metax3.6 is not reused or substituted for that pin. Torch, FlagTree and
+FlagGems are consumed as published wheels.
+
+Vendor Torch provenance is read from distribution metadata without importing
+its Python package. Its existing libtorch input, native prebuild, bundling
+order and import-order checks are retained. The hook states the CUDA asset
+and shim settings previously supplied by the development image. Backend autoload
+stays disabled during setup and wheel building. FlagCX remains deferred under
+the functional CI policy.
+
+The hook verifies MACA using `/opt/maca/Version.txt` before recording SDK
+3.8.1.3 and records the vendor Torch version separately in the compatibility
+manifest. The wheel label follows the existing shared `maca3.8.1.3` setting,
+rather than the old image's inherited `metax3.8.0` override. Image `BASH_ENV`
+reactivation is disabled and persisted across steps; runtime site-packages are
+never added to the venv. The lane uses the same cache recovery helper as the
+other migrated platforms. Provisioning runs `pip check` and logs the prepared
+environment before native compilation. Hardware acceptance requires a passing integration run on the new image.
+
 ### Build Host (Wheel Builder)
 
 Requires the full MetaX SDK and a `torch+metax` wheel to extract the forked libtorch:

@@ -27,6 +27,9 @@ else
   evidence="${RUNNER_TEMP:?}/torch-fl-native-host-evidence"
   mkdir -p "$evidence"
 fi
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  printf 'TORCH_FL_NATIVE_HOST_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+fi
 echo "Native host evidence: $evidence"
 preflight="$GITHUB_WORKSPACE/scripts/tools/torch-fl-preflight"
 record_wheel="$GITHUB_WORKSPACE/.github/scripts/record_native_host_wheel.py"
@@ -42,6 +45,7 @@ if [[ "${1:-}" == --check-installed ]]; then
 fi
 
 build_source="$(mktemp -d "$RUNNER_TEMP/torch-fl-native-host-source.XXXXXX")"
+trap 'rm -rf -- "$build_source"' EXIT
 # The container user can differ from the checkout owner; trust only this read.
 git -c safe.directory="$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$build_source"
 cd "$build_source"
@@ -62,6 +66,7 @@ fi
 unset FLAGOS_FORCE_BACKEND FLAGOS_BACKEND_CONFIG FLAGOS_METAX_CUDART_SHIM
 
 source "$GITHUB_WORKSPACE/.github/scripts/lib/set_env_common.sh"
+prepare_ci_cmake_cache "$build_source/build"
 PIP_RETRY_PYTHON="$(command -v python)" pip_retry 'Cython==3.2.4'
 python setup.py bdist_wheel --dist-dir "$evidence" 2>&1 | tee "$evidence/build.log"
 python "$preflight" --wheel "$evidence"/*.whl \
